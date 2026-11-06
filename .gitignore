@@ -1,0 +1,27 @@
+# Rust
+/target/
+Cargo.lock
+
+# Node / Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Tauri
+src-tauri/target/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+bun.lock*
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Orion local state
+.orion/
+devices.json

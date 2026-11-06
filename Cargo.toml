@@ -1,0 +1,49 @@
+[workspace]
+members = [
+    "crates/orion-core",
+    "src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Orion Contributors"]
+license = "MIT"
+repository = "https://github.com/orion-ai/orion"
+rust-version = "1.86.0"
+
+[workspace.dependencies]
+tokio = { version = "1.43", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2.0"
+anyhow = "1.0"
+portable-pty = "=0.8.1"
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+futures = "0.3"
+uuid = { version = "=1.11.0", features = ["v4", "serde"] }
+chrono = { version = "=0.4.38", features = ["serde"] }
+notify = "=6.1.1"
+parking_lot = "0.12"
+subtle = "2.6"
+
+# Pinned for Rust 1.86.0 compatibility
+time = "=0.3.36"
+darling = "=0.20.10"
+darling_core = "=0.20.10"
+darling_macro = "=0.20.10"
+encoding_rs = "=0.8.35"
+plist = "=1.7.1"
+tauri = "=2.0.6"
+tauri-runtime = "=2.0.6"
+tauri-runtime-wry = "=2.0.6"
+tauri-utils = "=2.0.6"
+tauri-codegen = "=2.0.6"
+tauri-macros = "=2.0.6"
+tauri-build = "=2.0.5"
+tauri-plugin = "=2.0.4"

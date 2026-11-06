@@ -1,0 +1,48 @@
+@layer base {
+  :root {
+    --bg-ground: #120f18;
+    --bg-surface: #191522;
+    --bg-surface-elevated: #221c2e;
+    --border-subtle: #2a2436;
+    --border-strong: #3b324c;
+
+    --fg-primary: #ede8f5;
+    --fg-secondary: #9f94b0;
+    --fg-muted: #6b6378;
+
+    /* Single Chrome Accent */
+    --accent-rose: #e07a93;
+    --accent-rose-hover: #e88fa5;
+    --accent-rose-muted: rgba(224, 122, 147, 0.15);
+
+    /* Semantic Agent State Indicators */
+    --status-idle: #6b6378;
+    --status-run: #38bdf8;
+    --status-input: #fbbf24;
+    --status-done: #34d399;
+    --status-error: #f87171;
+
+    /* Touch Ergonomics */
+    --touch-target: 44px;
+    --key-bar-height: 48px;
+  }
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-muted);
+}
