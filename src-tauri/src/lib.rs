@@ -6,7 +6,7 @@ use orion_core::protocol::{AgentKind, DiscoveredAgent, TerminalSize, WorkspaceIn
 use orion_core::pty::PtySession;
 use orion_core::workspace::WorkspaceManager;
 use parking_lot::RwLock;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
