@@ -9,6 +9,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "serve": "cargo run -p orion-core --bin orion",
+    "check": "cargo check -p orion-core && tsc --noEmit",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit"
   },
