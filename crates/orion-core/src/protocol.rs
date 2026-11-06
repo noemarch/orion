@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Supported AI Agent kinds in Orion.
+/// Orion orchestrates AI agent CLIs exclusively — never raw shell sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
@@ -16,7 +17,6 @@ pub enum AgentKind {
     Pi,
     Hermes,
     Devin,
-    Shell,
 }
 
 impl AgentKind {
@@ -24,7 +24,7 @@ impl AgentKind {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
-            Self::Antigravity => "Antigravity",
+            Self::Antigravity => "Antigravity (agy)",
             Self::OpenCode => "OpenCode",
             Self::Cursor => "Cursor CLI",
             Self::Grok => "Grok Build",
@@ -33,7 +33,6 @@ impl AgentKind {
             Self::Pi => "pi",
             Self::Hermes => "Hermes",
             Self::Devin => "Devin CLI",
-            Self::Shell => "Terminal Shell",
         }
     }
 
@@ -50,16 +49,6 @@ impl AgentKind {
             Self::Pi => "pi",
             Self::Hermes => "hermes",
             Self::Devin => "devin",
-            Self::Shell => {
-                #[cfg(windows)]
-                {
-                    "powershell.exe"
-                }
-                #[cfg(not(windows))]
-                {
-                    "bash"
-                }
-            }
         }
     }
 }
@@ -114,6 +103,7 @@ pub enum TabLayout {
     Grid,
 }
 
+/// A pane is strictly a running AI Agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneInfo {
     pub id: String,

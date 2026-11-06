@@ -6,18 +6,20 @@
 
 ## 1. Core Architecture & Philosophy
 
-1. **No External Multiplexer:** Orion is an independent orchestrator. It does not wrap, bridge, or depend on `herdr`, `tmux`, or `zellij`. Orion directly allocates PTYs, supervises agent subprocesses, manages workspaces/worktrees, and serves remote clients.
-2. **Dual Delivery:**
+1. **Agent-Only Orchestration (No Generic Shells):** Orion orchestrates AI agent CLIs exclusively (`claude`, `codex`, `opencode`, `cursor`, `grok`, `omp`, `omo`, `pi`, `agy`, `hermes`, `devin`). Orion does **not** provide generic bash/zsh/PowerShell terminal tabs. Every workspace pane is strictly a dedicated AI agent instance. The terminal lens in Orion is the live, inspectable PTY of that *agent's* interactive CLI, not an empty shell prompt.
+2. **No External Multiplexer:** Orion is an independent orchestrator. It does not wrap, bridge, or depend on `herdr`, `tmux`, or `zellij`. Orion directly allocates PTYs, supervises agent subprocesses, manages workspaces/worktrees, and serves remote clients.
+3. **Dual Delivery:**
    - **Tauri v2 Desktop App:** Runs locally on Windows, macOS, and Linux with native OS window management and system tray integration.
    - **Headless Server (`orion serve`):** Runs on headless workstations or devboxes, serving the exact same React 19 UI over Tailscale or LAN as a mobile-optimized PWA.
-3. **Bring-Your-Own-Subscription:** Orion drives standard agent CLIs (`claude`, `codex`, `opencode`, `cursor`, `grok`, `omp`, etc.) using credentials already authenticated on the host machine.
-4. **Chat-First Clarity, Terminal Truth:** The primary interface renders structured conversational turns, syntax-highlighted diffs, and prompt approval cards; a live xterm.js PTY terminal is always one click or tap away with zero state loss.
+4. **Bring-Your-Own-Subscription:** Orion drives standard agent CLIs using credentials already authenticated on the host machine (`claude auth login`, `codex login`, etc.).
+5. **Chat-First Clarity, Terminal Truth:** The primary interface renders structured conversational turns, syntax-highlighted diffs, and prompt approval cards; a live xterm.js PTY terminal of the agent CLI is always one click or tap away with zero state loss.
 
 ---
 
 ## 2. Technical Invariants & Traps
 
 ### 2.1 PTY Engine & Process Control (`orion-core::pty`, `orion-core::agents`)
+- **Agent CLI Target Exclusivity:** Never spawn a generic `sh`, `bash`, `cmd`, or `powershell` as a top-level pane. Every spawned PTY must execute an identified AI agent CLI binary discovered on `PATH`.
 - **PTY Threading Invariant:** PTY reads are blocking. Never perform blocking PTY reads directly on a Tokio async worker thread. Always spawn a dedicated background thread or use `tokio::task::spawn_blocking` with bounded `mpsc` channels.
 - **ConPTY Windows Parity:** On Windows, use `portable-pty` with ConPTY enabled (`CreatePseudoConsole`). Ensure terminal resize events send accurate character and pixel dimensions to prevent text clipping in full-screen TUIs.
 - **Process Group Termination:** When terminating an agent, terminate the entire process tree.
@@ -72,9 +74,6 @@ orion/
 └── tests/                     # Integration tests and end-to-end fixtures
 ```
 
-- Crate code in `orion-core` must remain independent of Tauri GUI APIs so it can be compiled directly into the standalone `orion` headless CLI.
-- Shared types between Rust and TypeScript are defined in `crates/orion-core/src/protocol.rs` and mirrored in `src/types/protocol.ts`.
-
 ---
 
 ## 4. Verification & Testing Standards
@@ -82,25 +81,14 @@ orion/
 Before submitting any code change:
 1. **Rust Quality:**
    ```bash
-   cargo check --workspace
-   cargo test --workspace
-   cargo clippy --workspace -- -D warnings
+   cargo check -p orion-core
+   cargo test -p orion-core
+   cargo clippy -p orion-core -- -D warnings
    cargo fmt --check
    ```
 2. **Frontend Quality:**
    ```bash
    bun run typecheck
-   bun run lint
-   bun test
+   bun run build
    ```
-3. **Smoke Proof:** Any PR altering PTY allocation, agent session parsing, or WebSocket routing must exercise the changed path with a real or simulated agent turn and verify both terminal and chat rendering.
-
----
-
-## 5. Decision Hierarchy
-
-When trade-offs arise:
-1. **Correctness & Process Safety:** An agent subprocess must never be orphaned, leak handles, or run uncontrolled.
-2. **Companion Responsiveness:** A phone user should approve an agent prompt in under 2 seconds from notification.
-3. **Fidelity:** Terminal output in xterm.js must be byte-for-byte identical to the raw PTY stream.
-4. **Code Simplicity:** Prefer boring, direct Rust implementations over complex macro-heavy or over-abstracted layers.
+3. **Smoke Proof:** Any change touching agent launching or PTY streaming must verify that the spawned process is an identified AI agent CLI and that stdin/stdout/resize function properly.

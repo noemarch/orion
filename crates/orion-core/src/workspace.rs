@@ -23,8 +23,13 @@ impl WorkspaceManager {
         }
     }
 
-    /// Create a new workspace rooted at a working directory.
-    pub fn create_workspace(&self, name: &str, working_dir: &str) -> WorkspaceInfo {
+    /// Create a new workspace rooted at a working directory, launched with a specific AI Agent.
+    pub fn create_workspace(
+        &self,
+        name: &str,
+        working_dir: &str,
+        agent_kind: AgentKind,
+    ) -> WorkspaceInfo {
         let ws_id = Uuid::new_v4().to_string();
         let tab_id = Uuid::new_v4().to_string();
         let pane_id = Uuid::new_v4().to_string();
@@ -32,8 +37,8 @@ impl WorkspaceManager {
         let initial_pane = PaneInfo {
             id: pane_id.clone(),
             tab_id: tab_id.clone(),
-            title: "Terminal".to_string(),
-            agent_kind: AgentKind::Shell,
+            title: agent_kind.display_name().to_string(),
+            agent_kind,
             status: AgentStatus::Idle,
             cwd: working_dir.to_string(),
             pid: None,
@@ -45,7 +50,7 @@ impl WorkspaceManager {
 
         let initial_tab = TabInfo {
             id: tab_id.clone(),
-            title: "Main".to_string(),
+            title: agent_kind.display_name().to_string(),
             panes: vec![initial_pane],
             active_pane_id: Some(pane_id),
             layout: TabLayout::Single,
@@ -75,7 +80,7 @@ impl WorkspaceManager {
         self.workspaces.read().get(id).cloned()
     }
 
-    /// Split a pane inside a tab.
+    /// Split an agent pane inside a tab.
     pub fn split_pane(
         &self,
         workspace_id: &str,

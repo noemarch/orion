@@ -1,6 +1,7 @@
 /**
  * Orion Wire Protocol & Domain Types
  * Shared between Rust backend (Tauri IPC / Axum WebSockets) and React 19 frontend.
+ * Orion orchestrates AI agent CLIs exclusively — never raw shell sessions.
  */
 
 export type AgentKind =
@@ -14,18 +15,17 @@ export type AgentKind =
   | "omo"
   | "pi"
   | "hermes"
-  | "devin"
-  | "shell";
+  | "devin";
 
 export type AgentStatus = "idle" | "running" | "needsinput" | "done" | "error";
 
 export interface DiscoveredAgent {
   kind: AgentKind;
-  name: String;
-  command: String;
-  path: String | null;
+  name: string;
+  command: string;
+  path: string | null;
   installed: boolean;
-  version: String | null;
+  version: string | null;
 }
 
 export type TabLayout = "single" | "splithorizontal" | "splitvertical" | "grid";

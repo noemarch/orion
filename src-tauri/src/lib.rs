@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use orion_core::agents::AgentRegistry;
-use orion_core::protocol::{DiscoveredAgent, TerminalSize, WorkspaceInfo};
+use orion_core::protocol::{AgentKind, DiscoveredAgent, TerminalSize, WorkspaceInfo};
 use orion_core::pty::PtySession;
 use orion_core::workspace::WorkspaceManager;
 use parking_lot::RwLock;
@@ -21,8 +21,15 @@ fn discover_agents() -> Vec<DiscoveredAgent> {
 }
 
 #[tauri::command]
-fn create_workspace(state: State<'_, AppState>, name: String, working_dir: String) -> WorkspaceInfo {
-    state.workspace_manager.create_workspace(&name, &working_dir)
+fn create_workspace(
+    state: State<'_, AppState>,
+    name: String,
+    working_dir: String,
+    agent_kind: AgentKind,
+) -> WorkspaceInfo {
+    state
+        .workspace_manager
+        .create_workspace(&name, &working_dir, agent_kind)
 }
 
 #[tauri::command]

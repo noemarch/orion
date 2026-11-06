@@ -21,7 +21,6 @@ impl AgentRegistry {
             AgentKind::Pi,
             AgentKind::Hermes,
             AgentKind::Devin,
-            AgentKind::Shell,
         ];
 
         kinds.iter().map(|kind| Self::inspect_agent(*kind)).collect()
