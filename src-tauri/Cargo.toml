@@ -15,12 +15,13 @@ tauri-build = { workspace = true, features = [] }
 [dependencies]
 orion-core = { path = "../crates/orion-core" }
 tauri = { workspace = true, features = [] }
-tauri-plugin-shell = "=2.0.2"
-tauri-plugin-fs = "=2.0.2"
-tauri-plugin-dialog = "=2.0.2"
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+parking_lot = { workspace = true }
