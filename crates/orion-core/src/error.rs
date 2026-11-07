@@ -17,6 +17,12 @@ pub enum OrionError {
     #[error("Pane not found: {0}")]
     PaneNotFound(String),
 
+    #[error("Pane error: {0}")]
+    Pane(String),
+
+    #[error("Store error: {0}")]
+    Store(String),
+
     #[error("Session transcript error: {0}")]
     Transcript(String),
 
