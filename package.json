@@ -3,41 +3,57 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Orion - Local-first AI agent orchestrator and control deck for desktop and mobile",
+  "description": "Orion - local-first AI agent orchestrator and multi-device control panel",
   "license": "MIT",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "dev": "bun --bun vite",
+    "build": "bun --bun vite build",
     "preview": "vite preview",
     "serve": "cargo run -p orion-core --bin orion",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tools.json",
     "check": "cargo check -p orion-core && tsc --noEmit",
-    "tauri": "tauri",
-    "typecheck": "tsc --noEmit"
+    "test": "bun test",
+    "tauri": "tauri"
   },
   "dependencies": {
+    "@heroui/react": "^3.2.6",
+    "@heroui/styles": "^3.2.6",
+    "@legendapp/list": "3.3.5",
+    "@pierre/diffs": "1.5.2",
+    "@tanstack/highlight": "^1.0.0",
     "@tauri-apps/api": "^2.0.0",
-    "@tauri-apps/plugin-shell": "^2.0.0",
-    "@tauri-apps/plugin-fs": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
-    "@xterm/xterm": "^5.5.0",
+    "@tauri-apps/plugin-fs": "^2.0.0",
+    "@tauri-apps/plugin-shell": "^2.0.0",
     "@xterm/addon-fit": "^0.10.0",
-    "@xterm/addon-web-links": "^0.11.0",
-    "@xterm/addon-unicode-graphemes": "^0.4.0",
-    "lucide-react": "^1.47.0",
+    "@xterm/addon-unicode-graphemes": "0.4.0",
+    "@xterm/addon-web-links": "0.11.0",
+    "@xterm/xterm": "5.5.0",
     "katex": "^0.18.9",
+    "lucide-react": "^1.47.0",
     "mermaid": "^12.1.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "qrcode-generator": "^2.0.4",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.0.0",
+    "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.0.0",
+    "@types/bun": "^1.1.14",
     "@types/katex": "^0.16.8",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.3.4",
-    "tailwindcss": "^4.0.0",
-    "typescript": "^5.7.0",
-    "vite": "^6.2.0"
-  }
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/react-test-renderer": "^19.1.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "react-test-renderer": "19.3.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "typescript-api": "npm:typescript@^6.0.3",
+    "vite": "^8.3.4"
+  },
+  "patchedDependencies": {
+    "@legendapp/list@3.3.5": "patches/@legendapp%2Flist@3.3.5.patch",
+    "@xterm/xterm@5.5.0": "patches/@xterm%2Fxterm@5.5.0.patch"
+  },
+  "packageManager": "bun@1.4.2"
 }
