@@ -18,8 +18,8 @@
 
 Orion is a standalone, local-first control center for autonomous and interactive AI coding agents. Run multiple agents in parallel across separate git worktrees, monitor their thoughts and tool executions as clean conversational chat turns, approve permissions with a tap from your phone, and instantly drop into live terminal sessions whenever you need low-level control.
 
-Orion brings the best concepts of modern agent tools (T3 Code, Paseo, Orbit) together into an independent, high-performance architecture:
-- **Zero Daemon Dependencies:** Does not depend on `herdr`, `tmux`, or external terminal multiplexers. Orion natively allocates PTYs and supervises processes using Rust.
+Orion brings the best concepts of modern agent tooling together into an independent, high-performance architecture:
+- **Zero Daemon Dependencies:** Does not depend on external terminal multiplexers. Orion natively allocates PTYs and supervises processes using Rust.
 - **Tauri v2 Desktop App:** Lightweight native desktop application for macOS, Windows, and Linux.
 - **Mobile Companion PWA:** Zero-install mobile client served over your private Tailscale tailnet (`tailscale serve`) or local Wi-Fi with instant QR code pairing.
 - **Bring Your Own Subscriptions:** Works directly with the agent CLIs you already have authenticated (`claude`, `codex`, `opencode`, `cursor`, `grok`, etc.). No extra tokens or subscription markups.

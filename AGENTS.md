@@ -7,7 +7,7 @@
 ## 1. Core Architecture & Philosophy
 
 1. **Agent-Only Orchestration (No Generic Shells):** Orion orchestrates AI agent CLIs exclusively (`claude`, `codex`, `opencode`, `cursor`, `grok`, `omp`, `omo`, `pi`, `agy`, `hermes`, `devin`). Orion does **not** provide generic bash/zsh/PowerShell terminal tabs. Every workspace pane is strictly a dedicated AI agent instance. The terminal lens in Orion is the live, inspectable PTY of that *agent's* interactive CLI, not an empty shell prompt.
-2. **No External Multiplexer:** Orion is an independent orchestrator. It does not wrap, bridge, or depend on `herdr`, `tmux`, or `zellij`. Orion directly allocates PTYs, supervises agent subprocesses, manages workspaces/worktrees, and serves remote clients.
+2. **No External Multiplexer:** Orion is an independent orchestrator. It does not wrap, bridge, or depend on any external terminal multiplexer. Orion directly allocates PTYs, supervises agent subprocesses, manages workspaces/worktrees, and serves remote clients.
 3. **Dual Delivery:**
    - **Tauri v2 Desktop App:** Runs locally on Windows, macOS, and Linux with native OS window management and system tray integration.
    - **Headless Server (`orion serve`):** Runs on headless workstations or devboxes, serving the exact same React 19 UI over Tailscale or LAN as a mobile-optimized PWA.

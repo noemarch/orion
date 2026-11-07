@@ -2,18 +2,20 @@
 
 > **Product Definition:** Orion is an open-source, local-first AI agent orchestrator and multi-device control panel. It runs on your computer (desktop app via Tauri v2 or headless daemon) and allows you to monitor, guide, approve, and command terminal AI coding agents (Claude Code, Codex, Antigravity, OpenCode, Cursor CLI, Grok, omp, omo, pi, Hermes, Devin) from desktop or mobile (installable PWA over Tailscale/LAN).
 >
-> **Core Architectural Evolution:** Orion replaces external multiplexer dependencies (herdr daemon) with an embedded, native Rust core (`orion-core`) that directly owns PTY allocation, process supervision, transcript parsing, and remote streaming.
+> **Core Architectural Evolution:** Orion replaces external multiplexer dependencies with an embedded, native Rust core (`orion-core`) that directly owns PTY allocation, process supervision, transcript parsing, and remote streaming.
+>
+> **Executable plan:** milestones, definitions of done and gates live in [`docs/roadmap.md`](docs/roadmap.md). This document is the architecture overview.
 
 ---
 
 ## 1. Executive Summary & Thesis
 
-### 1.1 The Problem with the Herdr / Orbit Architecture
-Orbit achieved exceptional companion ergonomics (phone-first chat turns, interactive prompt cards, live xterm.js parity, Tailscale pairing) but was fundamentally limited by its architecture:
-1. **External Process Coupling:** Orbit was merely a bridge to the `herdr` multiplexer daemon over a Unix domain socket. If herdr crashed, stalled, or desynchronized, Orbit had no recourse.
-2. **Runtime Impedance Mismatch:** Bun panics when loading `node-pty`. This forced Orbit into a complex multi-process split (Bun backend + Node PTY sidecar on POSIX; screen-mirroring polling on Windows).
-3. **Platform Inequity:** On Windows, terminal attach was unsupported in herdr, requiring slow, fixed-grid screen scraping instead of raw PTY streaming.
-4. **Single-RPC Socket Fragility:** Herdr closed its socket after every single RPC response, adding connection churn and requiring an open event subscription loop.
+### 1.1 The Problem with the Legacy Bridge Architecture
+The predecessor client achieved exceptional companion ergonomics (phone-first chat turns, interactive prompt cards, live xterm.js parity, Tailscale pairing) but was fundamentally limited by its architecture:
+1. **External Process Coupling:** The predecessor was merely a bridge to an external multiplexer daemon over a Unix domain socket. If that daemon crashed, stalled, or desynchronized, it had no recourse.
+2. **Runtime Impedance Mismatch:** Bun panics when loading `node-pty`. This forced it into a complex multi-process split (Bun backend + Node PTY sidecar on POSIX; screen-mirroring polling on Windows).
+3. **Platform Inequity:** On Windows, terminal attach was unsupported in the legacy daemon, requiring slow, fixed-grid screen scraping instead of raw PTY streaming.
+4. **Single-RPC Socket Fragility:** The daemon closed its socket after every single RPC response, adding connection churn and requiring an open event subscription loop.
 
 ### 1.2 The Orion Solution
 Orion is reconstructed as a **self-contained, unified system**:
@@ -26,18 +28,15 @@ Orion is reconstructed as a **self-contained, unified system**:
 
 ---
 
-## 2. Competitive Positioning & Inspiration
+## 2. Positioning
 
-| Dimension | Orion | T3 Code | Paseo | Orbit (Legacy) | Zed Agent Panel |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Primary Architecture** | Tauri v2 + Rust Core + React 19 | Electron + Vite + Local Server | Custom Daemon + Expo Mobile / Electron | herdr plugin (Bun + Node) | Native Rust Editor (GPUI) |
-| **Multiplexer Dependency** | **None** (Embedded PTY Engine) | None (Wraps agent CLIs) | None (Self-hosted daemon) | **Strict dependency on herdr** | None (Editor-native) |
-| **Desktop App** | Native Tauri v2 (Win / Mac / Linux) | Electron | Electron / Native macOS | Web PWA only | Native macOS / Linux / Win preview |
-| **Mobile Access** | Installable PWA with Touch Key Bar | Native App (iOS / Android) | Native App (iOS / Android) | Installable PWA | None |
-| **Remote Gateway** | Built-in Tailscale Serve + LAN Auth | Local server | Hosted or direct E2EE relay | Tailscale Serve / SSH via herdr | None (Desktop only) |
-| **Agent Support** | Claude, Codex, Agy, OpenCode, Cursor, Grok, omp, omo, pi | Claude, Codex, Cursor, Grok, OpenCode, Agy, fx | Claude, Codex, Copilot, OpenCode, Pi, Agy | Claude, Codex, omp, omo, pi, OpenCode, Grok, Agy | Claude, Codex, Gemini, OpenCode via ACP |
-| **Terminal View** | Raw xterm.js live PTY toggle | Embedded web terminal | Embedded terminal tabs | xterm.js live pane | Native terminal tabs |
-| **License & Freedom** | MIT | MIT (very early, closed PRs) | Apache-2.0 | MIT | GPL-3.0 / Apache-2.0 |
+Orion is a self-contained, local-first orchestrator: a single native Rust core owns PTY allocation, process supervision, transcript parsing and remote streaming, with no external terminal multiplexer to install, supervise or synchronize with.
+
+* **One runtime, both surfaces:** the embedded engine serves the native desktop app and the browser/PWA from the same wire contract, so there is one source of truth for session state.
+* **No bridge, no fidelity gap:** Orion holds the pty and the session store itself, so there is no second authority to desynchronize from and no platform where attach is unavailable.
+* **Bring your own agents:** every authenticated agent CLI on `PATH` is orchestrated directly; no tokens, subscriptions or relays are resold.
+* **Local-first by default:** no telemetry, no hosted relay, no third-party data path; remote access stays on the local network or a private tailnet.
+* **Native where it matters:** a Tauri v2 desktop shell (tray, notifications, single-instance, signed installer) over a React 19 UI, plus an installable mobile PWA with a touch key bar.
 
 ---
 
@@ -141,7 +140,7 @@ graph TB
   * Integrated Git diff inspector (Unified & Split) with syntax highlighting.
 
 ### 4.6 Subsystem F: Remote Gateway, Tailscale & PWA Companion
-* **Role:** Deliver the exact Orbit mobile experience without requiring herdr.
+* **Role:** Deliver the same mobile experience without requiring an external multiplexer.
 * **Implementation:**
   * Embedded Axum HTTP + WebSocket server listening on `127.0.0.1:7317` (configurable).
   * Auto-detect `tailscale`: Invoke `tailscale serve --https=...` to generate secure MagicDNS ingress and QR code.
@@ -259,79 +258,18 @@ C:\rust-projects\orion\
 
 ---
 
-## 6. Detailed Implementation Phases
+## 6. Milestones
 
-### Phase 0: Scaffolding & Core Foundations
-* [x] Initialize Git repository in `C:\rust-projects\orion`.
-* [ ] Write root `Cargo.toml` and workspace definitions.
-* [ ] Create `crates/orion-core` crate with domain models, error handling, and type declarations.
-* [ ] Configure Tauri v2 in `src-tauri` (`tauri.conf.json`, permissions, build script).
-* [ ] Scaffold React 19 + TypeScript + Vite + Tailwind CSS v4 in root.
-* [ ] Establish mirrored wire protocol types in Rust (`serde`) and TypeScript.
-
-### Phase 1: Native PTY & Agent Process Supervisor
-* [ ] Implement `orion_core::pty::PtySession` using `portable-pty`.
-* [ ] Implement Windows ConPTY and POSIX OpenPTY adapters.
-* [ ] Implement bidirectional async channel streaming (tokio mpsc).
-* [ ] Implement Agent Discovery: scan PATH for `claude`, `codex`, `opencode`, `cursor`, `grok`, etc.
-* [ ] Implement Process Supervisor: launch agent in dedicated PTY, configure environment, attach lifecycle monitoring, handle clean shutdown.
-* [ ] Verify PTY terminal streaming with raw bash / powershell / cmd.
-
-### Phase 2: Transcript Parsers & Live Card Interceptor
-* [ ] Implement Claude Code JSONL watcher: tail live session file, parse turns, extract tool executions, code diffs, and todo plans.
-* [ ] Implement Codex transcript watcher: extract approvals and commentary.
-* [ ] Implement interactive prompt card extraction (detect permission asks and choices).
-* [ ] Create IPC / WebSocket message envelope for real-time turn streaming.
-* [ ] Add fallback stream reader for agents without native transcript stores.
-
-### Phase 3: Tauri v2 Desktop App & Terminal UI
-* [ ] Integrate `@xterm/xterm` with `@xterm/addon-fit`, `@xterm/addon-web-links`, and `@xterm/addon-unicode-graphemes`.
-* [ ] Implement dual-view toggle: Chat view (structured turns) <-> Terminal view (raw xterm).
-* [ ] Build responsive chat composer with `@` file auto-complete, `/` commands, and draft preservation.
-* [ ] Implement approval cards with one-click responses (Allow, Deny, Option selection).
-* [ ] Implement Quiet Slate color palette and light/dark theme switcher.
-
-### Phase 4: Workspaces, Splits & Git Worktrees
-* [ ] Implement multi-pane workspace layout (sidebar with live RUN/INPUT/DONE indicators).
-* [ ] Add split-pane support (horizontal and vertical terminal/chat splits).
-* [ ] Implement Git worktree manager:
-  * `git worktree add <path> <branch>`
-  * Launch target agent inside newly created worktree
-  * Automatic diff calculation against parent branch
-  * Safe cleanup on task completion.
-
-### Phase 5: Remote Web Gateway, Tailscale & PWA Companion
-* [ ] Build embedded Axum server inside `orion-core`.
-* [ ] Implement HTTP REST API and WebSocket connection endpoint matching desktop IPC.
-* [ ] Implement `tailscale` CLI bridge: detect Tailscale, invoke `tailscale serve`, generate MagicDNS URL and QR code.
-* [ ] Implement pairing security: 6-digit PIN, device token store (`devices.json`), timing-safe authentication headers.
-* [ ] Build Mobile Touch Key Bar (Esc, Tab, Ctrl, Alt, Shift, arrows, customizable buttons).
-* [ ] Verify PWA installation on iOS Safari and Android Chrome over Tailscale HTTPS.
-
-### Phase 6: Proactive Alerts, Push Notifications & Voice
-* [ ] Implement Web Push notifications using VAPID keys for remote phone alerting.
-* [ ] Implement in-app droplet alert banner for background agent events.
-* [ ] Add voice dictation engine:
-  * Browser Web Speech API fallback.
-  * Direct OpenAI Whisper API integration with local key storage.
-* [ ] Add "Send Later" prompt scheduler to prevent interrupting active turns.
-
-### Phase 7: Polish, Verification & Standalone Binary Packaging
-* [ ] Build CLI entrypoint `orion serve` for headless Linux / macOS servers.
-* [ ] Package Tauri v2 desktop bundles (Windows MSI/NSIS, macOS DMG, Linux AppImage/deb).
-* [ ] Comprehensive automated tests:
-  * Rust unit and integration tests (`cargo test`).
-  * Frontend unit tests (`bun test`).
-  * End-to-end PTY streaming and reconnect tests.
-* [ ] User documentation, migration guide from Orbit, and release automation.
-
----
+The executable milestone plan — scope, definition of done and gates for M0–M6 — lives in
+[`docs/roadmap.md`](docs/roadmap.md). M0 (the native shell, the engine seam and the porting
+rails) is complete; the next milestone is the single-agent walking skeleton, whose gate decides
+whether the screen-reading approach is sound before breadth is built on it.
 
 ## 7. Risk Analysis & Mitigations
 
 | Risk | Impact | Mitigation Strategy |
 | :--- | :--- | :--- |
-| **ConPTY Resizing Glitches on Windows** | High | Use latest `portable-pty` with explicit ConPTY window size bounds; test with complex TUIs like lazygit and fzf. |
+| **ConPTY Resizing Glitches on Windows** | High | Use latest `portable-pty` with explicit ConPTY window size bounds; test against complex full-screen TUIs. |
 | **Agent Transcript Format Drift** | Medium | Isolate parsers behind generic `TranscriptAdapter` trait. If a parser fails or schema drifts, gracefully fallback to raw terminal scrollback without crashing. |
 | **Orphaned Background Agent Processes** | Critical | Use Windows Job Objects (`kill_on_drop`) and POSIX process group signals to guarantee all spawned children exit when Orion exits. |
 | **Mobile Web Audio / Mic Restrictions** | Medium | Require secure context (HTTPS via Tailscale MagicDNS or localhost). Provide clear onboarding when microphone permissions are denied. |
@@ -341,7 +279,7 @@ C:\rust-projects\orion\
 
 ## 8. Definition of Done for Orion v1.0
 1. Can launch, monitor, and approve Claude Code and Codex sessions simultaneously from both desktop and phone.
-2. Zero external dependencies: no `herdr` installation required.
+2. Zero external dependencies: no multiplexer installation required.
 3. Native Tauri v2 app runs smoothly on Windows, macOS, and Linux.
 4. Remote mode works over Tailscale with one-click QR code pairing on an iPhone or Android phone.
 5. All tests pass with zero clippy warnings and complete TypeScript typecheck cleanliness.
