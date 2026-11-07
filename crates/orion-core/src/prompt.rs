@@ -29,6 +29,10 @@ pub struct DetectedPrompt {
     pub question: String,
     pub body: Option<String>,
     pub options: Vec<MenuOption>,
+    pub custom_option_index: Option<usize>,
+    pub queued: Option<&'static str>,
+    pub row_count: usize,
+    pub selected_row: Option<usize>,
 }
 
 impl DetectedPrompt {
@@ -48,7 +52,7 @@ impl DetectedPrompt {
                 })
             })
             .collect::<Vec<_>>();
-        json!({
+        let mut wire = json!({
             "id": self.id,
             "agent": self.agent,
             "kind": self.kind,
@@ -57,8 +61,12 @@ impl DetectedPrompt {
             "body": self.body,
             "options": options,
             "multi_select": false,
-            "custom_option_index": null,
-        })
+            "custom_option_index": self.custom_option_index,
+        });
+        if let Some(queued) = self.queued {
+            wire["queued"] = json!(queued);
+        }
+        wire
     }
 
     /// The keystrokes that move the menu's cursor onto `target` and choose it.
@@ -69,16 +77,64 @@ impl DetectedPrompt {
         if target >= self.options.len() {
             return None;
         }
-        let current = self.selected()?;
-        let count = self.options.len();
-        let down = (target + count - current) % count;
-        let up = (current + count - target) % count;
+        let current = self.selected_row.or_else(|| self.selected())?;
+        let count = self.row_count;
+        let (down, up) = if self.agent == "codex" {
+            // Codex lists do not wrap.
+            let down = target.saturating_sub(current);
+            let up = current.saturating_sub(target);
+            (down, up)
+        } else {
+            let down = (target + count - current) % count;
+            let up = (current + count - target) % count;
+            (down, up)
+        };
         let mut keys = String::new();
-        if down <= up {
+        if self.agent == "codex" {
+            if target >= current {
+                keys.push_str(&"\x1b[B".repeat(target - current));
+            } else {
+                keys.push_str(&"\x1b[A".repeat(current - target));
+            }
+        } else if down <= up {
             keys.push_str(&"\x1b[B".repeat(down));
         } else {
             keys.push_str(&"\x1b[A".repeat(up));
         }
+        keys.push('\r');
+        Some(keys)
+    }
+
+    /// The keystrokes that move onto the custom row, type the answer, and submit it.
+    pub fn answer_custom_keys(&self, text: &str) -> Option<String> {
+        let custom = self.custom_option_index?;
+        if custom >= self.row_count {
+            return None;
+        }
+        let current = self.selected_row.or_else(|| self.selected())?;
+        let count = self.row_count;
+        let (down, up) = if self.agent == "codex" {
+            let down = custom.saturating_sub(current);
+            let up = current.saturating_sub(custom);
+            (down, up)
+        } else {
+            let down = (custom + count - current) % count;
+            let up = (current + count - custom) % count;
+            (down, up)
+        };
+        let mut keys = String::new();
+        if self.agent == "codex" {
+            if custom >= current {
+                keys.push_str(&"\x1b[B".repeat(custom - current));
+            } else {
+                keys.push_str(&"\x1b[A".repeat(current - custom));
+            }
+        } else if down <= up {
+            keys.push_str(&"\x1b[B".repeat(down));
+        } else {
+            keys.push_str(&"\x1b[A".repeat(up));
+        }
+        keys.push_str(text);
         keys.push('\r');
         Some(keys)
     }
@@ -126,14 +182,23 @@ pub fn detect_menu(text: &str, agent: &str) -> Option<DetectedPrompt> {
     let last = run.last()?.line;
     // Claude ends an approval question with `?` and a choice menu's heading with `:`; both are
     // answered by moving the cursor. A message's numbered list has no marked row, so the cursor
-    // is what separates a menu from prose, not the punctuation.
-    let (question_index, kind) = (0..first)
+    // is what separates a menu from prose, not the punctuation. Codex names the same shape a
+    // question.
+    let (question_index, raw_kind) = (0..first)
         .rev()
         .find_map(|index| prompt_kind(lines[index]).map(|kind| (index, kind)))?;
+    let kind = if agent == "codex" && raw_kind == "approval" {
+        "question"
+    } else {
+        raw_kind
+    };
     let question = clean(lines[question_index]);
-    let (title, body) = panel(&lines, question_index, kind);
+    let (mut title, body) = panel(&lines, question_index, kind);
+    if agent == "codex" {
+        title = codex_title(&lines, question_index);
+    }
 
-    let options = run
+    let mut options = run
         .iter()
         .map(|row| MenuOption {
             number: row.number,
@@ -143,7 +208,33 @@ pub fn detect_menu(text: &str, agent: &str) -> Option<DetectedPrompt> {
         })
         .collect::<Vec<_>>();
 
+    // Codex ends a question menu with an "Other"/"None of the above" row that takes a typed
+    // answer: the card offers the real options and names that row as the custom option.
+    let selected_row = run.iter().position(|row| row.selected);
+    let row_count = run.len();
+    let mut custom_option_index = None;
+    if agent == "codex" {
+        if let Some(last_option) = options.last() {
+            let label = last_option.label.trim().to_lowercase();
+            if label.starts_with("other") || label.starts_with("none of the above") {
+                options.pop();
+                if !options.is_empty() {
+                    custom_option_index = Some(options.len());
+                }
+            }
+        }
+    }
+
     let id = fingerprint(agent, &question, &options);
+    let queued = if agent == "codex"
+        && lines
+            .iter()
+            .any(|line| clean(line).contains("Queued follow-up inputs"))
+    {
+        Some("open")
+    } else {
+        None
+    };
     Some(DetectedPrompt {
         id,
         agent: agent.to_string(),
@@ -152,7 +243,25 @@ pub fn detect_menu(text: &str, agent: &str) -> Option<DetectedPrompt> {
         question,
         body,
         options,
+        custom_option_index,
+        queued,
+        row_count,
+        selected_row,
     })
+}
+
+fn codex_title(lines: &[&str], question_index: usize) -> String {
+    if question_index > 0 {
+        let above = clean(lines[question_index - 1]);
+        if let Some((current, total)) = above.split_once(" of ") {
+            if current.trim().chars().all(|c| c.is_ascii_digit())
+                && total.trim().chars().all(|c| c.is_ascii_digit())
+            {
+                return format!("Question {} of {}", current.trim(), total.trim());
+            }
+        }
+    }
+    "Question".to_string()
 }
 
 /// Detects the prompt Claude Code is showing, if any. Claude is the only agent the walking
@@ -162,10 +271,123 @@ pub fn detect_claude(text: &str) -> Option<DetectedPrompt> {
     detect_menu(text, "claude")
 }
 
+/// Detects the prompt Codex is showing, if any: an open question menu on the grid.
+pub fn detect_codex(text: &str) -> Option<DetectedPrompt> {
+    detect_menu(text, "codex")
+}
+
+/// A question Codex asked with `request_user_input_async` and has not answered yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedQuestion {
+    pub key: String,
+    pub title: String,
+    pub options: Vec<String>,
+}
+
+/// How many questions wait in Codex's collapsed queue at the bottom of the screen.
+pub fn codex_queued_count(screen: &str) -> usize {
+    let lines: Vec<String> = screen
+        .lines()
+        .map(clean)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let Some(header) = lines
+        .iter()
+        .rposition(|line| line.contains("Queued follow-up inputs"))
+    else {
+        return 0;
+    };
+    if lines.len() - header > 16 {
+        return 0;
+    }
+    if lines[header..].iter().any(|line| {
+        line.starts_with("↳") || line.to_lowercase().contains("messages to be submitted")
+    }) {
+        return 0;
+    }
+    for (index, line) in lines.iter().enumerate().skip(header + 1).take(7) {
+        let Some(rest) = line.strip_prefix('?') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() || !rest[digits.len()..].trim_start().starts_with("question") {
+            continue;
+        }
+        if !lines
+            .get(index + 1)
+            .is_some_and(|next| next.to_lowercase().contains("to answer"))
+        {
+            continue;
+        }
+        if let Some(after) = lines.get(index + 2) {
+            if !after.starts_with("›") {
+                continue;
+            }
+        }
+        return digits.parse().unwrap_or(0);
+    }
+    0
+}
+
+/// The card for a collapsed queue: the screen shows only a count, so the first question comes
+/// from the rollout's newest unanswered ones.
+pub fn codex_queued_prompt(screen: &str, unanswered: &[QueuedQuestion]) -> Option<DetectedPrompt> {
+    let count = codex_queued_count(screen);
+    if count == 0 || unanswered.len() < count {
+        return None;
+    }
+    let waiting = &unanswered[unanswered.len() - count..];
+    let first = &waiting[0];
+    if first.title.trim().is_empty() {
+        return None;
+    }
+    let question = normalize_text(&first.title);
+    let options = first
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, label)| MenuOption {
+            number: index + 1,
+            label: label.clone(),
+            description: None,
+            selected: index == 0,
+        })
+        .collect::<Vec<_>>();
+    let title = if count > 1 {
+        format!("Question 1 of {count}")
+    } else {
+        "Question".to_string()
+    };
+    let id = fingerprint("codex", &question, &options);
+    Some(DetectedPrompt {
+        id,
+        agent: "codex".to_string(),
+        kind: "question",
+        title,
+        question,
+        body: None,
+        options: options.clone(),
+        custom_option_index: Some(options.len()),
+        queued: Some("collapsed"),
+        row_count: options.len() + 1,
+        selected_row: Some(0),
+    })
+}
+
+fn normalize_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Whether the agent is drawing a prompt that only a user can answer. This is what puts the pane
 /// in `blocked` and raises the approval card.
 pub fn is_claude_blocked(text: &str) -> bool {
     detect_claude(text).is_some()
+}
+
+/// Whether Codex is drawing a prompt that only a user can answer.
+pub fn is_codex_blocked(text: &str) -> bool {
+    detect_codex(text).is_some()
 }
 
 /// Whether Claude is between turns rather than working. The TUI prints an interrupt hint while a
@@ -461,6 +683,69 @@ mod tests {
     fn a_menu_missing_its_cursor_is_not_answerable() {
         let text = "Do you want to proceed?\n 1. Yes\n 2. No\n Esc to cancel";
         assert!(detect_claude(text).is_none());
+    }
+
+    const CODEX_OPEN: &str = "\
+• WAITING
+• Queued follow-up inputs
+  1 of 2
+  Which split?
+  › 1. train
+    2. test
+    3. Other
+  enter submit   ctrl+] skip   alt+↓ main prompt   alt+↑ next question
+";
+
+    #[test]
+    fn reads_an_open_codex_async_question() {
+        let prompt = detect_codex(CODEX_OPEN).expect("the open question");
+        assert_eq!(prompt.agent, "codex");
+        assert_eq!(prompt.kind, "question");
+        assert_eq!(prompt.title, "Question 1 of 2");
+        assert_eq!(prompt.question, "Which split?");
+        assert_eq!(prompt.options.len(), 2);
+        assert_eq!(prompt.options[0].label, "train");
+        assert_eq!(prompt.options[1].label, "test");
+        assert_eq!(prompt.custom_option_index, Some(2));
+        assert_eq!(prompt.queued, Some("open"));
+        assert_eq!(prompt.answer_keys(1).unwrap(), "\x1b[B\r");
+        assert_eq!(
+            prompt.answer_custom_keys("Q255 only").unwrap(),
+            "\x1b[B\x1b[BQ255 only\r"
+        );
+    }
+
+    const CODEX_COLLAPSED: &str = "\
+• WAITING
+• Queued follow-up inputs
+  ? 2 questions · 8s
+    alt+↑ to answer
+› Ask Codex to do anything
+  GPT-6-Sol xhigh · ~/lab · Context 97% left
+";
+
+    #[test]
+    fn reads_a_collapsed_codex_queue_from_the_rollout() {
+        assert_eq!(codex_queued_count(CODEX_COLLAPSED), 2);
+        let unanswered = vec![
+            QueuedQuestion {
+                key: "call_c:0".into(),
+                title: "Which dataset?".into(),
+                options: vec!["LM-O".into()],
+            },
+            QueuedQuestion {
+                key: "call_c:1".into(),
+                title: "Any notes?".into(),
+                options: Vec::new(),
+            },
+        ];
+        let prompt = codex_queued_prompt(CODEX_COLLAPSED, &unanswered).expect("the collapsed card");
+        assert_eq!(prompt.agent, "codex");
+        assert_eq!(prompt.kind, "question");
+        assert_eq!(prompt.title, "Question 1 of 2");
+        assert_eq!(prompt.question, "Which dataset?");
+        assert_eq!(prompt.options.len(), 1);
+        assert_eq!(prompt.queued, Some("collapsed"));
     }
 
     #[test]
