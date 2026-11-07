@@ -1,0 +1,633 @@
+/* AgentSidebar — redesigned to match new sidebar visual system */
+
+.agents-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  flex: 0 1 auto;
+  min-height: 0;
+  /* the roster's own gutter, so an agent's mark lines up under a workspace's */
+  padding: var(--space-2) var(--side-gutter) 0;
+  background: var(--sidebar-bg);
+  /* One hairline parts the roster from the workspaces above it: two lists ran into one column
+     with only space between them, and the fold between them read as one more row. */
+  border-top: var(--hairline) solid var(--sidebar-divider);
+}
+
+/* The head holds the fold and the order control side by side: two buttons, never one inside the
+   other (the whole head folds, and its order is its own control). */
+.agent-section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.agent-section-head > .agent-section-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Quiet at rest; the brightest text while priority is on, so the roster says how it is read */
+.agent-section-order {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: var(--side-box);
+  height: var(--side-box);
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.agent-section-order svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+.agent-section-order[aria-pressed="true"] {
+  color: var(--text);
+}
+
+.agent-section-order:hover {
+  background: var(--side-hover);
+  color: var(--text);
+}
+
+.agent-section-order:focus-visible {
+  outline: var(--ring);
+  outline-offset: calc(var(--ring-offset) * -1);
+}
+
+.agents-sidebar.is-collapsed,
+.agents-sidebar.is-empty {
+  flex: 0 0 auto;
+}
+
+/* A visible Agents list fills the space released by folded PC groups */
+.sidebar-shell:not(:has(.machine-list .machine-workspaces)):has(.agents-sidebar:not(.is-collapsed):not(.is-empty)) .agents-sidebar {
+  flex: 1 1 auto;
+}
+
+/* Section toggle: Orion's own list head — a quiet title-case label, not a caps banner */
+.agent-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--side-row);
+  padding: 0 var(--space-2);
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  border-radius: var(--sidebar-radius);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.agent-section-toggle:hover {
+  background: var(--side-hover);
+  color: var(--text);
+}
+
+.agent-section-toggle:focus-visible {
+  outline: var(--ring);
+  outline-offset: calc(var(--ring-offset) * -1);
+}
+
+.agent-section-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--side-box);
+  height: var(--side-box);
+  /* the head's label starts at the list's own left edge; the fold sits at the row's far end */
+  margin-left: auto;
+  color: var(--text-dim);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+
+.agent-section-toggle:focus-visible .agent-section-caret,
+.agents-sidebar.is-collapsed .agent-section-caret {
+  opacity: 1;
+}
+
+@media (hover: hover) {
+  .agent-section-toggle:hover .agent-section-caret {
+    opacity: 1;
+  }
+}
+
+.agents-sidebar.is-collapsed .agent-section-caret {
+  transform: rotate(-90deg);
+}
+
+/* Folded count: Orion's dim figure after the label, not a chip. An open head says the count in the
+   rows below it, so the figure waits for the fold — and for the rail, where it is the whole head */
+.agent-section-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-regular);
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  line-height: 1;
+}
+
+.agents-sidebar:not(.is-collapsed) .agent-section-count {
+  display: none;
+}
+
+/* List contents */
+.agent-list-contents {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  overflow-y: auto;
+  padding: var(--space-1) 0;
+}
+
+/* The unpinned roster, parted by state: Active first, then Idle under the one rule that separates
+   them. Each group keeps its own label and count; a group with no rows draws neither. */
+.agent-groups {
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.agent-group + .agent-group {
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: var(--hairline) solid var(--sidebar-divider);
+}
+
+.agent-group-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+  padding: 0 var(--space-2);
+  color: var(--text-dim);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
+}
+
+.agent-group-count {
+  font-family: var(--font-mono);
+  font-weight: var(--fw-regular);
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Fade at the cut's lower edge. Only the bottom band is drawn: a sticky band at the top of the flow
+   reserved 24px between the head and its first row, and Orion's own list starts at once. */
+.agent-list-contents::after {
+  content: "";
+  position: sticky;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 24px;
+  pointer-events: none;
+  z-index: 1;
+  background: linear-gradient(to top, var(--sidebar-bg), transparent);
+}
+
+.agents-sidebar.is-empty .agent-list-contents::after {
+  display: none;
+}
+
+/* Unified agent row — matches .sidebar-row: the mark, the copy, the counts and the state badge, one
+   cell each, with the ⋯ taking a fifth cell only where it shows (below). A row is as tall as its
+   min-height; no cell wraps into an implicit second row. */
+.agent-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--side-box) 1fr auto auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--side-row);
+  padding: 0 var(--space-2);
+  border-radius: var(--sidebar-radius);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.agent-item:hover {
+  background: var(--side-hover);
+}
+
+.agent-item.is-selected {
+  background: var(--side-selected);
+}
+
+.agent-item:focus-visible {
+  outline: var(--ring);
+  outline-offset: calc(var(--ring-offset) * -1);
+}
+
+.agent-item.is-offline {
+  opacity: 0.5;
+}
+
+/* Row button (the clickable area) */
+.agent-row {
+  display: contents;
+}
+
+/* Leading mark */
+.agent-item .sidebar-row-mark {
+  grid-column: 1;
+}
+
+/* Content area */
+.agent-copy {
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agent-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-title-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-item.is-selected .agent-title-line {
+  color: var(--text-strong);
+}
+
+.agent-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-context {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  font-size: var(--fs-2xs);
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-name {
+  font-family: var(--font-mono);
+  font-weight: var(--fw-medium);
+}
+
+.agent-tokens {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--fs-2xs);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Trailing meta: background tasks + plan + status */
+.agent-row-status {
+  grid-column: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.background-count,
+.plan-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-2xs);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+
+.background-count svg,
+.plan-count svg {
+  width: 12px;
+  height: 12px;
+}
+
+.plan-count svg { color: var(--status-working); }
+.plan-count.is-done svg { color: var(--status-done); }
+
+/* Status badge at the row's trailing edge: the same 16px cell a workspace row uses */
+.agent-row-state {
+  grid-column: 4;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.agent-row-state .sidebar-status {
+  width: 100%;
+  height: 100%;
+}
+
+/* Actions (menu button) */
+.agent-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.agent-item:focus-within > .agent-actions,
+.agent-item.is-selected > .agent-actions,
+.agent-actions:has([aria-expanded="true"]) {
+  opacity: 1;
+}
+
+@media (hover: hover) {
+  .agent-item:hover > .agent-actions {
+    opacity: 1;
+  }
+}
+
+@media (pointer: fine) and (min-width: 769px) {
+  .agent-actions {
+    display: none;
+  }
+}
+
+/* Where the ⋯ does show (a finger, or a window under 769px), it takes the row's last cell rather
+   than wrapping under the mark. */
+@media (pointer: coarse), (max-width: 768px) {
+  .agent-item {
+    grid-template-columns: var(--side-box) 1fr auto auto auto;
+  }
+
+  .agent-actions {
+    grid-column: 5;
+  }
+}
+
+.sidebar-row-action.row-menu-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.sidebar-row-action.row-menu-toggle:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+
+.sidebar-row-action.row-menu-toggle:focus-visible {
+  outline: var(--ring);
+  outline-offset: calc(var(--ring-offset) * -1);
+}
+
+/* Pinned section */
+.sidebar-pinned {
+  background: var(--sidebar-pinned-bg);
+  border: var(--hairline) solid var(--sidebar-pinned-border);
+  border-radius: var(--sidebar-radius);
+  overflow: hidden;
+}
+
+.sidebar-pinned + .agent-groups {
+  margin-top: var(--space-2);
+}
+
+.sidebar-pinned-label {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 var(--space-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
+  background: color-mix(in srgb, var(--sidebar-pinned-bg) 80%, transparent);
+  border-bottom: var(--hairline) solid var(--sidebar-pinned-border);
+}
+
+.sidebar-pinned-label svg {
+  width: 14px;
+  height: 14px;
+  margin-right: var(--space-2);
+  flex-shrink: 0;
+}
+
+/* Empty state */
+.agent-empty {
+  display: flex;
+  align-items: center;
+  min-height: var(--side-row);
+  padding: 0 var(--space-2);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+/* One-line mode (Settings → Sidebar rows → One line) */
+.agents-sidebar.is-one-line .agent-item {
+  min-height: var(--side-row);
+}
+
+.agents-sidebar.is-one-line .agent-main {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.agents-sidebar.is-one-line .agent-title-line {
+  flex: 1 1 auto;
+}
+
+/* The place takes what is left, capped, so the title keeps more than half the row */
+.agents-sidebar.is-one-line .agent-context {
+  flex: 0 1 auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Touch adjustments */
+@media (pointer: coarse), (any-pointer: coarse) {
+  .agent-item {
+    min-height: var(--touch-target);
+  }
+}
+
+/* Narrow window: always show menu button */
+@media (max-width: 768px) {
+  @media (hover: hover) {
+    .agent-actions {
+      opacity: 1;
+    }
+  }
+}
+
+/* Reduced motion. The row menu's transition is set on `.sidebar-row-action.row-menu-toggle`,
+   so that pair is repeated here: the block comes later, and wins at equal specificity. */
+@media (prefers-reduced-motion: reduce) {
+  .agent-item,
+  .agent-section-toggle,
+  .agent-section-caret,
+  .sidebar-row-action,
+  .sidebar-row-action.row-menu-toggle {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* Touch press */
+@media (hover: none) and (pointer: coarse) {
+  .agent-item:active {
+    background: var(--side-hover);
+  }
+}
+
+/* ============================================================================
+   COLLAPSED / RAIL MODE (769px+)
+   ============================================================================ */
+
+@media (min-width: 769px) {
+  /* The rail's Agents head is the count alone: the word, the fold caret and its turn all need room
+     a 54px column does not have, and 0 says what "No agents running" said in three wrapped lines. */
+  .app.sidebar-collapsed .agent-section-toggle {
+    justify-content: center;
+    min-height: var(--side-row);
+    padding: 0;
+  }
+
+  .app.sidebar-collapsed .agent-section-toggle > span:not(.agent-section-count) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .app.sidebar-collapsed .agent-section-count {
+    display: inline-flex;
+    justify-content: center;
+    min-width: var(--side-box);
+    font-family: var(--font-mono);
+    font-size: var(--fs-2xs);
+    color: var(--text-dim);
+  }
+
+  .app.sidebar-collapsed .agent-section-caret {
+    display: none;
+  }
+
+  /* the rail is one column wide: the roster's gutter would leave a 48px rail 32px for a mark */
+  .app.sidebar-collapsed .agents-sidebar {
+    padding: 0;
+  }
+
+  /* One column of marks, centred in the square: the copy, the counts and the state wait for the
+     sidebar, so a hover must not pull a label out of a 48px island. The button keeps a box of its
+     own here: `display: contents` leaves it unmeasurable, so the square was not its hit target and
+     its tooltip anchored at the window's corner. */
+  .app.sidebar-collapsed .agent-item {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--side-row);
+    padding: 0;
+  }
+
+  .app.sidebar-collapsed .agent-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+  }
+
+  /* The mark alone: the state dot's place on the square is the rail's, shared with every workspace
+     row (Sidebar.css), so the roster does not place it a second time. */
+  .app.sidebar-collapsed .agent-copy {
+    display: none;
+  }
+
+  .app.sidebar-collapsed .agent-actions {
+    display: none;
+  }
+
+  /* Pinned section in rail */
+  .app.sidebar-collapsed .sidebar-pinned {
+    padding: 0;
+    border: 0;
+  }
+
+  .app.sidebar-collapsed .sidebar-pinned-label {
+    display: none;
+  }
+
+  /* The rail has no room for the group words or their rule: one column of marks, as before */
+  .app.sidebar-collapsed .agent-group-label {
+    display: none;
+  }
+
+  .app.sidebar-collapsed .agent-group {
+    gap: 0;
+  }
+
+  .app.sidebar-collapsed .agent-group + .agent-group {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+  }
+}

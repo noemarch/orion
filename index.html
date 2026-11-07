@@ -1,13 +1,48 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="description" content="Chat with your coding agents and use their live terminals from your browser or phone." />
+    <meta property="og:title" content="Orion" />
+    <meta property="og:description" content="Your agents. Any screen. Chat, terminal and mobile access." />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="/social-preview.png" />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="640" />
+    <meta property="og:image:alt" content="Orion" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#221d27" />
+    <meta name="color-scheme" content="dark" />
+    <!-- The query is a URL no pre-0.3.32 service worker has cached: those serve the plain
+         URL cache-first, which handed Chrome the old `orientation: "any"` manifest on the
+         first launch after an upgrade and spent that day's installed-app update check. -->
+    <link rel="manifest" href="/manifest.webmanifest?v=2" />
+    <link rel="icon" href="/favicon.ico?v=orion1" sizes="32x32" />
+    <link rel="icon" type="image/png" href="/favicon.png?v=orion1" sizes="64x64" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=orion1" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!-- Leave apple-mobile-web-app-status-bar-style unset to use the normal home-screen
+         status-bar layout instead of drawing beneath it (#164). Existing installs and
+         viewport behavior need separate checks; see docs/ios-home-screen-testing.md. -->
+    <meta name="apple-mobile-web-app-title" content="Orion" />
     <title>Orion</title>
   </head>
-  <body class="bg-[#120f18] text-[#e8e4ec] antialiased selection:bg-[#e07a93]/30 overflow-hidden select-none">
+  <body>
+  <!--
+   THESIS: Orion is a quiet chat surface over a live terminal bridge: one centered reading column, a flat thread rail, and a single rose action; the machine's state stays legible in the rail.
+   OWN-WORLD: near-black plum ground, porcelain text, one muted rose reserved for the action; humanist sans in sentence case; flat panels, rounded cards, hairline seams, no sign bands.
+   STORY: A developer glancing at a phone sees which agent needs them, answers in one tap, and keeps the terminal one tap away, without the chrome of a dashboard.
+   FIRST VIEWPORT: a near-black ground under a flat header; a narrow rail with a full-width New workspace button and a search row; a centered transcript column; a rounded composer docked at the foot.
+   FORM: quiet-slate-chat-surface (t3.chat reference, operate); seed key b64f5ca4 (surface).
+   FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance.
+   -->
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script type="module" src="/src/pwa.ts"></script>
   </body>
 </html>
