@@ -31,6 +31,13 @@ chrono = { version = "=0.4.38", features = ["serde"] }
 notify = "=6.1.1"
 parking_lot = "0.12"
 subtle = "2.6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Web push delivery: reqwest with rustls-tls (no OpenSSL/curl-sys on Windows)
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+hkdf = "0.12"
+aes-gcm = "0.11"
+signature = "2"
 
 # Pinned for Rust 1.86.0 compatibility
 time = "=0.3.36"

@@ -23,6 +23,15 @@ chrono = { workspace = true, features = ["serde"] }
 notify = { workspace = true }
 parking_lot = { workspace = true }
 subtle = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = "0.10"
+p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
+rand = "0.8"
+base64 = "0.22"
+hkdf = { workspace = true }
+aes-gcm = { workspace = true }
+reqwest = { workspace = true }
+signature = { workspace = true }
 vt100 = "0.18.1"
 
 [target.'cfg(windows)'.dependencies]
