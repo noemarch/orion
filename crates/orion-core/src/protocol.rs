@@ -51,17 +51,70 @@ impl AgentKind {
             Self::Devin => "devin",
         }
     }
+
+    /// The kind as the client names it (`AgentKind.kind` in `shared/protocol.ts`), which is also
+    /// what a saved workspace stores.
+    pub fn wire_kind(&self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Antigravity => "agy",
+            Self::OpenCode => "opencode",
+            Self::Cursor => "cursor",
+            Self::Grok => "grok",
+            Self::Omp => "omp",
+            Self::Omo => "omo",
+            Self::Pi => "pi",
+            Self::Hermes => "hermes",
+            Self::Devin => "devin",
+        }
+    }
+
+    pub fn from_wire(kind: &str) -> Option<Self> {
+        Some(match kind {
+            "claude" => Self::Claude,
+            "codex" => Self::Codex,
+            "agy" | "antigravity" => Self::Antigravity,
+            "opencode" => Self::OpenCode,
+            "cursor" | "agent" => Self::Cursor,
+            "grok" => Self::Grok,
+            "omp" => Self::Omp,
+            "omo" => Self::Omo,
+            "pi" => Self::Pi,
+            "hermes" => Self::Hermes,
+            "devin" => Self::Devin,
+            _ => return None,
+        })
+    }
 }
 
 /// Operational state of an agent session or pane.
+///
+/// The names are the wire's (`AgentStatus` in `shared/engine-types.ts`): the client paints
+/// `working` as a running pulse, `blocked` as attention, `done` as a finished turn. `error` is a
+/// detail of this engine; a client that does not know it draws the generic state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentStatus {
     Idle,
-    Running,
-    NeedsInput,
+    Working,
+    Blocked,
     Done,
+    Unknown,
     Error,
+}
+
+impl AgentStatus {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Blocked => "blocked",
+            Self::Done => "done",
+            Self::Unknown => "unknown",
+            Self::Error => "error",
+        }
+    }
 }
 
 /// Information about an installed and discovered agent CLI.
@@ -162,8 +215,13 @@ pub struct ApprovalRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptType {
-    CommandApproval { command: String },
-    FileEditApproval { file_path: String, diff: Option<String> },
+    CommandApproval {
+        command: String,
+    },
+    FileEditApproval {
+        file_path: String,
+        diff: Option<String>,
+    },
     MultipleChoice,
     TextInput,
     ModelSelection,
