@@ -97,7 +97,9 @@ impl TranscriptParser {
                         command: cmd.clone(),
                     },
                     question: format!("Allow command: `{}`?", cmd),
-                    description: Some("Agent requested permission to run a terminal command.".into()),
+                    description: Some(
+                        "Agent requested permission to run a terminal command.".into(),
+                    ),
                     options: vec![
                         PromptOption {
                             index: 0,

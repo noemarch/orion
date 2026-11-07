@@ -15,6 +15,12 @@ pub struct WorkspaceManager {
     active_workspace_id: Arc<RwLock<Option<String>>>,
 }
 
+impl Default for WorkspaceManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WorkspaceManager {
     pub fn new() -> Self {
         Self {
@@ -64,7 +70,9 @@ impl WorkspaceManager {
             active_tab_id: Some(tab_id),
         };
 
-        self.workspaces.write().insert(ws_id.clone(), workspace.clone());
+        self.workspaces
+            .write()
+            .insert(ws_id.clone(), workspace.clone());
         *self.active_workspace_id.write() = Some(ws_id);
 
         workspace
@@ -122,11 +130,7 @@ impl WorkspaceManager {
     }
 
     /// Create a dedicated Git worktree for an isolated agent task.
-    pub fn create_git_worktree(
-        &self,
-        repo_root: &str,
-        branch_name: &str,
-    ) -> Result<PathBuf> {
+    pub fn create_git_worktree(&self, repo_root: &str, branch_name: &str) -> Result<PathBuf> {
         let worktree_dir = Path::new(repo_root)
             .join(".orion")
             .join("worktrees")
@@ -166,7 +170,12 @@ impl WorkspaceManager {
     pub fn remove_git_worktree(&self, repo_root: &str, worktree_path: &Path) -> Result<()> {
         let output = Command::new("git")
             .current_dir(repo_root)
-            .args(["worktree", "remove", "--force", worktree_path.to_str().unwrap()])
+            .args([
+                "worktree",
+                "remove",
+                "--force",
+                worktree_path.to_str().unwrap(),
+            ])
             .output()
             .map_err(|e| OrionError::Process(format!("Failed to remove git worktree: {e}")))?;
 

@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("------------------------------------");
 
     let workspace_manager = Arc::new(WorkspaceManager::new());
-    
+
     // Seed initial workspace with Claude if installed, or first available agent
     let initial_agent = agents
         .iter()
@@ -57,9 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     workspace_manager.create_workspace("default-workspace", &cwd, initial_agent);
 
-    let state = Arc::new(ServerState {
-        workspace_manager,
-    });
+    let state = Arc::new(ServerState { workspace_manager });
 
     // Check if dist folder exists for serving static UI
     let dist_dir = PathBuf::from("dist");
@@ -121,7 +119,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(_state): State<Arc<ServerState>>
 
 async fn handle_socket(mut socket: WebSocket) {
     info!("Client connected to Orion WebSocket");
-    
+
     // Initial welcome payload
     let welcome = serde_json::json!({
         "event": "connected",
