@@ -33,6 +33,18 @@ interface DesktopWindow extends Window {
 /** Wraps the engine's answer in a `Response` the client's JSON paths can read. */
 function respond(status: number, body: unknown): Response {
   const empty = status === 204 || status === 304;
+  // A raw-text body lets `/api/fs/file` hand the file itself to the viewer instead of JSON.
+  if (
+    typeof body === "object" &&
+    body !== null &&
+    "__raw_text__" in body &&
+    typeof (body as { __raw_text__: unknown }).__raw_text__ === "string"
+  ) {
+    return new Response((body as { __raw_text__: string }).__raw_text__, {
+      status,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
+  }
   return new Response(empty ? null : JSON.stringify(body ?? null), {
     status,
     headers: empty ? undefined : { "content-type": "application/json" },
