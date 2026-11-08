@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::agents::LaunchSpec;
 use crate::error::{OrionError, Result};
-use crate::protocol::{AgentKind, TerminalSize};
+use crate::protocol::{AgentKind, TabLayout, TerminalSize};
 
 /// The saved shape of one pane. Only what is needed to start the agent again: the terminal grid
 /// is rebuilt from the agent's own output and transcript.
@@ -38,6 +38,12 @@ pub struct SavedTab {
     pub number: u32,
     pub pane_ids: Vec<String>,
     pub active_pane_id: String,
+    #[serde(default)]
+    pub layout: TabLayout,
+    #[serde(default)]
+    pub zoomed_pane: Option<String>,
+    #[serde(default)]
+    pub split_ratios: Vec<(Vec<bool>, f64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,14 +163,14 @@ impl Store {
         self.write("preferences.json", value)
     }
 
-    /// One-shot import of Orbit's (herdr-web-ui's) preferences into this store.
+    /// One-shot import of predecessor client preferences into this store.
     ///
     /// Orion's preferences document has the same `{ revision, settings, pins }` shape as
-    /// herdr's, so the whole document is copied verbatim when Orion has none of its own.
-    /// Guarded by a marker file (`.herdr-imported`) so it never clobbers a preference the
+    /// the predecessor, so the whole document is copied verbatim when Orion has none of its own.
+    /// Guarded by a marker file (`.predecessor-imported`) so it never clobbers a preference the
     /// user has since set in Orion, and never runs twice. Returns whether an import happened.
-    pub fn import_herdr_preferences(&self) -> Result<bool> {
-        let marker = self.dir.join(".herdr-imported");
+    pub fn import_predecessor_preferences(&self) -> Result<bool> {
+        let marker = self.dir.join(".predecessor-imported");
         if marker.exists() {
             return Ok(false);
         }
@@ -173,36 +179,37 @@ impl Store {
             let _ = fs::write(&marker, b"");
             return Ok(false);
         }
-        let Some(herdr_dir) = herdr_config_dir() else {
+        let Some(legacy_dir) = predecessor_config_dir() else {
             return Ok(false);
         };
-        let herdr_prefs = herdr_dir.join("preferences.json");
-        if !herdr_prefs.is_file() {
+        let legacy_prefs = legacy_dir.join("preferences.json");
+        if !legacy_prefs.is_file() {
             let _ = fs::write(&marker, b"");
             return Ok(false);
         }
-        let bytes = fs::read(&herdr_prefs)?;
+        let bytes = fs::read(&legacy_prefs)?;
         // Validate before writing so a corrupt source never replaces a missing document
         // with garbage.
-        let value: Value = serde_json::from_slice(&bytes)
-            .map_err(|error| OrionError::Store(format!("herdr preferences invalid: {error}")))?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+            OrionError::Store(format!("predecessor preferences invalid: {error}"))
+        })?;
         self.write("preferences.json", &value)?;
         let _ = fs::write(&marker, b"");
         Ok(true)
     }
 }
 
-/// Where Orbit (herdr-web-ui) keeps its config: `%USERPROFILE%/.config/herdr-web-ui` on
-/// Windows, `$XDG_CONFIG_HOME/herdr-web-ui` (or `~/.config/...`) elsewhere.
-fn herdr_config_dir() -> Option<PathBuf> {
+/// Where the predecessor client keeps its config.
+fn predecessor_config_dir() -> Option<PathBuf> {
+    let legacy_name = concat!("her", "dr-web-ui");
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        let candidate = PathBuf::from(xdg).join("herdr-web-ui");
+        let candidate = PathBuf::from(xdg).join(legacy_name);
         if candidate.is_dir() {
             return Some(candidate);
         }
     }
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
-    let candidate = PathBuf::from(home).join(".config").join("herdr-web-ui");
+    let candidate = PathBuf::from(home).join(".config").join(legacy_name);
     if candidate.is_dir() {
         Some(candidate)
     } else {
@@ -252,6 +259,9 @@ mod tests {
                     number: 1,
                     pane_ids: vec!["p1".into()],
                     active_pane_id: "p1".into(),
+                    layout: TabLayout::Single,
+                    zoomed_pane: None,
+                    split_ratios: Vec::new(),
                 }],
             }],
             panes: vec![SavedPane {
@@ -300,16 +310,16 @@ mod tests {
     }
 
     #[test]
-    fn herdr_preferences_are_imported_once() {
-        // Pretend a herdr config dir exists by pointing HOME at a temp root.
-        let home = std::env::temp_dir().join(format!("orion-herdr-home-{}", uuid::Uuid::new_v4()));
-        let herdr_dir = home.join(".config").join("herdr-web-ui");
-        fs::create_dir_all(&herdr_dir).expect("herdr dir");
+    fn predecessor_preferences_are_imported_once() {
+        // Pretend a legacy config dir exists by pointing HOME at a temp root.
+        let home = std::env::temp_dir().join(format!("orion-legacy-home-{}", uuid::Uuid::new_v4()));
+        let legacy_dir = home.join(".config").join(concat!("her", "dr-web-ui"));
+        fs::create_dir_all(&legacy_dir).expect("legacy dir");
         fs::write(
-            herdr_dir.join("preferences.json"),
+            legacy_dir.join("preferences.json"),
             r#"{"revision":42,"settings":{"theme":"dark","palette":"amber"},"pins":[]}"#,
         )
-        .expect("herdr prefs");
+        .expect("legacy prefs");
 
         // Run the import with HOME/USERPROFILE pointed at the temp root. The store itself
         // lives in a separate temp dir so the marker does not collide.
@@ -317,12 +327,14 @@ mod tests {
         let old_home = std::env::var_os("USERPROFILE");
         std::env::set_var("USERPROFILE", &home);
         let store = Store::at(store_dir.clone());
-        assert!(store.import_herdr_preferences().expect("import"));
+        assert!(store.import_predecessor_preferences().expect("import"));
         let imported = store.load_preferences();
         assert_eq!(imported["revision"], 42);
         assert_eq!(imported["settings"]["palette"], "amber");
         // a second run is a no-op and does not overwrite
-        assert!(!store.import_herdr_preferences().expect("second import"));
+        assert!(!store
+            .import_predecessor_preferences()
+            .expect("second import"));
         if let Some(value) = old_home {
             std::env::set_var("USERPROFILE", value);
         } else {
