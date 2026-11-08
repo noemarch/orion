@@ -34,5 +34,9 @@ reqwest = { workspace = true }
 signature = { workspace = true }
 vt100 = "0.18.1"
 
+[[bin]]
+name = "orion"
+path = "src/bin/orion.rs"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
