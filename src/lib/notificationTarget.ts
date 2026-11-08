@@ -80,8 +80,20 @@ export function notificationTargets(source?: MessageSource): (select: Select) =>
   };
 }
 
-// Browser messages can arrive after document loading but before React's effect.
+// Browser messages can arrive from the service worker (web/PWA) or window events (desktop shell).
 // Install this listener while App's module loads, before creating its root.
-export const onNotificationTarget = notificationTargets(
-  typeof navigator !== "undefined" && "serviceWorker" in navigator ? navigator.serviceWorker : undefined,
-);
+const messageSource: MessageSource | undefined =
+  typeof window !== "undefined"
+    ? {
+        addEventListener(type: "message", listener: (event: MessageEvent) => void) {
+          window.addEventListener(type, listener);
+          if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+            navigator.serviceWorker.addEventListener(type, listener);
+          }
+        },
+      }
+    : typeof navigator !== "undefined" && "serviceWorker" in navigator
+      ? navigator.serviceWorker
+      : undefined;
+
+export const onNotificationTarget = notificationTargets(messageSource);

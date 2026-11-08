@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { AgentStatus } from "../../shared/protocol.ts";
-import { alertStatus, alertsAllow, shouldNotifyStatus, showPaneEndedNotification, showPaneStatusNotification } from "./notifications.ts";
+import { alertStatus, alertsAllow, notificationState, shouldNotifyStatus, showPaneEndedNotification, showPaneStatusNotification } from "./notifications.ts";
 
 describe("alertStatus", () => {
   it("takes a pane at rest that waits on its turn's background work for working, and leaves the rest as they are", () => {
@@ -82,5 +82,15 @@ describe("tab alerts shown through the worker", () => {
       { pane_id: "w2:p1", machine_id: "pc-2", workspace_id: "w2" },
       { pane_id: "w3:p1", machine_id: "local" },
     ]);
+  });
+
+  it("reports granted on desktop shell", () => {
+    const savedWindow = globalThis.window;
+    try {
+      (globalThis as Record<string, unknown>).window = { __TAURI_INTERNALS__: {} };
+      expect(notificationState()).toBe("granted");
+    } finally {
+      globalThis.window = savedWindow;
+    }
   });
 });

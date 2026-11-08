@@ -1,6 +1,6 @@
 import type { AgentStatus } from "../../shared/protocol.ts";
 import { ENDED_NOTIFICATION_BODY, paneNotificationTag, statusNotificationBody } from "../../shared/notify-policy.ts";
-
+import { isDesktopShell } from "./transport.ts";
 /**
  * Tab alerts: Web Notifications for pane status transitions while this page is open
  * but hidden. A device with a push subscription (lib/push.ts) gets the same alerts from
@@ -16,14 +16,55 @@ export { alertStatus, alertsAllow, shouldNotifyStatus } from "../../shared/notif
 export type NotificationState = "unsupported" | "default" | "granted" | "denied";
 
 export function notificationState(): NotificationState {
+  if (isDesktopShell()) return "granted";
   if (typeof globalThis.Notification === "undefined") return "unsupported";
   return globalThis.Notification.permission;
 }
 
 export async function requestNotificationPermission(): Promise<NotificationState> {
+  if (isDesktopShell()) {
+    try {
+      // Platform-specific Tauri plugin: dynamically imported only within desktop shell.
+      const { requestPermission } = await import("@tauri-apps/plugin-notification");
+      const permission = await requestPermission();
+      return permission === "granted" ? "granted" : permission === "denied" ? "denied" : "default";
+    } catch {
+      return "granted";
+    }
+  }
   if (typeof globalThis.Notification === "undefined") return "unsupported";
   const permission = await globalThis.Notification.requestPermission();
   return permission === "granted" ? "granted" : permission === "denied" ? "denied" : "default";
+}
+
+let desktopActionRegistered = false;
+async function ensureDesktopAction(): Promise<void> {
+  if (desktopActionRegistered || !isDesktopShell()) return;
+  desktopActionRegistered = true;
+  try {
+    // Platform-specific Tauri plugin: dynamically imported only within desktop shell.
+    const { onAction } = await import("@tauri-apps/plugin-notification");
+    await onAction((action) => {
+      if (typeof window !== "undefined") {
+        window.focus();
+        const data = action.notification?.extra as { pane_id?: string; machine_id?: string; workspace_id?: string } | undefined;
+        if (data?.pane_id) {
+          window.postMessage(
+            {
+              type: "select-pane",
+              pane_id: data.pane_id,
+              machine_id: data.machine_id || "local",
+              view: "chat",
+              workspace_id: data.workspace_id,
+            },
+            "*",
+          );
+        }
+      }
+    });
+  } catch {
+    desktopActionRegistered = false;
+  }
 }
 
 /**
@@ -32,6 +73,24 @@ export async function requestNotificationPermission(): Promise<NotificationState
  * pane. The constructor is the fallback for a page without a worker.
  */
 async function show(paneId: string, title: string, body: string, onClick?: () => void, machineId = "local", workspaceId?: string): Promise<void> {
+  if (isDesktopShell()) {
+    try {
+      // Platform-specific Tauri plugin: dynamically imported only within desktop shell.
+      const { isPermissionGranted, sendNotification } = await import("@tauri-apps/plugin-notification");
+      const granted = await isPermissionGranted();
+      if (!granted) return;
+      await ensureDesktopAction();
+      sendNotification({
+        title,
+        body,
+        extra: { pane_id: paneId, machine_id: machineId, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
+      });
+      return;
+    } catch {
+      /* fallback to web notification below */
+    }
+  }
+
   if (typeof globalThis.Notification === "undefined") return;
   if (globalThis.Notification.permission !== "granted") return;
   if (typeof document !== "undefined" && !document.hidden) return; // visible tab: the UI already shows it
