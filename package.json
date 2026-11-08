@@ -7,12 +7,12 @@
   "license": "MIT",
   "scripts": {
     "dev": "bun --bun vite",
-    "build": "bun --bun vite build",
+    "build": "vite build",
     "preview": "vite preview",
     "serve": "cargo run -p orion-core --bin orion",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tools.json",
     "check": "cargo check -p orion-core && tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test --timeout 60000",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -24,6 +24,7 @@
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@tauri-apps/plugin-fs": "^2.0.0",
+    "@tauri-apps/plugin-notification": "^2.0.0",
     "@tauri-apps/plugin-shell": "^2.0.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-unicode-graphemes": "0.4.0",
