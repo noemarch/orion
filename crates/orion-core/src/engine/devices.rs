@@ -18,15 +18,14 @@ use crate::engine::store::Store;
 const CODE_TTL: Duration = Duration::from_secs(10 * 60);
 const CODE_ATTEMPTS: u32 = 5;
 const LABEL_MAX: usize = 48;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredDevice {
-    id: String,
-    label: String,
-    role: String,
-    token_hash: String,
-    created_at: String,
-    last_seen_at: Option<String>,
+pub struct StoredDevice {
+    pub id: String,
+    pub label: String,
+    pub role: String,
+    pub token_hash: String,
+    pub created_at: String,
+    pub last_seen_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +148,14 @@ impl DeviceStore {
                 "last_seen_at": device.last_seen_at,
             })).collect::<Vec<_>>(),
         })
+    }
+
+    pub fn devices_vec(&self) -> Vec<StoredDevice> {
+        self.devices.lock().clone()
+    }
+
+    pub fn save_devices(&self, devices: Vec<StoredDevice>) {
+        self.save(&devices);
     }
 
     /// Whether `token` belongs to a paired device.
