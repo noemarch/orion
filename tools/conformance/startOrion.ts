@@ -6,6 +6,8 @@ import { join } from "node:path";
 export interface StartOrionOptions {
   stateDir?: string;
   token?: string;
+  /// Extra environment for the server, e.g. `OPENCODE_DB` so a test reads a fixture store.
+  env?: Record<string, string>;
 }
 
 export interface StartedOrion {
@@ -39,7 +41,11 @@ export async function startOrion(options: StartOrionOptions = {}): Promise<Start
     {
       cwd: root,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, ...(options.token ? { ORION_TOKEN: options.token } : {}) },
+      env: {
+        ...process.env,
+        ...(options.token ? { ORION_TOKEN: options.token } : {}),
+        ...(options.env ?? {}),
+      },
     },
   );
 
