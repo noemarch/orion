@@ -49,24 +49,83 @@ export function paneNotificationTag(paneId: string, machineId = "local"): string
  * a quick answer is read where it was asked), or every one.
  */
 export type DoneAlerts = "off" | "long" | "always";
+
+export interface QuietHours {
+  enabled: boolean;
+  /** "HH:MM" 24-hour format, e.g. "22:00" */
+  start: string;
+  /** "HH:MM" 24-hour format, e.g. "08:00" */
+  end: string;
+}
+
+export type PerAgentAlerts = Record<string, { input?: boolean; done?: DoneAlerts }>;
+
 export interface AlertPrefs {
   input: boolean;
   done: DoneAlerts;
+  quietHours?: QuietHours;
+  agentAlerts?: PerAgentAlerts;
 }
 export const DEFAULT_ALERTS: AlertPrefs = { input: true, done: "long" };
+
+/**
+ * Whether the given time falls within the configured quiet hours window.
+ * Supports windows crossing midnight (e.g. 22:00 to 08:00) and intraday windows.
+ */
+export function inQuietHours(quiet: QuietHours | undefined, date = new Date()): boolean {
+  if (!quiet || !quiet.enabled || !quiet.start || !quiet.end) return false;
+  const parseMin = (time: string): number | null => {
+    const parts = time.split(":");
+    const h = parseInt(parts[0] ?? "", 10);
+    const m = parseInt(parts[1] ?? "", 10);
+    if (isNaN(h) || isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return null;
+    return h * 60 + m;
+  };
+  const startMin = parseMin(quiet.start);
+  const endMin = parseMin(quiet.end);
+  if (startMin === null || endMin === null) return false;
+  const currentMin = date.getHours() * 60 + date.getMinutes();
+  if (startMin <= endMin) {
+    return currentMin >= startMin && currentMin < endMin;
+  }
+  return currentMin >= startMin || currentMin < endMin;
+}
 
 /** Only known values survive; anything else is the default, so a device never loses its alerts to a typo. */
 export function parseAlerts(value: unknown): AlertPrefs {
   const record = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
   const done = record["done"];
+  const quiet = record["quietHours"];
+  const agentAlerts = record["agentAlerts"];
   return {
     input: typeof record["input"] === "boolean" ? record["input"] : DEFAULT_ALERTS.input,
     done: done === "off" || done === "long" || done === "always" ? done : DEFAULT_ALERTS.done,
+    ...(typeof quiet === "object" && quiet !== null
+      ? {
+          quietHours: {
+            enabled: typeof (quiet as Record<string, unknown>)["enabled"] === "boolean" ? ((quiet as Record<string, unknown>)["enabled"] as boolean) : false,
+            start: typeof (quiet as Record<string, unknown>)["start"] === "string" ? ((quiet as Record<string, unknown>)["start"] as string) : "22:00",
+            end: typeof (quiet as Record<string, unknown>)["end"] === "string" ? ((quiet as Record<string, unknown>)["end"] as string) : "08:00",
+          },
+        }
+      : {}),
+    ...(typeof agentAlerts === "object" && agentAlerts !== null ? { agentAlerts: agentAlerts as PerAgentAlerts } : {}),
   };
 }
 
-/** Whether a device with these preferences hears about this status at all (timing aside). */
-export function alertsAllow(prefs: AlertPrefs, status: AgentStatus): boolean {
+/** Whether a device with these preferences hears about this status for an agent and time. */
+export function alertsAllow(
+  prefs: AlertPrefs,
+  status: AgentStatus,
+  agentKind?: string | null,
+  now = new Date(),
+): boolean {
+  if (inQuietHours(prefs.quietHours, now)) return false;
+  if (agentKind && prefs.agentAlerts?.[agentKind]) {
+    const override = prefs.agentAlerts[agentKind];
+    if (status === "blocked" && typeof override.input === "boolean") return override.input;
+    if (status === "done" && typeof override.done === "string") return override.done !== "off";
+  }
   if (status === "blocked") return prefs.input;
   if (status === "done") return prefs.done !== "off";
   return false;
