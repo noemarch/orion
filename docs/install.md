@@ -35,7 +35,7 @@ See [`orion-serve-packaging.md`](orion-serve-packaging.md) for running
 
 ## First run
 
-On first start Orion imports preferences from `~/.config/herdr-web-ui/preferences.json`
+On first start Orion imports preferences from any existing predecessor client
 if present (one-shot, never overwriting later changes) and writes its own state
 under `%APPDATA%\Orion` (Windows) / `$XDG_DATA_HOME/orion` (Linux).
 
