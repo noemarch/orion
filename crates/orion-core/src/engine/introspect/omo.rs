@@ -9,7 +9,7 @@
 //! starts work sits in the user's seat as a notice or a task card.
 //!
 //! A pane is bound to the newest session in its cwd's folder whose header names that cwd. Orion
-//! has no herdr-style process/session report, so no held-session evidence is available; a pane
+//! has no external process/session report, so no held-session evidence is available; a pane
 //! launched with an unrecognized `--session-dir` falls back to scrollback.
 
 use std::collections::HashMap;

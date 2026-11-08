@@ -1465,9 +1465,9 @@ mod tests {
 
     #[test]
     fn parses_orbit_codex_fixture() {
-        let fixture = std::path::Path::new(
-            "C:\\herdr-plugins-project\\orbit\\server\\fixtures\\skill-invocations\\codex.jsonl",
-        );
+        let path = std::env::var("ORBIT_CODEX_FIXTURE")
+            .unwrap_or_else(|_| "fixtures/codex.jsonl".to_string());
+        let fixture = std::path::Path::new(&path);
         let Ok(text) = fs::read_to_string(fixture) else {
             eprintln!("skipped: Orbit codex fixture not present");
             return;

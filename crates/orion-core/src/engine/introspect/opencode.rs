@@ -7,7 +7,7 @@
 //! ordered by `seq`, each a `type` and a JSON `data`.
 //!
 //! A session is bound to a pane by its `directory` column matching the pane's cwd — Orion has no
-//! herdr-style session report, so a pane opens the session whose directory is its cwd.
+//! external session report, so a pane opens the session whose directory is its cwd.
 //!
 //! The reader is incremental: it remembers the greatest `seq` consumed and only parses what was
 //! appended, so a long session costs the same per poll as a short one.
@@ -871,9 +871,9 @@ mod tests {
 
     #[test]
     fn parses_orbit_opencode_fixture() {
-        let fixture = std::path::Path::new(
-            "C:\\herdr-plugins-project\\orbit\\server\\fixtures\\skill-invocations\\opencode.jsonl",
-        );
+        let path = std::env::var("ORBIT_OPENCODE_FIXTURE")
+            .unwrap_or_else(|_| "fixtures/opencode.jsonl".to_string());
+        let fixture = std::path::Path::new(&path);
         let Ok(text) = std::fs::read_to_string(fixture) else {
             eprintln!("skipped: Orbit opencode fixture not present");
             return;

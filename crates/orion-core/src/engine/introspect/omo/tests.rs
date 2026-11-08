@@ -61,9 +61,9 @@ fn text_parts(turn: &Value) -> Vec<&str> {
 
 #[test]
 fn parses_the_recorded_omp_fixture() {
-    let fixture = Path::new(
-        "C:\\herdr-plugins-project\\orbit\\server\\fixtures\\skill-invocations\\omp.jsonl",
-    );
+    let path =
+        std::env::var("ORBIT_OMP_FIXTURE").unwrap_or_else(|_| "fixtures/omp.jsonl".to_string());
+    let fixture = Path::new(&path);
     let Ok(text) = fs::read_to_string(fixture) else {
         eprintln!("skipped: Orbit omp fixture not present");
         return;

@@ -8,7 +8,7 @@
 //! skill is invoked.
 //!
 //! A pane is bound to the newest session of its cwd whose `started_at` is at or after the pane
-//! started. Hermes's `terminal-sessions` breadcrumb (Orbit's fallback when herdr reports no session)
+//! started. Hermes's `terminal-sessions` breadcrumb (Orbit's fallback when no session is reported)
 //! is keyed by a terminal device Orion's Windows PTYs do not have, so a store without a `cwd`
 //! column is left to the terminal rather than guessed at.
 

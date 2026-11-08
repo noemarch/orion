@@ -356,9 +356,9 @@ fn a_plain_error_prefix_marks_a_failed_tool() {
 
 #[test]
 fn a_skill_invocation_is_a_request_with_a_chip() {
-    let fixture = Path::new(
-        "C:\\herdr-plugins-project\\orbit\\server\\fixtures\\skill-invocations\\hermes.txt",
-    );
+    let path =
+        std::env::var("ORBIT_HERMES_FIXTURE").unwrap_or_else(|_| "fixtures/hermes.txt".to_string());
+    let fixture = Path::new(&path);
     let Ok(prompt) = fs::read_to_string(fixture) else {
         eprintln!("skipped: Orbit hermes fixture not present");
         return;
@@ -387,9 +387,9 @@ fn a_skill_invocation_is_a_request_with_a_chip() {
 
 #[test]
 fn a_skill_bundle_is_one_request_with_each_chip() {
-    let fixture = Path::new(
-        "C:\\herdr-plugins-project\\orbit\\server\\fixtures\\skill-invocations\\hermes-bundle.txt",
-    );
+    let path = std::env::var("ORBIT_HERMES_BUNDLE_FIXTURE")
+        .unwrap_or_else(|_| "fixtures/hermes-bundle.txt".to_string());
+    let fixture = Path::new(&path);
     let Ok(prompt) = fs::read_to_string(fixture) else {
         eprintln!("skipped: Orbit hermes bundle fixture not present");
         return;

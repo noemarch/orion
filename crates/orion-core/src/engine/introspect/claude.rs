@@ -567,9 +567,9 @@ mod tests {
 
     #[test]
     fn parses_orbit_claude_fixture() {
-        let fixture = std::path::Path::new(
-            "C:\\herdr-plugins-project\\orbit\\server\\fixtures\\skill-invocations\\claude.jsonl",
-        );
+        let path = std::env::var("ORBIT_CLAUDE_FIXTURE")
+            .unwrap_or_else(|_| "fixtures/claude.jsonl".to_string());
+        let fixture = std::path::Path::new(&path);
         let Ok(text) = fs::read_to_string(fixture) else {
             eprintln!("skipped: Orbit claude fixture not present");
             return;
