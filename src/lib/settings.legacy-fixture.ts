@@ -49,6 +49,10 @@ export const DEFAULT_SETTINGS: Settings = {
   alertDone: "long",
   alertInApp: true,
   alertSound: false,
+  quietHoursEnabled: false,
+  quietHoursStart: "22:00",
+  quietHoursEnd: "08:00",
+  agentAlerts: {},
   quickReplies: ["continue", "yes", "no", "commit and push", "retry"],
   showQuickReplies: false,
   defaultView: "auto",
@@ -118,6 +122,10 @@ export function sanitizeSettings(raw: unknown): Settings {
     alertDone: record["alertDone"] === "off" || record["alertDone"] === "long" || record["alertDone"] === "always" ? record["alertDone"] : DEFAULT_SETTINGS.alertDone,
     alertInApp: typeof record["alertInApp"] === "boolean" ? record["alertInApp"] : DEFAULT_SETTINGS.alertInApp,
     alertSound: typeof record["alertSound"] === "boolean" ? record["alertSound"] : DEFAULT_SETTINGS.alertSound,
+    quietHoursEnabled: typeof record["quietHoursEnabled"] === "boolean" ? record["quietHoursEnabled"] : DEFAULT_SETTINGS.quietHoursEnabled,
+    quietHoursStart: typeof record["quietHoursStart"] === "string" ? record["quietHoursStart"] : DEFAULT_SETTINGS.quietHoursStart,
+    quietHoursEnd: typeof record["quietHoursEnd"] === "string" ? record["quietHoursEnd"] : DEFAULT_SETTINGS.quietHoursEnd,
+    agentAlerts: typeof record["agentAlerts"] === "object" && record["agentAlerts"] !== null ? (record["agentAlerts"] as Record<string, { input?: boolean; done?: "off" | "long" | "always" }>) : DEFAULT_SETTINGS.agentAlerts,
     // kept as typed (a trailing space is the next word being started), only bounded
     quickReplies: Array.isArray(record["quickReplies"])
       ? record["quickReplies"].filter((reply): reply is string => typeof reply === "string").slice(0, QUICK_REPLIES_MAX).map((reply) => reply.slice(0, QUICK_REPLY_MAX_CHARS))

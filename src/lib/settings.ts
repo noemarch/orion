@@ -9,7 +9,7 @@ import { mirrorPalette, SHARED_SETTING_KEYS, type SharedSettingKey } from "../..
 import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { DEFAULT_THEME, isThemeId, terminalColors, themeColor as themeTableColor, type ThemeId, type ThemeEntry } from "./themes.ts";
 import { LANGUAGE_SETTINGS, LOCALE_TAGS, resolveLanguage, setCurrentLanguage, type Language, type LanguageSetting } from "./i18n.ts";
-import type { AlertPrefs, DoneAlerts } from "../../shared/notify-policy.ts";
+import type { AlertPrefs, DoneAlerts, PerAgentAlerts } from "../../shared/notify-policy.ts";
 import { chatFontStack, sanitizeFontFamily } from "./fontFamily.ts";
 import { fontScale, sanitizeUiFontSize } from "./typography.ts";
 import { sanitizeKeyBarExtras, type KeyBarExtra } from "./keys.ts";
@@ -129,6 +129,12 @@ export interface Settings {
   alertInApp: boolean;
   /** an open tab chimes for the same alerts (lib/alertSound.ts), heard also when a Focus silences notifications; off until chosen */
   alertSound: boolean;
+  /** quiet hours suppress alerts during the configured time window */
+  quietHoursEnabled: boolean;
+  quietHoursStart: string;
+  quietHoursEnd: string;
+  /** per-agent alert overrides (agent wire kind -> { input?, done? }) */
+  agentAlerts: PerAgentAlerts;
   /** one-tap replies above the composer, in order; blank ones are kept while being typed, never shown */
   quickReplies: string[];
   /** per reply, whether a tap must be confirmed first, at the same index. Kept beside the words so an
@@ -185,6 +191,7 @@ export const SETTING_SCOPE = {
   terminalWheelSpeed: "device", terminalFontFamily: "device", paneClipboard: "device", releasePaneAway: "device",
   chatFontSize: "device", chatFontFamily: "device", uiFontSize: "device", chatWidth: "device", enterSends: "device",
   keepScreenOn: "device", alertsOn: "device", alertInput: "device", alertDone: "device", alertInApp: "device", alertSound: "device",
+  quietHoursEnabled: "device", quietHoursStart: "device", quietHoursEnd: "device", agentAlerts: "device",
   paletteLight: "device", paletteDark: "device", statusIndicators: "device",
   voiceInput: "device", voiceLanguage: "device", voicePolishChat: "device", voicePolishTerminal: "device",
   // Viewer layout follows this screen, as chatWidth does.
@@ -236,6 +243,10 @@ export const DEFAULT_SETTINGS: Settings = {
   alertDone: "long",
   alertInApp: true,
   alertSound: false,
+  quietHoursEnabled: false,
+  quietHoursStart: "22:00",
+  quietHoursEnd: "08:00",
+  agentAlerts: {},
   quickReplies: ["continue", "yes", "no", "commit and push", "retry"],
   // commit and push reaches the remote: an accidental tap should not
   quickReplyConfirm: [false, false, false, true, false],
@@ -295,7 +306,22 @@ export function quickReplyButtons(settings: Settings): QuickReply[] {
 
 /** This device's alert choices, as the server keeps them with its push subscription. */
 export function alertPrefs(settings: Settings): AlertPrefs {
-  return { input: settings.alertInput, done: settings.alertDone };
+  return {
+    input: settings.alertInput,
+    done: settings.alertDone,
+    ...(settings.quietHoursEnabled
+      ? {
+          quietHours: {
+            enabled: true,
+            start: settings.quietHoursStart,
+            end: settings.quietHoursEnd,
+          },
+        }
+      : {}),
+    ...(Object.keys(settings.agentAlerts).length > 0
+      ? { agentAlerts: settings.agentAlerts }
+      : {}),
+  };
 }
 
 const STORAGE_KEY = "orion-web-ui:settings";
@@ -433,6 +459,10 @@ export function sanitizeSettings(raw: unknown): Settings {
     alertDone: record["alertDone"] === "off" || record["alertDone"] === "long" || record["alertDone"] === "always" ? record["alertDone"] : DEFAULT_SETTINGS.alertDone,
     alertInApp: typeof record["alertInApp"] === "boolean" ? record["alertInApp"] : DEFAULT_SETTINGS.alertInApp,
     alertSound: typeof record["alertSound"] === "boolean" ? record["alertSound"] : DEFAULT_SETTINGS.alertSound,
+    quietHoursEnabled: typeof record["quietHoursEnabled"] === "boolean" ? record["quietHoursEnabled"] : DEFAULT_SETTINGS.quietHoursEnabled,
+    quietHoursStart: typeof record["quietHoursStart"] === "string" ? record["quietHoursStart"] : DEFAULT_SETTINGS.quietHoursStart,
+    quietHoursEnd: typeof record["quietHoursEnd"] === "string" ? record["quietHoursEnd"] : DEFAULT_SETTINGS.quietHoursEnd,
+    agentAlerts: typeof record["agentAlerts"] === "object" && record["agentAlerts"] !== null ? (record["agentAlerts"] as PerAgentAlerts) : DEFAULT_SETTINGS.agentAlerts,
     quickReplies,
     quickReplyConfirm,
     quickReplyMode: QUICK_REPLY_MODES.includes(record["quickReplyMode"] as QuickReplyMode) ? record["quickReplyMode"] as QuickReplyMode : DEFAULT_SETTINGS.quickReplyMode,
