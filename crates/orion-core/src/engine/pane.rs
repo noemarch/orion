@@ -418,6 +418,13 @@ impl Pane {
         state.prompt = None;
     }
 
+    /// Applies the turn state the agent's own transcript reports, returning the transition to
+    /// report as a pane event. omo and omp have no other status source: their grid never tells a
+    /// turn from a redraw, and the transcript is read while a chat is open.
+    pub fn note_transcript_status(&self, status: AgentStatus) -> Option<(AgentStatus, bool)> {
+        apply_transcript_status(&mut self.state.lock(), status)
+    }
+
     /// The visible screen, plain text.
     pub fn visible_text(&self) -> String {
         self.state.lock().screen.visible_text()
@@ -526,6 +533,30 @@ impl Drop for Pane {
     }
 }
 
+/// Applies a turn state the agent's own transcript reported. The transcript says whether a turn
+/// is running, not whether the pane rests: its `Working` is the pane's, and its `Idle` ends a run
+/// as `Done` once, the way a grid-driven turn ends. Returns the transition to report.
+fn apply_transcript_status(
+    state: &mut PaneState,
+    status: AgentStatus,
+) -> Option<(AgentStatus, bool)> {
+    let next = match status {
+        AgentStatus::Working => AgentStatus::Working,
+        AgentStatus::Idle if state.status == AgentStatus::Working => AgentStatus::Done,
+        _ => return None,
+    };
+    if next == state.status {
+        return None;
+    }
+    state.status = next;
+    state.state_change_seq += 1;
+    let completion = next == AgentStatus::Done;
+    if completion {
+        state.completion_seq += 1;
+    }
+    Some((next, completion))
+}
+
 /// Recomputes the agent status after a grid change, and reports a transition once.
 fn update_status(
     state: &mut PaneState,
@@ -533,6 +564,14 @@ fn update_status(
     agent: AgentKind,
     on_event: &Arc<dyn Fn(PaneEvent) + Send + Sync>,
 ) {
+    // omo, omp, pi and hermes draw a TUI that says nothing about their turn; their transcript is
+    // the only record, and it is read when the chat asks (Pane::note_transcript_status).
+    if matches!(
+        agent,
+        AgentKind::Omo | AgentKind::Omp | AgentKind::Pi | AgentKind::Hermes
+    ) {
+        return;
+    }
     let visible = state.screen.visible_text();
     let menu = match agent {
         AgentKind::Claude => prompt::detect_claude(&visible),
@@ -691,6 +730,18 @@ pub fn cwd_of(pane: &Pane) -> &Path {
 mod tests {
     use super::*;
 
+    fn state(status: AgentStatus) -> PaneState {
+        PaneState {
+            screen: ScreenState::new(24, 80),
+            attached: HashMap::new(),
+            status,
+            completion_seq: 0,
+            state_change_seq: 0,
+            prompt: None,
+            exit: None,
+        }
+    }
+
     #[test]
     fn keys_encode_like_a_terminal() {
         assert_eq!(encode_key("enter"), "\r");
@@ -704,5 +755,43 @@ mod tests {
         assert_eq!(encode_key("+"), "+");
         assert_eq!(encode_key("plus"), "+");
         assert_eq!(encode_key("space"), " ");
+    }
+
+    #[test]
+    fn a_transcript_turn_ends_as_done_once() {
+        let mut idle = state(AgentStatus::Idle);
+        // an already-finished session read at open is not news
+        assert_eq!(apply_transcript_status(&mut idle, AgentStatus::Idle), None);
+        assert_eq!(idle.status, AgentStatus::Idle);
+
+        let started = apply_transcript_status(&mut idle, AgentStatus::Working);
+        assert_eq!(started, Some((AgentStatus::Working, false)));
+        assert_eq!(idle.status, AgentStatus::Working);
+        assert_eq!(idle.state_change_seq, 1);
+        // the same turn polled again says nothing new
+        assert_eq!(
+            apply_transcript_status(&mut idle, AgentStatus::Working),
+            None
+        );
+
+        let ended = apply_transcript_status(&mut idle, AgentStatus::Idle);
+        assert_eq!(ended, Some((AgentStatus::Done, true)));
+        assert_eq!(idle.status, AgentStatus::Done);
+        assert_eq!(idle.completion_seq, 1);
+        assert_eq!(apply_transcript_status(&mut idle, AgentStatus::Idle), None);
+    }
+
+    #[test]
+    fn the_grid_does_not_guess_a_transcript_driven_turn() {
+        let mut state = state(AgentStatus::Working);
+        let events: Arc<dyn Fn(PaneEvent) + Send + Sync> = Arc::new(|_| {});
+        update_status(&mut state, "p1", AgentKind::Omo, &events);
+        assert_eq!(state.status, AgentStatus::Working);
+        update_status(&mut state, "p1", AgentKind::Omp, &events);
+        assert_eq!(state.status, AgentStatus::Working);
+        update_status(&mut state, "p1", AgentKind::Pi, &events);
+        assert_eq!(state.status, AgentStatus::Working);
+        update_status(&mut state, "p1", AgentKind::Hermes, &events);
+        assert_eq!(state.status, AgentStatus::Working);
     }
 }

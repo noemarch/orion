@@ -6,4 +6,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod hermes;
+pub mod omo;
 pub mod opencode;
+pub mod pi;

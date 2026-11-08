@@ -18,6 +18,7 @@ pub mod auth;
 pub mod devices;
 pub mod diff;
 pub mod introspect;
+pub mod omo_tasks;
 pub mod pane;
 pub mod push;
 pub mod store;
@@ -43,7 +44,10 @@ use crate::protocol::{AgentKind, AgentStatus, TerminalSize};
 
 use self::introspect::claude::ClaudeTranscript;
 use self::introspect::codex::CodexTranscript;
+use self::introspect::hermes::HermesTranscript;
+use self::introspect::omo::OmoTranscript;
 use self::introspect::opencode::OpencodeTranscript;
+use self::introspect::pi::PiTranscript;
 use self::pane::{FrameSink, Pane, PaneConfig, PaneEvent, Role};
 use self::store::{
     spec_for_saved_pane, SavedPane, SavedSession, SavedTab, SavedWorkspace, Store, DEFAULT_SIZE,
@@ -120,6 +124,9 @@ pub(crate) struct Inner {
     transcripts: Mutex<HashMap<String, ClaudeTranscript>>,
     codex_transcripts: Mutex<HashMap<String, CodexTranscript>>,
     opencode_transcripts: Mutex<HashMap<String, OpencodeTranscript>>,
+    omo_transcripts: Mutex<HashMap<String, OmoTranscript>>,
+    pi_transcripts: Mutex<HashMap<String, PiTranscript>>,
+    hermes_transcripts: Mutex<HashMap<String, HermesTranscript>>,
     devices: devices::DeviceStore,
     push: push::PushService,
     watchers: Mutex<HashMap<String, watcher::Watcher>>,
@@ -158,6 +165,9 @@ impl Engine {
                 transcripts: Mutex::new(HashMap::new()),
                 codex_transcripts: Mutex::new(HashMap::new()),
                 opencode_transcripts: Mutex::new(HashMap::new()),
+                omo_transcripts: Mutex::new(HashMap::new()),
+                pi_transcripts: Mutex::new(HashMap::new()),
+                hermes_transcripts: Mutex::new(HashMap::new()),
                 devices,
                 push,
                 watchers: Mutex::new(HashMap::new()),
@@ -633,6 +643,7 @@ impl Engine {
             ("POST", "/api/pane/clear") => self.clear_pane(body),
             ("GET", "/api/pane/read") => self.read_pane(&query),
             ("GET", "/api/pane/conversation") => self.conversation(&query),
+            ("GET", "/api/pane/omo-tasks") => self.omo_tasks(&query),
             ("GET", "/api/pane/prompt") => self.prompt(&query),
             ("POST", "/api/pane/prompt/answer") => self.answer_prompt(body),
             ("GET", "/api/pane/scroll") => self.scroll(&query),
@@ -1276,6 +1287,10 @@ impl Engine {
         for pane_id in gone {
             self.inner.transcripts.lock().remove(&pane_id);
             self.inner.codex_transcripts.lock().remove(&pane_id);
+            self.inner.opencode_transcripts.lock().remove(&pane_id);
+            self.inner.omo_transcripts.lock().remove(&pane_id);
+            self.inner.pi_transcripts.lock().remove(&pane_id);
+            self.inner.hermes_transcripts.lock().remove(&pane_id);
         }
         if let Some(watcher) = self.inner.watchers.lock().remove(workspace_id) {
             watcher.stop();
@@ -1363,6 +1378,10 @@ impl Engine {
         for pane_id in gone {
             self.inner.transcripts.lock().remove(&pane_id);
             self.inner.codex_transcripts.lock().remove(&pane_id);
+            self.inner.opencode_transcripts.lock().remove(&pane_id);
+            self.inner.omo_transcripts.lock().remove(&pane_id);
+            self.inner.pi_transcripts.lock().remove(&pane_id);
+            self.inner.hermes_transcripts.lock().remove(&pane_id);
         }
         self.save();
         self.broadcast(json!({ "type": "session-changed" }));
@@ -1515,6 +1534,9 @@ impl Engine {
         self.inner.transcripts.lock().remove(pane_id);
         self.inner.codex_transcripts.lock().remove(pane_id);
         self.inner.opencode_transcripts.lock().remove(pane_id);
+        self.inner.omo_transcripts.lock().remove(pane_id);
+        self.inner.pi_transcripts.lock().remove(pane_id);
+        self.inner.hermes_transcripts.lock().remove(pane_id);
         self.save();
         self.broadcast(json!({ "type": "session-changed" }));
         Ok((200, json!({ "ok": true })))
@@ -1668,6 +1690,104 @@ impl Engine {
                 transcript.refresh();
                 return Ok((200, transcript.response()));
             }
+        } else if matches!(pane.agent, AgentKind::Omo | AgentKind::Omp) {
+            let mut transcripts = self.inner.omo_transcripts.lock();
+            if !transcripts.contains_key(pane_id) {
+                if let Some(transcript) =
+                    OmoTranscript::open(pane.agent, &pane.cwd, Some(pane.started()))
+                {
+                    info!(
+                        "omo transcript for {}: {}",
+                        pane_id,
+                        transcript.path().display()
+                    );
+                    transcripts.insert(pane_id.to_string(), transcript);
+                }
+            }
+            let mut read = None;
+            if let Some(transcript) = transcripts.get_mut(pane_id) {
+                transcript.refresh();
+                read = Some((transcript.status(), transcript.response()));
+            }
+            drop(transcripts);
+            if let Some((status, response)) = read {
+                // The transcript is this pane's only status record: a turn it reports running
+                // starts, and the step that stops for good ends it as done.
+                if let Some(status) = status {
+                    if let Some((next, completion)) = pane.note_transcript_status(status) {
+                        self.inner.on_pane_event(PaneEvent::Status {
+                            pane_id: pane_id.to_string(),
+                            status: next,
+                            completion,
+                        });
+                    }
+                }
+                return Ok((200, response));
+            }
+        } else if pane.agent == AgentKind::Pi {
+            let mut transcripts = self.inner.pi_transcripts.lock();
+            if !transcripts.contains_key(pane_id) {
+                if let Some(transcript) = PiTranscript::open(&pane.cwd, Some(pane.started())) {
+                    info!(
+                        "pi transcript for {}: {}",
+                        pane_id,
+                        transcript.path().display()
+                    );
+                    transcripts.insert(pane_id.to_string(), transcript);
+                }
+            }
+            let mut read = None;
+            if let Some(transcript) = transcripts.get_mut(pane_id) {
+                transcript.refresh();
+                read = Some((transcript.status(), transcript.response()));
+            }
+            drop(transcripts);
+            if let Some((status, response)) = read {
+                // pi's TUI says nothing reliable about its turn; its entry tree does, and the
+                // chat is where it is read.
+                if let Some(status) = status {
+                    if let Some((next, completion)) = pane.note_transcript_status(status) {
+                        self.inner.on_pane_event(PaneEvent::Status {
+                            pane_id: pane_id.to_string(),
+                            status: next,
+                            completion,
+                        });
+                    }
+                }
+                return Ok((200, response));
+            }
+        } else if pane.agent == AgentKind::Hermes {
+            let mut transcripts = self.inner.hermes_transcripts.lock();
+            if !transcripts.contains_key(pane_id) {
+                if let Some(transcript) = HermesTranscript::open(&pane.cwd, Some(pane.started())) {
+                    info!(
+                        "hermes transcript for {}: {}",
+                        pane_id,
+                        transcript.path().display()
+                    );
+                    transcripts.insert(pane_id.to_string(), transcript);
+                }
+            }
+            let mut read = None;
+            if let Some(transcript) = transcripts.get_mut(pane_id) {
+                transcript.refresh();
+                read = Some((transcript.status(), transcript.response()));
+            }
+            drop(transcripts);
+            if let Some((status, response)) = read {
+                // Hermes's prompt is a TUI that says nothing reliable about its turn; its
+                // session store does, and the chat is where it is read.
+                if let Some(status) = status {
+                    if let Some((next, completion)) = pane.note_transcript_status(status) {
+                        self.inner.on_pane_event(PaneEvent::Status {
+                            pane_id: pane_id.to_string(),
+                            status: next,
+                            completion,
+                        });
+                    }
+                }
+                return Ok((200, response));
+            }
         }
         // The agent has not written a transcript yet, or it keeps none: the chat reads the grid.
         Ok((
@@ -1677,6 +1797,44 @@ impl Engine {
                 "turns": [],
             }),
         ))
+    }
+
+    /// GET /api/pane/omo-tasks: the background tasks and workflows the pane's OmO session started.
+    /// A pane of any other agent has none; the answer is empty, never an error.
+    fn omo_tasks(
+        &self,
+        query: &HashMap<String, String>,
+    ) -> std::result::Result<(u16, Value), (u16, Value)> {
+        let pane_id = required(query, "pane_id")?;
+        let pane = self.pane(pane_id)?;
+        let empty = || {
+            json!({
+                "tasks": [],
+                "runs": [],
+                "server_time": chrono::Utc::now().to_rfc3339(),
+            })
+        };
+        if !matches!(pane.agent, AgentKind::Omo | AgentKind::Omp) {
+            return Ok((200, empty()));
+        }
+        // The session the pane's chat is reading; opening it here binds the same file the
+        // conversation route would, so both answer about one session.
+        let mut transcripts = self.inner.omo_transcripts.lock();
+        if !transcripts.contains_key(pane_id) {
+            if let Some(transcript) =
+                OmoTranscript::open(pane.agent, &pane.cwd, Some(pane.started()))
+            {
+                transcripts.insert(pane_id.to_string(), transcript);
+            }
+        }
+        let session_id = transcripts
+            .get(pane_id)
+            .map(|transcript| transcript.session_id().to_string());
+        drop(transcripts);
+        let Some(session_id) = session_id else {
+            return Ok((200, empty()));
+        };
+        Ok((200, omo_tasks::activity(pane.agent, &pane.cwd, &session_id)))
     }
 
     fn prompt(
@@ -2480,6 +2638,20 @@ mod tests {
         let (status, body) = engine.http("POST", "/api/workspace/create", &json!({}));
         assert_eq!(status, 400);
         assert_eq!(body["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn omo_tasks_names_the_pane_it_tells_about() {
+        let engine = engine();
+        let (status, body) = engine.http("GET", "/api/pane/omo-tasks", &Value::Null);
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_request");
+        let (status, body) = engine.http("GET", "/api/pane/omo-tasks?pane_id=nope", &Value::Null);
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "pane_not_found");
+        // read-only: another verb is refused, not answered
+        let (status, _) = engine.http("POST", "/api/pane/omo-tasks?pane_id=nope", &Value::Null);
+        assert_eq!(status, 404);
     }
 
     #[test]
