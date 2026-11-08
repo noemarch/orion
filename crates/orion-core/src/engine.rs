@@ -37,7 +37,7 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::agents::{find_in_path, AgentRegistry, LaunchSpec};
+use crate::agents::{find_in_path, AgentRegistry};
 use crate::error::Result;
 use crate::prompt;
 use crate::protocol::{AgentKind, AgentStatus, TerminalSize};
@@ -48,10 +48,15 @@ use self::introspect::hermes::HermesTranscript;
 use self::introspect::omo::OmoTranscript;
 use self::introspect::opencode::OpencodeTranscript;
 use self::introspect::pi::PiTranscript;
-use self::pane::{FrameSink, Pane, PaneConfig, PaneEvent, Role};
+use self::pane::{Pane, PaneEvent};
 use self::store::{
     spec_for_saved_pane, SavedPane, SavedSession, SavedTab, SavedWorkspace, Store, DEFAULT_SIZE,
 };
+
+pub use self::pane::FrameSink;
+pub use self::pane::PaneConfig;
+pub use self::pane::Role;
+pub use crate::agents::LaunchSpec;
 
 /// The wire protocol revision the engine answers with. Clients compare it with the revision they
 /// were built against; a mismatch is a compatibility error, never a silent downgrade.
@@ -152,6 +157,9 @@ impl Engine {
     }
 
     pub fn with_store(store: Store) -> Self {
+        if std::env::var_os("ORION_SKIP_HERDR_IMPORT").is_none() {
+            let _ = store.import_herdr_preferences();
+        }
         let preferences = store.load_preferences();
         let devices = devices::DeviceStore::new(&store);
         let push = push::PushService::new(&store);
@@ -300,6 +308,24 @@ impl Engine {
     /// required: a pong without one would answer nothing.
     pub fn pong(&self, id: &Value) -> Value {
         json!({ "type": "pong", "id": id })
+    }
+
+    /// Spawns a new agent pane with the given configuration.
+    ///
+    /// This is a public wrapper allowing external UIs (like the GPUI shell) to start agents directly.
+    pub fn spawn_pane(&self, config: PaneConfig) -> Result<Arc<Pane>> {
+        let request = PaneRequest {
+            id: config.id,
+            workspace_id: config.workspace_id,
+            tab_id: config.tab_id,
+            agent: config.agent,
+            label: config.label,
+            cwd: config.cwd,
+            args: config.args,
+            session: None,
+            resume_last: false,
+        };
+        self.spawn_pane_request(request)
     }
 
     /// Dispatches one request without a push connection. Used by bounded commands and tests.
@@ -816,7 +842,7 @@ impl Engine {
         let label = label.unwrap_or_else(|| "Workspace".to_string());
         let pane_label = agent.name.clone().unwrap_or_else(|| label.clone());
         let pane = self
-            .spawn_pane(PaneRequest {
+            .spawn_pane_request(PaneRequest {
                 id: pane_id.clone(),
                 workspace_id: workspace_id.clone(),
                 tab_id: tab_id.clone(),
@@ -1446,7 +1472,7 @@ impl Engine {
         let pane_id = Uuid::new_v4().to_string();
         let pane_label = agent.name.clone().unwrap_or_else(|| label.clone());
         let pane = self
-            .spawn_pane(PaneRequest {
+            .spawn_pane_request(PaneRequest {
                 id: pane_id.clone(),
                 workspace_id: workspace_id.clone(),
                 tab_id: tab_id.clone(),
@@ -2095,7 +2121,7 @@ impl Engine {
 
     // ---- panes --------------------------------------------------------------------------
 
-    fn spawn_pane(&self, request: PaneRequest) -> Result<Arc<Pane>> {
+    fn spawn_pane_request(&self, request: PaneRequest) -> Result<Arc<Pane>> {
         let spec = LaunchSpec::for_agent(
             request.agent,
             &request.args,
@@ -2591,6 +2617,7 @@ mod tests {
     use super::*;
 
     fn engine() -> Engine {
+        std::env::set_var("ORION_SKIP_HERDR_IMPORT", "1");
         let dir = std::env::temp_dir().join(format!("orion-engine-{}", Uuid::new_v4()));
         Engine::with_store(Store::at(dir))
     }

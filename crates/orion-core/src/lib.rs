@@ -9,5 +9,6 @@ pub mod screen;
 pub mod transcript;
 pub mod workspace;
 
+pub use engine::{Engine, FrameSink, LaunchSpec, PaneConfig, Role};
 pub use error::{OrionError, Result};
 pub use protocol::*;

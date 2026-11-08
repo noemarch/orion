@@ -187,6 +187,16 @@ impl Pane {
         self.session.pid()
     }
 
+    /// Returns a reference to the underlying PTY session.
+    pub fn session(&self) -> &Arc<PtySession> {
+        &self.session
+    }
+
+    /// Returns the pane's current working directory.
+    pub fn cwd(&self) -> &PathBuf {
+        &self.cwd
+    }
+
     /// The label the sidebar and the chat's header show.
     pub fn label(&self) -> String {
         self.label.lock().clone()

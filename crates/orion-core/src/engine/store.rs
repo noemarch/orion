@@ -156,6 +156,58 @@ impl Store {
     pub fn save_preferences(&self, value: &Value) -> Result<()> {
         self.write("preferences.json", value)
     }
+
+    /// One-shot import of Orbit's (herdr-web-ui's) preferences into this store.
+    ///
+    /// Orion's preferences document has the same `{ revision, settings, pins }` shape as
+    /// herdr's, so the whole document is copied verbatim when Orion has none of its own.
+    /// Guarded by a marker file (`.herdr-imported`) so it never clobbers a preference the
+    /// user has since set in Orion, and never runs twice. Returns whether an import happened.
+    pub fn import_herdr_preferences(&self) -> Result<bool> {
+        let marker = self.dir.join(".herdr-imported");
+        if marker.exists() {
+            return Ok(false);
+        }
+        // Orion already has its own preferences: keep them, but mark so we stop retrying.
+        if self.path("preferences.json").exists() {
+            let _ = fs::write(&marker, b"");
+            return Ok(false);
+        }
+        let Some(herdr_dir) = herdr_config_dir() else {
+            return Ok(false);
+        };
+        let herdr_prefs = herdr_dir.join("preferences.json");
+        if !herdr_prefs.is_file() {
+            let _ = fs::write(&marker, b"");
+            return Ok(false);
+        }
+        let bytes = fs::read(&herdr_prefs)?;
+        // Validate before writing so a corrupt source never replaces a missing document
+        // with garbage.
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|error| OrionError::Store(format!("herdr preferences invalid: {error}")))?;
+        self.write("preferences.json", &value)?;
+        let _ = fs::write(&marker, b"");
+        Ok(true)
+    }
+}
+
+/// Where Orbit (herdr-web-ui) keeps its config: `%USERPROFILE%/.config/herdr-web-ui` on
+/// Windows, `$XDG_CONFIG_HOME/herdr-web-ui` (or `~/.config/...`) elsewhere.
+fn herdr_config_dir() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        let candidate = PathBuf::from(xdg).join("herdr-web-ui");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    let candidate = PathBuf::from(home).join(".config").join("herdr-web-ui");
+    if candidate.is_dir() {
+        Some(candidate)
+    } else {
+        None
+    }
 }
 
 /// The saved pane as a runnable launch: a saved session id wins, else the directory's latest
@@ -222,6 +274,19 @@ mod tests {
     }
 
     #[test]
+    fn a_leftover_temp_file_does_not_corrupt_the_saved_document() {
+        let dir = std::env::temp_dir().join(format!("orion-store-{}", uuid::Uuid::new_v4()));
+        let store = Store::at(dir.clone());
+        let session = SavedSession::default();
+        store.save_session(&session).expect("write");
+        // simulate a crashed write: a half-written temp file beside the good document
+        fs::write(dir.join("workspaces.json.tmp"), b"{not json").expect("tmp");
+        let read = store.load_session();
+        assert_eq!(read.version, 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn an_unknown_agent_in_the_saved_session_is_refused_not_guessed() {
         let pane = SavedPane {
             id: "p1".into(),
@@ -232,5 +297,38 @@ mod tests {
             session_id: None,
         };
         assert!(spec_for_saved_pane(&pane).is_err());
+    }
+
+    #[test]
+    fn herdr_preferences_are_imported_once() {
+        // Pretend a herdr config dir exists by pointing HOME at a temp root.
+        let home = std::env::temp_dir().join(format!("orion-herdr-home-{}", uuid::Uuid::new_v4()));
+        let herdr_dir = home.join(".config").join("herdr-web-ui");
+        fs::create_dir_all(&herdr_dir).expect("herdr dir");
+        fs::write(
+            herdr_dir.join("preferences.json"),
+            r#"{"revision":42,"settings":{"theme":"dark","palette":"amber"},"pins":[]}"#,
+        )
+        .expect("herdr prefs");
+
+        // Run the import with HOME/USERPROFILE pointed at the temp root. The store itself
+        // lives in a separate temp dir so the marker does not collide.
+        let store_dir = std::env::temp_dir().join(format!("orion-store-{}", uuid::Uuid::new_v4()));
+        let old_home = std::env::var_os("USERPROFILE");
+        std::env::set_var("USERPROFILE", &home);
+        let store = Store::at(store_dir.clone());
+        assert!(store.import_herdr_preferences().expect("import"));
+        let imported = store.load_preferences();
+        assert_eq!(imported["revision"], 42);
+        assert_eq!(imported["settings"]["palette"], "amber");
+        // a second run is a no-op and does not overwrite
+        assert!(!store.import_herdr_preferences().expect("second import"));
+        if let Some(value) = old_home {
+            std::env::set_var("USERPROFILE", value);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
+        let _ = fs::remove_dir_all(home);
+        let _ = fs::remove_dir_all(store_dir);
     }
 }
