@@ -22,17 +22,24 @@ impl Drop for Server {
 }
 
 fn start_server() -> Server {
+    start_server_with_env(&[])
+}
+
+fn start_server_with_env(extra_env: &[(&str, &str)]) -> Server {
     let dir = std::env::temp_dir().join(format!("orion-serve-{}", uuid::Uuid::new_v4()));
     let state = dir.join("state");
     std::fs::create_dir_all(&state).expect("state dir");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orion"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orion"));
+    command
         .args(["serve", "--host", "127.0.0.1", "--port", "0", "--state-dir"])
         .arg(&state)
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("orion starts");
+        .stderr(Stdio::inherit());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().expect("orion starts");
 
     let stdout = child.stdout.take().expect("stdout is piped");
     let (sender, receiver) = channel();
@@ -88,6 +95,37 @@ fn get(path: &str, port: u16) -> String {
     response
 }
 
+fn ws_handshake(path: &str, port: u16, extra_headers: &str) -> String {
+    use std::io::Read;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connects to the server");
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{extra_headers}\r\n"
+    )
+    .expect("writes the request");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("timeout");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut buf = [0u8; 4096];
+    let mut response = String::new();
+    while Instant::now() < deadline {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                response.push_str(&String::from_utf8_lossy(&buf[..n]));
+                // Once the upgrade head (or an error status) arrives there is
+                // nothing more to wait for: the socket stays open by design.
+                if response.contains("101") || response.contains("401") {
+                    return response;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    response
+}
+
 #[test]
 fn serve_answers_bridge_health_on_port_zero() {
     let server = start_server();
@@ -101,5 +139,44 @@ fn serve_answers_bridge_health_on_port_zero() {
     assert!(
         response.contains("\"id\":\"local\""),
         "unexpected machines response: {response}"
+    );
+
+    // Without a token the gateway is open on loopback, like the desktop shell.
+    let response = ws_handshake("/ws", server.port, "");
+    assert!(
+        response.contains("101") || response.contains("Switching Protocols"),
+        "ws should upgrade without a token when no token is set: {response}"
+    );
+}
+
+#[test]
+fn serve_rejects_unauthenticated_ws_and_api_when_token_is_set() {
+    let server = start_server_with_env(&[("ORION_TOKEN", "secret-token")]);
+
+    // The public health route stays open; everything else needs the token.
+    let response = get("/api/health?scope=bridge", server.port);
+    assert!(
+        response.contains("200") || response.contains("\"ok\":true"),
+        "health should stay open: {response}"
+    );
+
+    let response = get("/api/pane/read?pane_id=x", server.port);
+    assert!(
+        response.contains("401"),
+        "api without a token must be 401: {response}"
+    );
+
+    // The WebSocket upgrade must not be granted without credentials.
+    let response = ws_handshake("/ws", server.port, "");
+    assert!(
+        response.contains("401"),
+        "ws without a token must be 401: {response}"
+    );
+
+    // With the bearer token the upgrade is granted.
+    let response = ws_handshake("/ws", server.port, "Authorization: Bearer secret-token\r\n");
+    assert!(
+        response.contains("101") || response.contains("Switching Protocols"),
+        "ws with a token should upgrade: {response}"
     );
 }

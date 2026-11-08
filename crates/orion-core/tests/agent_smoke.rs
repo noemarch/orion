@@ -243,3 +243,64 @@ fn opencode_draws_a_grid_and_its_tree_dies_with_the_pane() {
     let _ = std::fs::remove_dir_all(&cwd);
     assert!(!process_alive(pid), "agent {pid} outlived its pane");
 }
+
+fn omp_spec() -> Option<LaunchSpec> {
+    find_in_path("omp")?;
+    LaunchSpec::for_agent(AgentKind::Omp, &[], None, false).ok()
+}
+
+#[test]
+fn omp_draws_a_grid_and_its_tree_dies_with_the_pane() {
+    let Some(spec) = omp_spec() else {
+        eprintln!("skipped: omp is not on PATH");
+        return;
+    };
+    let cwd = scratch("omp-smoke");
+    let events: Arc<dyn Fn(PaneEvent) + Send + Sync> = Arc::new(|_| {});
+    let pane = Pane::spawn(
+        PaneConfig {
+            id: "p1".into(),
+            workspace_id: "w1".into(),
+            tab_id: "t1".into(),
+            agent: AgentKind::Omp,
+            label: "omp".into(),
+            cwd: cwd.clone(),
+            spec,
+            args: Vec::new(),
+            size: TerminalSize {
+                cols: 120,
+                rows: 32,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+        },
+        events,
+    )
+    .expect("the agent starts in a pane");
+    let pid = pane.pid().expect("the agent has a pid");
+
+    let text = wait_for_screen(&pane, 45);
+    assert!(
+        !text.trim().is_empty(),
+        "OMP drew nothing: the PTY or the grid is not working"
+    );
+
+    // A resize storm must leave one coherent grid, not lose the TUI.
+    for (cols, rows) in [(100u16, 30u16), (90, 28), (110, 34), (80, 24), (120, 32)] {
+        pane.resize(cols, rows).expect("resize");
+    }
+    assert_eq!(pane.size(), (32, 120));
+    let after = pane.visible_text();
+    assert!(
+        !after.trim().is_empty(),
+        "the screen went blank after resizing"
+    );
+
+    drop(pane);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && process_alive(pid) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = std::fs::remove_dir_all(&cwd);
+    assert!(!process_alive(pid), "agent {pid} outlived its pane");
+}
