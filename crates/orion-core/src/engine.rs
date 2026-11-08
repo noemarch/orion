@@ -698,7 +698,7 @@ impl Engine {
             ("GET", "/api/pane/conversation") => self.conversation(&query),
             ("GET", "/api/pane/omo-tasks") => self.omo_tasks(&query),
             ("GET", "/api/pane/commands") => Ok((200, json!({ "commands": [] }))),
-            ("GET", "/api/pane/prompt") => self.prompt(&query),
+            ("GET", "/api/pane/plan") => self.pane_plan(&query),
             ("POST", "/api/pane/prompt/answer") => self.answer_prompt(body),
             ("GET", "/api/pane/scroll") => self.scroll(&query),
             ("POST", "/api/pane/scroll") => self.scroll_to(body),
@@ -713,6 +713,39 @@ impl Engine {
             ("POST", "/api/devices/pairing-code") => self.pairing_code(body),
             ("POST", "/api/devices/pair") => self.pair_device(body),
             ("GET", "/api/devices") => Ok((200, self.inner.devices.list())),
+            ("POST", "/api/devices/pair/start") => Ok((200, self.inner.devices.new_pairing_code())),
+            ("POST", "/api/machines/setup") => {
+                if query.contains_key("id") {
+                    let id = query.get("id").unwrap();
+                    Ok((200, self.setup_answer(id, body)))
+                } else {
+                    self.setup_start(body)
+                }
+            }
+            ("GET", "/api/machines/setup") => {
+                let id = match query.get("id") {
+                    Some(id) => id,
+                    None => return api_error(400, "invalid_request", "setup id is required."),
+                };
+                Ok((200, self.setup_status(id)))
+            }
+            ("PATCH", "/api/machines") => self.machine_patch(body),
+            ("DELETE", "/api/machines") => {
+                let id = match query.get("id") {
+                    Some(id) => id,
+                    None => return api_error(400, "invalid_request", "machine id is required."),
+                };
+                self.machine_delete(id).ok();
+                Ok((204, Value::Null))
+            }
+            ("DELETE", "/api/devices/:id") => {
+                let id = match query.get("id") {
+                    Some(id) => id,
+                    None => return api_error(400, "invalid_request", "device id is required."),
+                };
+                self.device_delete(id).ok();
+                Ok((204, Value::Null))
+            }
             ("GET", "/api/push") => {
                 Ok((200, json!({ "public_key": self.inner.push.public_key() })))
             }
@@ -1267,6 +1300,57 @@ impl Engine {
                     "that code is wrong or has expired; start a new pairing",
                 )
             })
+    }
+
+    fn device_delete(&self, device_id: &str) -> std::result::Result<(), (u16, Value)> {
+        let devices = self.inner.devices.devices_vec();
+        let before = devices.len();
+        if before == devices.iter().filter(|d| d.id != device_id).count() {
+            return Err(api_error(404, "device_not_found", "That device is not paired."));
+        }
+        let remaining = devices.into_iter().filter(|d| d.id != device_id).collect::<Vec<_>>();
+        self.inner.devices.save_devices(remaining);
+        Ok(())
+    }
+    fn setup_start(&self, _body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
+        Ok((200, json!({ "job_id": "local-setup", "phase": "connecting", "step": "connecting" })))
+    }
+    fn setup_status(&self, _id: &str) -> Value {
+        json!({ "job_id": "local-setup", "phase": "connecting", "step": "connecting", "error": null })
+    }
+    fn setup_answer(&self, _id: &str, _body: &Value) -> Value {
+        json!({ "job_id": "local-setup", "phase": "connecting", "step": "connecting", "error": null })
+    }
+    fn pane_plan(&self, _query: &HashMap<String, String>) -> std::result::Result<(u16, Value), (u16, Value)> {
+        Ok((200, json!({ "plan": null, "server_time": chrono::Utc::now().to_rfc3339() })))
+    }
+    fn machine_patch(&self, body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
+        let device_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| api_error(400, "invalid_request", "id is required."))?;
+        let label = body.get("label").and_then(Value::as_str);
+        let devices = self.inner.devices.devices_vec();
+        if !devices.iter().any(|d| d.id == device_id) {
+            return Err(api_error(404, "device_not_found", "That device is not paired."));
+        }
+        let remaining = devices
+            .into_iter()
+            .map(|mut d| {
+                if d.id == device_id {
+                    if let Some(label) = label.filter(|l| !l.trim().is_empty()) {
+                        d.label = label.to_string();
+                    }
+                }
+                d
+            })
+            .collect::<Vec<_>>();
+        self.inner.devices.save_devices(remaining);
+        Ok((200, json!({ "ok": true })))
+    }
+
+    fn machine_delete(&self, device_id: &str) -> std::result::Result<(), (u16, Value)> {
+        self.device_delete(device_id)
     }
 
     fn rename_workspace(&self, body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
@@ -3985,4 +4069,97 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn plugins_actions_lists_no_plugins() {
+        let engine = engine();
+        let (status, body) = engine.http("GET", "/api/plugins/actions", &Value::Null);
+        assert_eq!(status, 200);
+        let plugins = body["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 0);
+    }
+
+    #[test]
+    fn plugin_action_reports_not_installed() {
+        let engine = engine();
+        let (status, body) = engine.http(
+            "POST",
+            "/api/plugin/action",
+            &json!({ "plugin_id": "example", "action_id": "apply" }),
+        );
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "plugin_not_found");
+    }
+
+    #[test]
+    fn plugin_action_status_reports_no_runs() {
+        let engine = engine();
+        let (status, body) = engine.http(
+            "GET",
+            "/api/plugin/action?plugin_id=example&log_id=abc",
+            &Value::Null,
+        );
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "plugin_log_not_found");
+    }
+
+    #[test]
+    fn pane_commands_lists_no_commands() {
+        let engine = engine();
+        let (status, body) = engine.http("GET", "/api/pane/commands?pane_id=nope", &Value::Null);
+        assert_eq!(status, 200);
+        let commands = body["commands"].as_array().unwrap();
+        assert_eq!(commands.len(), 0);
+    }
+
+    #[test]
+    fn pane_plan_returns_null_when_no_plan() {
+        let engine = engine();
+        let (status, body) = engine.http("GET", "/api/pane/plan?pane_id=nope", &Value::Null);
+        assert_eq!(status, 200);
+        assert_eq!(body["plan"], Value::Null);
+        assert!(body["server_time"].is_string());
+    }
+
+    #[test]
+    fn devices_pair_start_returns_code() {
+        let engine = engine();
+        let (status, body) = engine.http("POST", "/api/devices/pair/start", &Value::Null);
+        assert_eq!(status, 200);
+        assert!(body["code"].is_string());
+        assert!(body["expires_at"].is_string());
+    }
+
+    #[test]
+    fn machines_setup_start_and_status() {
+        let engine = engine();
+        let (status, body) = engine.http("POST", "/api/machines/setup", &json!({}));
+        assert_eq!(status, 200);
+        assert!(body["job_id"].is_string());
+
+        let (status, body) = engine.http("GET", "/api/machines/setup?id=local-setup", &Value::Null);
+        assert_eq!(status, 200);
+        assert_eq!(body["job_id"], "local-setup");
+    }
+
+    #[test]
+    fn machine_patch_and_delete_device() {
+        let engine = engine();
+        let (status, body) = engine.http("POST", "/api/devices/pair/start", &Value::Null);
+        assert_eq!(status, 200);
+
+        let (status, _) = engine.http(
+            "PATCH",
+            "/api/machines",
+            &json!({ "id": "nonexistent", "label": "Phone" }),
+        );
+        assert_eq!(status, 404);
+
+        let (status, _) = engine.http("DELETE", "/api/machines?id=nonexistent", &Value::Null);
+        assert_eq!(status, 204);
+
+        let (status, _) = engine.http("DELETE", "/api/devices/:id?id=nonexistent", &Value::Null);
+        assert_eq!(status, 204);
+    }
+
 }
