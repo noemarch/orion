@@ -153,94 +153,204 @@ impl PushService {
     /// push message to the endpoint. Returns `Ok(true)` when the push service responds with
     /// 201 (Created) or 204 (No Content).
     pub fn send_test(&self, endpoint: &str, payload: &str, urgency: &str) -> Result<bool, String> {
-        let url =
-            Url::parse(endpoint).map_err(|error| format!("invalid push endpoint: {error}"))?;
-        let origin = url.origin().ascii_serialization();
-
-        let (private_key, subscription) = {
+        let (private_key, keys) = {
             let state = self.state.lock();
-            (
-                state.private_key.clone(),
-                state
-                    .subscriptions
-                    .iter()
-                    .find(|item| item.endpoint == endpoint)
-                    .cloned(),
-            )
-        };
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| format!("failed to read the system clock: {error}"))?
-            .as_secs();
-        let token = vapid_jwt(&private_key, &origin, VAPID_SUBJECT, now)?;
-        let vapid_public_key = public_key_uncompressed(&private_key);
-
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::HeaderName::from_bytes(b"TTL").expect("TTL is a valid header name"),
-            header::HeaderValue::from_str(&PUSH_TTL_SECONDS.to_string())
-                .expect("TTL is a valid header value"),
-        );
-        headers.insert(
-            header::HeaderName::from_bytes(b"Urgency").expect("Urgency is a valid header name"),
-            header::HeaderValue::from_str(urgency)
-                .map_err(|error| format!("invalid urgency header: {error}"))?,
-        );
-
-        let body: Option<Vec<u8>> = if payload.is_empty() {
-            None
-        } else {
+            let private_key = state.private_key.clone();
+            let subscription = state
+                .subscriptions
+                .iter()
+                .find(|item| item.endpoint == endpoint)
+                .cloned();
             let subscription =
                 subscription.ok_or_else(|| format!("no subscription found for {endpoint}"))?;
-            let p256dh = subscription
-                .keys
-                .get("p256dh")
-                .ok_or_else(|| format!("subscription {endpoint} has no p256dh key"))?;
-            let auth = subscription
-                .keys
-                .get("auth")
-                .ok_or_else(|| format!("subscription {endpoint} has no auth key"))?;
-            let (body, salt, sender_public_key) = encrypt_payload(p256dh, auth, payload)?;
-            headers.insert(
-                header::HeaderName::from_bytes(b"Content-Encoding").expect("valid header name"),
-                header::HeaderValue::from_static("aes128gcm"),
-            );
-            headers.insert(
-                header::HeaderName::from_bytes(b"Encryption").expect("valid header name"),
-                header::HeaderValue::from_str(&format!("salt={salt}"))
-                    .map_err(|error| format!("invalid encryption header: {error}"))?,
-            );
-            headers.insert(
-                header::HeaderName::from_bytes(b"Crypto-Key").expect("valid header name"),
-                header::HeaderValue::from_str(&format!("p256ecdsa={sender_public_key}"))
-                    .map_err(|error| format!("invalid crypto-key header: {error}"))?,
-            );
-            Some(body)
+            (private_key, subscription.keys)
         };
 
-        headers.insert(
-            header::HeaderName::from_bytes(b"Authorization").expect("valid header name"),
-            header::HeaderValue::from_str(&format!("vapid t={token}, s={vapid_public_key}"))
-                .map_err(|error| format!("invalid authorization header: {error}"))?,
-        );
-
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|error| format!("failed to build the HTTP client: {error}"))?;
-        let response = client
-            .post(url)
-            .headers(headers)
-            .body(body.unwrap_or_default())
-            .send()
-            .map_err(|error| format!("failed to send push message: {error}"))?;
-
-        match response.status() {
+        match send_to_endpoint(&private_key, endpoint, &keys, payload, urgency)? {
             StatusCode::CREATED | StatusCode::NO_CONTENT => Ok(true),
             status => Err(format!("push delivery to {endpoint} failed: {status}")),
         }
     }
+
+    /// Broadcast a push notification payload to all stored subscriptions whose preferences allow it.
+    ///
+    /// The broadcast filters subscriptions by their stored alert preferences (`input` for blocked,
+    /// `done` for finished turns, and any per-agent overrides). Delivery runs on a background blocking
+    /// thread so Tokio async workers are never stalled by HTTP network operations.
+    pub fn broadcast(
+        &self,
+        payload: &crate::protocol::PushPayload,
+        status: crate::protocol::AgentStatus,
+        agent_kind: Option<&str>,
+    ) {
+        let (private_key, subscriptions) = {
+            let state = self.state.lock();
+            (state.private_key.clone(), state.subscriptions.clone())
+        };
+
+        if subscriptions.is_empty() {
+            return;
+        }
+
+        let payload_text = match serde_json::to_string(payload) {
+            Ok(text) => text,
+            Err(_) => return,
+        };
+
+        let urgency = match status {
+            crate::protocol::AgentStatus::Blocked => "high",
+            _ => "normal",
+        };
+
+        let status_str = match status {
+            crate::protocol::AgentStatus::Blocked => "blocked",
+            crate::protocol::AgentStatus::Done => "done",
+            _ => return,
+        };
+        let agent_kind = agent_kind.map(str::to_string);
+        let path = self.path.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let mut expired = Vec::new();
+            for sub in subscriptions {
+                if let Some(alerts) = &sub.alerts {
+                    let mut allow = true;
+                    if let Some(agent) = agent_kind.as_deref() {
+                        if let Some(agent_rules) =
+                            alerts.get("agentAlerts").and_then(Value::as_object)
+                        {
+                            if let Some(rule) = agent_rules.get(agent) {
+                                if status_str == "blocked" {
+                                    if let Some(val) = rule.get("input").and_then(Value::as_bool) {
+                                        allow = val;
+                                    }
+                                } else if status_str == "done" {
+                                    if let Some(val) = rule.get("done").and_then(Value::as_str) {
+                                        allow = val != "off";
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !allow {
+                        continue;
+                    }
+
+                    let blocked_disallowed = status_str == "blocked"
+                        && !alerts.get("input").and_then(Value::as_bool).unwrap_or(true);
+                    let done_disallowed = status_str == "done"
+                        && alerts.get("done").and_then(Value::as_str).unwrap_or("long") == "off";
+                    if blocked_disallowed || done_disallowed {
+                        continue;
+                    }
+                }
+
+                match send_to_endpoint(
+                    &private_key,
+                    &sub.endpoint,
+                    &sub.keys,
+                    &payload_text,
+                    urgency,
+                ) {
+                    Ok(StatusCode::GONE) | Ok(StatusCode::NOT_FOUND) => {
+                        expired.push(sub.endpoint);
+                    }
+                    _ => {}
+                }
+            }
+
+            if !expired.is_empty() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(mut file) = serde_json::from_str::<PushFile>(&content) {
+                        file.subscriptions
+                            .retain(|s| !expired.contains(&s.endpoint));
+                        if let Ok(updated) = serde_json::to_string_pretty(&file) {
+                            let temp = path.with_extension("tmp");
+                            let _ = std::fs::write(&temp, updated);
+                            let _ = std::fs::rename(&temp, &path);
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+fn send_to_endpoint(
+    private_key: &str,
+    endpoint: &str,
+    keys: &Map<String, String>,
+    payload: &str,
+    urgency: &str,
+) -> Result<StatusCode, String> {
+    let url = Url::parse(endpoint).map_err(|error| format!("invalid push endpoint: {error}"))?;
+    let origin = url.origin().ascii_serialization();
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("failed to read the system clock: {error}"))?
+        .as_secs();
+    let token = vapid_jwt(private_key, &origin, VAPID_SUBJECT, now)?;
+    let vapid_public_key = public_key_uncompressed(private_key);
+
+    let mut headers = header::HeaderMap::new();
+    headers.insert(
+        header::HeaderName::from_bytes(b"TTL").expect("TTL is a valid header name"),
+        header::HeaderValue::from_str(&PUSH_TTL_SECONDS.to_string())
+            .expect("TTL is a valid header value"),
+    );
+    headers.insert(
+        header::HeaderName::from_bytes(b"Urgency").expect("Urgency is a valid header name"),
+        header::HeaderValue::from_str(urgency)
+            .map_err(|error| format!("invalid urgency header: {error}"))?,
+    );
+
+    let body: Option<Vec<u8>> = if payload.is_empty() {
+        None
+    } else {
+        let p256dh = keys
+            .get("p256dh")
+            .ok_or_else(|| format!("subscription {endpoint} has no p256dh key"))?;
+        let auth = keys
+            .get("auth")
+            .ok_or_else(|| format!("subscription {endpoint} has no auth key"))?;
+        let (body, salt, sender_public_key) = encrypt_payload(p256dh, auth, payload)?;
+        headers.insert(
+            header::HeaderName::from_bytes(b"Content-Encoding").expect("valid header name"),
+            header::HeaderValue::from_static("aes128gcm"),
+        );
+        headers.insert(
+            header::HeaderName::from_bytes(b"Encryption").expect("valid header name"),
+            header::HeaderValue::from_str(&format!("salt={salt}"))
+                .map_err(|error| format!("invalid encryption header: {error}"))?,
+        );
+        headers.insert(
+            header::HeaderName::from_bytes(b"Crypto-Key").expect("valid header name"),
+            header::HeaderValue::from_str(&format!("p256ecdsa={sender_public_key}"))
+                .map_err(|error| format!("invalid crypto-key header: {error}"))?,
+        );
+        Some(body)
+    };
+
+    headers.insert(
+        header::HeaderName::from_bytes(b"Authorization").expect("valid header name"),
+        header::HeaderValue::from_str(&format!("vapid t={token}, s={vapid_public_key}"))
+            .map_err(|error| format!("invalid authorization header: {error}"))?,
+    );
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("failed to build the HTTP client: {error}"))?;
+    let response = client
+        .post(url)
+        .headers(headers)
+        .body(body.unwrap_or_default())
+        .send()
+        .map_err(|error| format!("failed to send push message: {error}"))?;
+
+    Ok(response.status())
 }
 
 fn generate_private_key() -> String {
@@ -772,6 +882,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[tokio::test]
+    async fn broadcast_filters_subscriptions_by_alerts_policy() {
+        let dir =
+            std::env::temp_dir().join(format!("orion-push-broadcast-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let store = crate::engine::store::Store::at(dir.clone());
+        let push = PushService::new(&store);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let endpoint = format!("http://127.0.0.1:{port}/push/active");
+
+        let mut rng = rand::thread_rng();
+        let subscription_key = SigningKey::random(&mut rng);
+        let subscription_public = subscription_key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        let mut auth = [0u8; 16];
+        rng.fill_bytes(&mut auth);
+
+        push.subscribe(
+            json!({
+                "endpoint": endpoint,
+                "keys": {
+                    "p256dh": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&subscription_public),
+                    "auth": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(auth),
+                }
+            }),
+            Some(json!({ "input": false, "done": "always" })),
+        );
+
+        let payload = crate::protocol::PushPayload {
+            machine_id: Some("local".to_string()),
+            pane_id: Some("p1".to_string()),
+            workspace_id: None,
+            title: "Test".to_string(),
+            body: "Blocked".to_string(),
+            tag: "orion-pane-p1".to_string(),
+        };
+
+        // Broadcast blocked: subscriber has input: false, so it must not send
+        push.broadcast(&payload, crate::protocol::AgentStatus::Blocked, None);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
     /// Rebuilds the JWT signing input for the round-trip verification test.
     fn signing_input(aud: &str, sub: &str, now: u64) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
