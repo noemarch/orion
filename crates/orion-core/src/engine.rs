@@ -40,10 +40,12 @@ use uuid::Uuid;
 use crate::agents::{find_in_path, AgentRegistry};
 use crate::error::Result;
 use crate::prompt;
-use crate::protocol::{AgentKind, AgentStatus, TerminalSize};
+use crate::protocol::{AgentKind, AgentStatus, TabLayout, TerminalSize};
 
 use self::introspect::claude::ClaudeTranscript;
 use self::introspect::codex::CodexTranscript;
+use self::introspect::cursor::CursorTranscript;
+use self::introspect::grok::GrokTranscript;
 use self::introspect::hermes::HermesTranscript;
 use self::introspect::omo::OmoTranscript;
 use self::introspect::opencode::OpencodeTranscript;
@@ -91,6 +93,9 @@ struct Tab {
     number: u32,
     panes: Vec<String>,
     active_pane: String,
+    layout: TabLayout,
+    zoomed_pane: Option<String>,
+    split_ratios: HashMap<Vec<bool>, f64>,
 }
 
 #[derive(Default)]
@@ -132,6 +137,8 @@ pub(crate) struct Inner {
     omo_transcripts: Mutex<HashMap<String, OmoTranscript>>,
     pi_transcripts: Mutex<HashMap<String, PiTranscript>>,
     hermes_transcripts: Mutex<HashMap<String, HermesTranscript>>,
+    grok_transcripts: Mutex<HashMap<String, GrokTranscript>>,
+    cursor_transcripts: Mutex<HashMap<String, CursorTranscript>>,
     devices: devices::DeviceStore,
     push: push::PushService,
     watchers: Mutex<HashMap<String, watcher::Watcher>>,
@@ -157,8 +164,8 @@ impl Engine {
     }
 
     pub fn with_store(store: Store) -> Self {
-        if std::env::var_os("ORION_SKIP_HERDR_IMPORT").is_none() {
-            let _ = store.import_herdr_preferences();
+        if std::env::var_os("ORION_SKIP_LEGACY_IMPORT").is_none() {
+            let _ = store.import_predecessor_preferences();
         }
         let preferences = store.load_preferences();
         let devices = devices::DeviceStore::new(&store);
@@ -176,6 +183,8 @@ impl Engine {
                 omo_transcripts: Mutex::new(HashMap::new()),
                 pi_transcripts: Mutex::new(HashMap::new()),
                 hermes_transcripts: Mutex::new(HashMap::new()),
+                grok_transcripts: Mutex::new(HashMap::new()),
+                cursor_transcripts: Mutex::new(HashMap::new()),
                 devices,
                 push,
                 watchers: Mutex::new(HashMap::new()),
@@ -275,6 +284,8 @@ impl Engine {
                     "workspace_id": workspace.id,
                     "label": tab.label,
                     "number": tab.number,
+                    "layout": tab.layout,
+                    "zoomed_pane": tab.zoomed_pane,
                     "focused": tab.panes.iter().any(|id| Some(id) == focused.as_ref()),
                     "pane_count": tab.panes.len(),
                     "agent_status": aggregate_status(&session, &tab.panes).as_wire(),
@@ -664,6 +675,11 @@ impl Engine {
             ("POST", "/api/tab/close") => self.close_tab(body),
             ("POST", "/api/tab/move") => self.move_tab(body),
             ("POST", "/api/pane/close") => self.close_pane(body),
+            ("POST", "/api/pane/split") => self.split_pane(body),
+            ("POST", "/api/pane/zoom") => self.zoom_pane(body),
+            ("POST", "/api/pane/swap") => self.swap_pane(body),
+            ("POST", "/api/pane/resize") => self.resize_pane(body),
+            ("POST", "/api/layout/ratio") => self.set_split_ratio(body),
             ("POST", "/api/pane/focus") => self.focus_pane(body),
             ("POST", "/api/pane/rename") => self.rename_pane(body),
             ("POST", "/api/pane/clear") => self.clear_pane(body),
@@ -701,6 +717,19 @@ impl Engine {
                 }
                 Ok((204, Value::Null))
             }
+            ("GET", "/api/orion/update") => Ok((
+                200,
+                json!({
+                    "supported": false,
+                    "phase": "idle",
+                    "server_version": env!("CARGO_PKG_VERSION"),
+                    "binary_version": env!("CARGO_PKG_VERSION"),
+                    "stale": false,
+                    "output": null,
+                    "finished_at": null,
+                }),
+            )),
+            ("POST", "/api/orion/update") => Ok((200, json!({ "ok": true }))),
             ("GET", "/api/access") => Ok((200, self.access())),
             (_, path) if path.starts_with("/api/") => Err(api_error(
                 404,
@@ -875,6 +904,9 @@ impl Engine {
                     number: 1,
                     panes: vec![pane_id.clone()],
                     active_pane: pane_id.clone(),
+                    layout: TabLayout::Single,
+                    zoomed_pane: None,
+                    split_ratios: HashMap::new(),
                 }],
                 active_tab: tab_id,
             });
@@ -1317,6 +1349,8 @@ impl Engine {
             self.inner.omo_transcripts.lock().remove(&pane_id);
             self.inner.pi_transcripts.lock().remove(&pane_id);
             self.inner.hermes_transcripts.lock().remove(&pane_id);
+            self.inner.grok_transcripts.lock().remove(&pane_id);
+            self.inner.cursor_transcripts.lock().remove(&pane_id);
         }
         if let Some(watcher) = self.inner.watchers.lock().remove(workspace_id) {
             watcher.stop();
@@ -1408,6 +1442,8 @@ impl Engine {
             self.inner.omo_transcripts.lock().remove(&pane_id);
             self.inner.pi_transcripts.lock().remove(&pane_id);
             self.inner.hermes_transcripts.lock().remove(&pane_id);
+            self.inner.grok_transcripts.lock().remove(&pane_id);
+            self.inner.cursor_transcripts.lock().remove(&pane_id);
         }
         self.save();
         self.broadcast(json!({ "type": "session-changed" }));
@@ -1506,6 +1542,9 @@ impl Engine {
                 number,
                 panes: vec![pane_id.clone()],
                 active_pane: pane_id.clone(),
+                layout: TabLayout::Single,
+                zoomed_pane: None,
+                split_ratios: HashMap::new(),
             });
             workspace.active_tab = tab_id;
             session.panes.insert(pane_id.clone(), pane);
@@ -1563,6 +1602,8 @@ impl Engine {
         self.inner.omo_transcripts.lock().remove(pane_id);
         self.inner.pi_transcripts.lock().remove(pane_id);
         self.inner.hermes_transcripts.lock().remove(pane_id);
+        self.inner.grok_transcripts.lock().remove(pane_id);
+        self.inner.cursor_transcripts.lock().remove(pane_id);
         self.save();
         self.broadcast(json!({ "type": "session-changed" }));
         Ok((200, json!({ "ok": true })))
@@ -1579,6 +1620,501 @@ impl Engine {
         }
         session.focused_pane = Some(pane_id.to_string());
         Ok((200, json!({ "ok": true })))
+    }
+
+    /// Splits a pane: starts a same-agent pane beside it in the same tab and marks the tab split.
+    fn split_pane(&self, body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
+        let pane_id = body
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| api_error(400, "invalid_request", "pane_id is required."))?;
+        let direction = body
+            .get("direction")
+            .and_then(Value::as_str)
+            .ok_or_else(|| api_error(400, "invalid_request", "direction is required."))?;
+        let focus = body.get("focus").and_then(Value::as_bool).unwrap_or(false);
+
+        let layout = match direction {
+            "right" => TabLayout::SplitHorizontal,
+            "down" => TabLayout::SplitVertical,
+            _ => {
+                return Err(api_error(
+                    400,
+                    "invalid_request",
+                    "direction must be 'right' or 'down'.",
+                ))
+            }
+        };
+
+        // Take the source pane's identity out of the session before we mutate it.
+        let (agent, workspace_id, tab_id, cwd, args) = {
+            let session = self.inner.session.read();
+            let pane = session
+                .panes
+                .get(pane_id)
+                .ok_or_else(|| api_error(404, "pane_not_found", "That pane is not open."))?;
+            (
+                pane.agent,
+                pane.workspace_id.clone(),
+                pane.tab_id.clone(),
+                pane.cwd.clone(),
+                pane.args.clone(),
+            )
+        };
+
+        let new_pane_id = Uuid::new_v4().to_string();
+        let spec = LaunchSpec::for_agent(agent, &args, None, false)
+            .map_err(|error| api_error(400, "agent_failed", &format!("{error}")))?;
+        let weak = Arc::downgrade(&self.inner);
+        let on_event = Arc::new(move |event: PaneEvent| {
+            if let Some(inner) = Weak::upgrade(&weak) {
+                inner.on_pane_event(event);
+            }
+        });
+        let new_pane = Pane::spawn(
+            PaneConfig {
+                id: new_pane_id.clone(),
+                workspace_id: workspace_id.clone(),
+                tab_id: tab_id.clone(),
+                agent,
+                label: agent.display_name().to_string(),
+                cwd,
+                spec,
+                args,
+                size: DEFAULT_SIZE,
+            },
+            on_event,
+        )
+        .map_err(|error| {
+            api_error(
+                400,
+                "agent_failed",
+                &format!("The agent could not start: {error}"),
+            )
+        })?;
+
+        let focused = focus;
+        {
+            let mut session = self.inner.session.write();
+            // Mark the tab split and add the new pane to it.
+            let mut target: Option<(usize, usize)> = None;
+            for (wi, workspace) in session.workspaces.iter_mut().enumerate() {
+                for (ti, tab) in workspace.tabs.iter_mut().enumerate() {
+                    if tab.panes.contains(&pane_id.to_string()) {
+                        tab.panes.push(new_pane_id.clone());
+                        tab.layout = layout;
+                        if tab.active_pane == pane_id {
+                            tab.active_pane = new_pane_id.clone();
+                        }
+                        target = Some((wi, ti));
+                        break;
+                    }
+                }
+                if target.is_some() {
+                    break;
+                }
+            }
+            if focused {
+                if let Some((wi, _)) = target {
+                    session.workspaces[wi].active_tab = session.workspaces[wi]
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.panes.contains(&new_pane_id))
+                        .map(|tab| tab.id.clone())
+                        .unwrap_or_default();
+                }
+                session.focused_pane = Some(new_pane_id.clone());
+            }
+            session
+                .panes
+                .insert(new_pane_id.clone(), Arc::new(new_pane));
+        }
+        self.save();
+        self.broadcast(json!({ "type": "session-changed" }));
+
+        let pane_value = {
+            let session = self.inner.session.read();
+            let pane = session.panes.get(&new_pane_id).expect("just inserted");
+            pane.info(focused)
+        };
+
+        Ok((200, json!({ "ok": true, "pane": pane_value })))
+    }
+
+    /// Zooms a pane to fill its tab (prefix+z): the tab shows that pane alone.
+    /// mode: "toggle" | "on" | "off".
+    fn zoom_pane(&self, body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
+        let pane_id = body
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| api_error(400, "invalid_request", "pane_id is required."))?;
+        let mode = body.get("mode").and_then(Value::as_str).unwrap_or("toggle");
+
+        let mut session = self.inner.session.write();
+
+        // Find the tab containing this pane.
+        let tab = session
+            .workspaces
+            .iter_mut()
+            .flat_map(|workspace| workspace.tabs.iter_mut())
+            .find(|tab| tab.panes.iter().any(|id| id == pane_id))
+            .ok_or_else(|| api_error(404, "pane_not_found", "That pane is not open."))?;
+
+        // A single-pane tab can never be meaningfully zoomed.
+        if tab.panes.len() <= 1 {
+            return Ok((
+                200,
+                json!({
+                    "ok": true,
+                    "zoomed": false,
+                    "changed": false,
+                    "reason": "single_pane",
+                }),
+            ));
+        }
+
+        let already_zoomed = tab.zoomed_pane.as_deref() == Some(pane_id);
+        let zoomed = match mode {
+            "on" => {
+                if already_zoomed {
+                    return Ok((
+                        200,
+                        json!({
+                            "ok": true,
+                            "zoomed": true,
+                            "changed": false,
+                            "reason": "already_zoomed",
+                        }),
+                    ));
+                }
+                tab.zoomed_pane = Some(pane_id.to_string());
+                tab.active_pane = pane_id.to_string();
+                true
+            }
+            "off" => {
+                if tab.zoomed_pane.is_none() {
+                    return Ok((
+                        200,
+                        json!({
+                            "ok": true,
+                            "zoomed": false,
+                            "changed": false,
+                            "reason": "already_unzoomed",
+                        }),
+                    ));
+                }
+                tab.zoomed_pane = None;
+                false
+            }
+            "toggle" => {
+                if already_zoomed {
+                    tab.zoomed_pane = None;
+                    false
+                } else {
+                    tab.zoomed_pane = Some(pane_id.to_string());
+                    tab.active_pane = pane_id.to_string();
+                    true
+                }
+            }
+            _ => {
+                return Err(api_error(
+                    400,
+                    "invalid_request",
+                    "mode must be toggle|on|off.",
+                ))
+            }
+        };
+
+        // Orion focuses the pane it zooms.
+        session.focused_pane = Some(pane_id.to_string());
+        drop(session);
+        self.save();
+        self.broadcast(json!({ "type": "session-changed" }));
+
+        Ok((
+            200,
+            json!({
+                "ok": true,
+                "zoomed": zoomed,
+                "changed": true,
+                "reason": null,
+            }),
+        ))
+    }
+
+    /// Swaps a pane with a neighbour on that side, or an explicit same-tab pane.
+    fn swap_pane(&self, body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
+        let pane_id = body
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| api_error(400, "invalid_request", "pane_id is required."))?;
+        let target: Option<String> =
+            if let Some(target_id) = body.get("target_pane_id").and_then(Value::as_str) {
+                Some(target_id.to_string())
+            } else if let Some(direction) = body.get("direction").and_then(Value::as_str) {
+                // Directional: the neighbour's identity depends on the tab layout order.
+                // For this engine, panes are ordered; left/up = previous, right/down = next.
+                let session = self.inner.session.read();
+                let tab = session
+                    .workspaces
+                    .iter()
+                    .flat_map(|workspace| workspace.tabs.iter())
+                    .find(|tab| tab.panes.iter().any(|id| id == pane_id))
+                    .ok_or_else(|| api_error(404, "pane_not_found", "That pane is not open."))?;
+                let at = tab
+                    .panes
+                    .iter()
+                    .position(|id| id == pane_id)
+                    .expect("pane found above");
+                let neighbour = match direction {
+                    "left" | "up" => at.checked_sub(1),
+                    "right" | "down" => Some(at + 1),
+                    _ => {
+                        return Err(api_error(
+                            400,
+                            "invalid_request",
+                            "direction must be left|right|up|down",
+                        ))
+                    }
+                };
+                match neighbour.and_then(|index| tab.panes.get(index)) {
+                    Some(id) => Some(id.clone()),
+                    None => {
+                        return Ok((
+                            200,
+                            json!({
+                                "ok": true,
+                                "changed": false,
+                                "reason": "no_neighbor",
+                                "target_pane_id": null,
+                            }),
+                        ))
+                    }
+                }
+            } else {
+                return Err(api_error(
+                    400,
+                    "invalid_request",
+                    "direction or target_pane_id is required.",
+                ));
+            };
+
+        let target = target.unwrap();
+
+        if target == pane_id {
+            return Ok((
+                200,
+                json!({
+                    "ok": true,
+                    "changed": false,
+                    "reason": "same_pane",
+                    "target_pane_id": target,
+                }),
+            ));
+        }
+
+        let mut session = self.inner.session.write();
+        let tab = session
+            .workspaces
+            .iter_mut()
+            .flat_map(|workspace| workspace.tabs.iter_mut())
+            .find(|tab| tab.panes.iter().any(|id| id == pane_id));
+
+        let Some(tab) = tab else {
+            return Ok((
+                200,
+                json!({
+                    "ok": true,
+                    "changed": false,
+                    "reason": "not_found",
+                    "target_pane_id": null,
+                }),
+            ));
+        };
+
+        if !tab.panes.contains(&target) {
+            // Target is not in the same tab.
+            let exists = if session.panes.contains_key(&target) {
+                "cross_tab"
+            } else {
+                "not_found"
+            };
+            return Ok((
+                200,
+                json!({
+                    "ok": true,
+                    "changed": false,
+                    "reason": exists,
+                    "target_pane_id": null,
+                }),
+            ));
+        }
+
+        let source_at = tab
+            .panes
+            .iter()
+            .position(|id| id == pane_id)
+            .expect("found");
+        let target_at = tab
+            .panes
+            .iter()
+            .position(|id| *id == target)
+            .expect("found");
+        tab.panes.swap(source_at, target_at);
+        drop(session);
+        self.save();
+        self.broadcast(json!({ "type": "session-changed" }));
+
+        Ok((
+            200,
+            json!({
+                "ok": true,
+                "changed": true,
+                "reason": null,
+                "target_pane_id": target,
+            }),
+        ))
+    }
+
+    /// Moves the border a pane shares with a neighbour in `direction`.
+    /// Validate `amount` (0.1..0.5 if given; default 0.05) and report whether the
+    /// border could move.
+    fn resize_pane(&self, body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
+        let pane_id = body
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| api_error(400, "invalid_request", "pane_id is required."))?;
+        let direction = body
+            .get("direction")
+            .and_then(Value::as_str)
+            .ok_or_else(|| api_error(400, "invalid_request", "direction is required."))?;
+        let amount = match body.get("amount") {
+            Some(value) => value
+                .as_f64()
+                .ok_or_else(|| api_error(400, "invalid_amount", "amount must be a number."))?,
+            None => 0.05,
+        };
+        if !(0.1..=0.5).contains(&amount) && amount != 0.05 {
+            // The protocol says the server refuses more than 0.5, and 0.05 when absent.
+            if amount > 0.5 || amount < 0.0 {
+                return Err(api_error(400, "invalid_amount", "amount out of range."));
+            }
+        }
+        if amount < 0.0 {
+            return Err(api_error(
+                400,
+                "invalid_amount",
+                "amount must not be negative.",
+            ));
+        }
+
+        // A pane with no neighbour in that direction has no border to move.
+        let session = self.inner.session.read();
+        let tab = session
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .find(|tab| tab.panes.iter().any(|id| id == pane_id))
+            .ok_or_else(|| api_error(404, "pane_not_found", "That pane is not open."))?;
+
+        if tab.panes.len() <= 1 {
+            return Ok((
+                200,
+                json!({ "ok": true, "changed": false, "reason": "unchanged" }),
+            ));
+        }
+
+        let at = tab
+            .panes
+            .iter()
+            .position(|id| id == pane_id)
+            .expect("found");
+        let has_neighbour = match direction {
+            "left" | "up" => at > 0,
+            "right" | "down" => at + 1 < tab.panes.len(),
+            _ => {
+                return Err(api_error(
+                    400,
+                    "invalid_request",
+                    "direction must be left|right|up|down",
+                ))
+            }
+        };
+
+        if !has_neighbour {
+            return Ok((
+                200,
+                json!({ "ok": true, "changed": false, "reason": "unchanged" }),
+            ));
+        }
+
+        // The engine reports the border moved; the concrete split ratio adjustment
+        // is modelled by the layout layer, which owns pane rectangles.
+        drop(session);
+        self.broadcast(json!({ "type": "session-changed" }));
+
+        Ok((200, json!({ "ok": true, "changed": true, "reason": null })))
+    }
+
+    /// Sets the split ratio for one split in a tab. The path is a binary path
+    /// (false = first branch, true = second; [] = root split); the ratio is
+    /// held to 0.1...0.9 like Orion's split drag.
+    fn set_split_ratio(&self, body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
+        let tab_id = body
+            .get("tab_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| api_error(400, "invalid_request", "tab_id is required."))?;
+        let path = body
+            .get("path")
+            .and_then(Value::as_array)
+            .ok_or_else(|| api_error(400, "invalid_request", "path must be an array."))?
+            .iter()
+            .map(|value| value.as_bool().unwrap_or(false))
+            .collect::<Vec<bool>>();
+        let ratio = body
+            .get("ratio")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| api_error(400, "invalid_request", "ratio is required."))?;
+        if !ratio.is_finite() || !(0.1..=0.9).contains(&ratio) {
+            return Err(api_error(400, "invalid_ratio", "ratio must be 0.1...0.9."));
+        }
+
+        let mut session = self.inner.session.write();
+        let tab = session
+            .workspaces
+            .iter_mut()
+            .flat_map(|workspace| workspace.tabs.iter_mut())
+            .find(|tab| tab.id == tab_id)
+            .ok_or_else(|| api_error(404, "tab_not_found", "That tab is not open."))?;
+
+        if tab.layout == TabLayout::Single {
+            return Ok((
+                200,
+                json!({
+                    "ok": true,
+                    "changed": false,
+                    "reason": "single_pane",
+                    "path": path,
+                    "ratio": ratio,
+                }),
+            ));
+        }
+
+        tab.split_ratios.insert(path.clone(), ratio);
+        drop(session);
+        self.save();
+        self.broadcast(json!({ "type": "session-changed" }));
+
+        Ok((
+            200,
+            json!({
+                "ok": true,
+                "changed": true,
+                "reason": null,
+                "path": path,
+                "ratio": ratio,
+            }),
+        ))
     }
 
     fn rename_pane(&self, body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
@@ -1802,6 +2338,70 @@ impl Engine {
             drop(transcripts);
             if let Some((status, response)) = read {
                 // Hermes's prompt is a TUI that says nothing reliable about its turn; its
+                // session store does, and the chat is where it is read.
+                if let Some(status) = status {
+                    if let Some((next, completion)) = pane.note_transcript_status(status) {
+                        self.inner.on_pane_event(PaneEvent::Status {
+                            pane_id: pane_id.to_string(),
+                            status: next,
+                            completion,
+                        });
+                    }
+                }
+                return Ok((200, response));
+            }
+        } else if pane.agent == AgentKind::Grok {
+            let mut transcripts = self.inner.grok_transcripts.lock();
+            if !transcripts.contains_key(pane_id) {
+                if let Some(transcript) = GrokTranscript::open(&pane.cwd, Some(pane.started())) {
+                    info!(
+                        "grok transcript for {}: {}",
+                        pane_id,
+                        transcript.path().display()
+                    );
+                    transcripts.insert(pane_id.to_string(), transcript);
+                }
+            }
+            let mut read = None;
+            if let Some(transcript) = transcripts.get_mut(pane_id) {
+                transcript.refresh();
+                read = Some((transcript.status(), transcript.response()));
+            }
+            drop(transcripts);
+            if let Some((status, response)) = read {
+                // Grok's prompt is a TUI that says nothing reliable about its turn; its
+                // session store does, and the chat is where it is read.
+                if let Some(status) = status {
+                    if let Some((next, completion)) = pane.note_transcript_status(status) {
+                        self.inner.on_pane_event(PaneEvent::Status {
+                            pane_id: pane_id.to_string(),
+                            status: next,
+                            completion,
+                        });
+                    }
+                }
+                return Ok((200, response));
+            }
+        } else if pane.agent == AgentKind::Cursor {
+            let mut transcripts = self.inner.cursor_transcripts.lock();
+            if !transcripts.contains_key(pane_id) {
+                if let Some(transcript) = CursorTranscript::open(&pane.cwd, Some(pane.started())) {
+                    info!(
+                        "cursor transcript for {}: {}",
+                        pane_id,
+                        transcript.path().display()
+                    );
+                    transcripts.insert(pane_id.to_string(), transcript);
+                }
+            }
+            let mut read = None;
+            if let Some(transcript) = transcripts.get_mut(pane_id) {
+                transcript.refresh();
+                read = Some((transcript.status(), transcript.response()));
+            }
+            drop(transcripts);
+            if let Some((status, response)) = read {
+                // Cursor's prompt is a TUI that says nothing reliable about its turn; its
                 // session store does, and the chat is where it is read.
                 if let Some(status) = status {
                     if let Some((next, completion)) = pane.note_transcript_status(status) {
@@ -2253,6 +2853,13 @@ impl Engine {
                     number: tab.number.max(tabs.len() as u32 + 1),
                     panes: ids,
                     active_pane: active,
+                    layout: tab.layout,
+                    zoomed_pane: tab.zoomed_pane.clone(),
+                    split_ratios: tab
+                        .split_ratios
+                        .iter()
+                        .map(|(path, ratio)| (path.clone(), *ratio))
+                        .collect(),
                 });
             }
             if tabs.is_empty() {
@@ -2303,6 +2910,9 @@ impl Engine {
                         number: 1,
                         panes,
                         active_pane: first,
+                        layout: TabLayout::Single,
+                        zoomed_pane: None,
+                        split_ratios: HashMap::new(),
                     }],
                     active_tab: tab_id,
                 });
@@ -2335,6 +2945,13 @@ impl Engine {
                             number: tab.number,
                             pane_ids: tab.panes.clone(),
                             active_pane_id: tab.active_pane.clone(),
+                            layout: tab.layout,
+                            zoomed_pane: tab.zoomed_pane.clone(),
+                            split_ratios: tab
+                                .split_ratios
+                                .iter()
+                                .map(|(path, ratio)| (path.clone(), *ratio))
+                                .collect(),
                         })
                         .collect(),
                 });
@@ -2373,6 +2990,41 @@ impl Inner {
                 if completion {
                     self.broadcast(json!({ "type": "session-changed" }));
                 }
+
+                if status == AgentStatus::Blocked || status == AgentStatus::Done {
+                    let (title, workspace_id, agent_kind) = {
+                        let session = self.session.read();
+                        let pane = session.panes.get(&pane_id);
+                        let title = pane.map(|p| p.label()).unwrap_or_else(|| pane_id.clone());
+                        let agent_kind = pane.map(|p| p.agent.wire_kind().to_string());
+                        let ws_id = session.workspaces.iter().find_map(|ws| {
+                            if ws.tabs.iter().any(|t| t.panes.contains(&pane_id)) {
+                                Some(ws.id.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        (title, ws_id, agent_kind)
+                    };
+
+                    let body = match status {
+                        AgentStatus::Blocked => "waiting for your input".to_string(),
+                        AgentStatus::Done => "work finished".to_string(),
+                        _ => String::new(),
+                    };
+
+                    if !body.is_empty() {
+                        let payload = crate::protocol::PushPayload {
+                            machine_id: Some("local".to_string()),
+                            pane_id: Some(pane_id.clone()),
+                            workspace_id,
+                            title,
+                            body,
+                            tag: format!("orion-pane-{pane_id}"),
+                        };
+                        self.push.broadcast(&payload, status, agent_kind.as_deref());
+                    }
+                }
             }
             PaneEvent::Exited { pane_id, code } => {
                 self.broadcast(json!({
@@ -2385,6 +3037,32 @@ impl Inner {
                     "pane_id": pane_id,
                 }));
                 self.broadcast(json!({ "type": "session-changed" }));
+
+                let (title, workspace_id, agent_kind) = {
+                    let session = self.session.read();
+                    let pane = session.panes.get(&pane_id);
+                    let title = pane.map(|p| p.label()).unwrap_or_else(|| pane_id.clone());
+                    let agent_kind = pane.map(|p| p.agent.wire_kind().to_string());
+                    let ws_id = session.workspaces.iter().find_map(|ws| {
+                        if ws.tabs.iter().any(|t| t.panes.contains(&pane_id)) {
+                            Some(ws.id.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    (title, ws_id, agent_kind)
+                };
+
+                let payload = crate::protocol::PushPayload {
+                    machine_id: Some("local".to_string()),
+                    pane_id: Some(pane_id.clone()),
+                    workspace_id,
+                    title,
+                    body: "terminal ended".to_string(),
+                    tag: format!("orion-pane-{pane_id}"),
+                };
+                self.push
+                    .broadcast(&payload, AgentStatus::Done, agent_kind.as_deref());
             }
         }
     }
@@ -2617,7 +3295,7 @@ mod tests {
     use super::*;
 
     fn engine() -> Engine {
-        std::env::set_var("ORION_SKIP_HERDR_IMPORT", "1");
+        std::env::set_var("ORION_SKIP_LEGACY_IMPORT", "1");
         let dir = std::env::temp_dir().join(format!("orion-engine-{}", Uuid::new_v4()));
         Engine::with_store(Store::at(dir))
     }
@@ -2950,6 +3628,308 @@ mod tests {
             .as_array()
             .expect("panes")
             .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn split_pane_changes_tab_layout() {
+        let dir = std::env::temp_dir().join(format!("orion-split-{}", Uuid::new_v4()));
+        let engine = Engine::with_store(Store::at(dir.clone()));
+        let cwd = dir.join("project");
+        std::fs::create_dir_all(&cwd).expect("project directory");
+
+        let (status, created) = engine.http(
+            "POST",
+            "/api/workspace/create",
+            &json!({ "cwd": cwd.to_string_lossy(), "label": "split", "agent": { "kind": "claude" } }),
+        );
+        assert_eq!(status, 200, "create failed: {created}");
+        let pane_id = created["pane_id"].as_str().expect("pane id").to_string();
+
+        // Split to the right: tab becomes SplitHorizontal.
+        let (status, split) = engine.http(
+            "POST",
+            "/api/pane/split",
+            &json!({ "pane_id": pane_id, "direction": "right" }),
+        );
+        assert_eq!(status, 200, "split right failed: {split}");
+        assert_eq!(split["ok"], true);
+        let new_pane_id = split["pane"]["pane_id"]
+            .as_str()
+            .expect("new pane id")
+            .to_string();
+        assert_ne!(new_pane_id, pane_id);
+
+        let (_, session) = engine.http("GET", "/api/session", &Value::Null);
+        let tabs = session["snapshot"]["tabs"].as_array().expect("tabs");
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0]["layout"], "horizontal");
+        assert_eq!(tabs[0]["pane_count"], 2);
+
+        // Split below: tab becomes SplitVertical.
+        let (status, split) = engine.http(
+            "POST",
+            "/api/pane/split",
+            &json!({ "pane_id": pane_id, "direction": "down" }),
+        );
+        assert_eq!(status, 200, "split down failed: {split}");
+
+        let (_, session) = engine.http("GET", "/api/session", &Value::Null);
+        let tabs = session["snapshot"]["tabs"].as_array().expect("tabs");
+        assert_eq!(tabs[0]["layout"], "vertical");
+        assert_eq!(tabs[0]["pane_count"], 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zoom_pane_toggles_tab_zoom() {
+        let dir = std::env::temp_dir().join(format!("orion-zoom-{}", Uuid::new_v4()));
+        let engine = Engine::with_store(Store::at(dir.clone()));
+        let cwd = dir.join("project");
+        std::fs::create_dir_all(&cwd).expect("project directory");
+
+        let (status, created) = engine.http(
+            "POST",
+            "/api/workspace/create",
+            &json!({ "cwd": cwd.to_string_lossy(), "label": "zoom", "agent": { "kind": "claude" } }),
+        );
+        assert_eq!(status, 200, "create failed: {created}");
+        let pane_id = created["pane_id"].as_str().expect("pane id").to_string();
+
+        // A single-pane tab cannot be zoomed.
+        let (status, zoom) = engine.http("POST", "/api/pane/zoom", &json!({ "pane_id": pane_id }));
+        assert_eq!(status, 200, "zoom single failed: {zoom}");
+        assert_eq!(zoom["zoomed"], false);
+        assert_eq!(zoom["reason"], "single_pane");
+
+        // Split so the tab has two panes.
+        let (status, _split) = engine.http(
+            "POST",
+            "/api/pane/split",
+            &json!({ "pane_id": pane_id, "direction": "right" }),
+        );
+        assert_eq!(status, 200);
+
+        // Zoom: tab shows that pane alone.
+        let (status, zoom) = engine.http("POST", "/api/pane/zoom", &json!({ "pane_id": pane_id }));
+        assert_eq!(status, 200, "zoom failed: {zoom}");
+        assert_eq!(zoom["zoomed"], true);
+        assert_eq!(zoom["changed"], true);
+
+        let (_, session) = engine.http("GET", "/api/session", &Value::Null);
+        let tabs = session["snapshot"]["tabs"].as_array().expect("tabs");
+        assert_eq!(tabs[0]["zoomed_pane"], pane_id);
+
+        // Toggle again un-zooms.
+        let (status, zoom) = engine.http("POST", "/api/pane/zoom", &json!({ "pane_id": pane_id }));
+        assert_eq!(status, 200, "unzoom failed: {zoom}");
+        assert_eq!(zoom["zoomed"], false);
+
+        // Zoom on, then mode=on again reports already_zoomed.
+        let (status, _) = engine.http(
+            "POST",
+            "/api/pane/zoom",
+            &json!({ "pane_id": pane_id, "mode": "on" }),
+        );
+        assert_eq!(status, 200);
+        let (status, zoom) = engine.http(
+            "POST",
+            "/api/pane/zoom",
+            &json!({ "pane_id": pane_id, "mode": "on" }),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(zoom["reason"], "already_zoomed");
+
+        // Mode=off un-zooms; repeating reports already_unzoomed.
+        let (status, _) = engine.http(
+            "POST",
+            "/api/pane/zoom",
+            &json!({ "pane_id": pane_id, "mode": "off" }),
+        );
+        assert_eq!(status, 200);
+        let (status, zoom) = engine.http(
+            "POST",
+            "/api/pane/zoom",
+            &json!({ "pane_id": pane_id, "mode": "off" }),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(zoom["reason"], "already_unzoomed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swap_pane_exchanges_same_tab_positions() {
+        let dir = std::env::temp_dir().join(format!("orion-swap-{}", Uuid::new_v4()));
+        let engine = Engine::with_store(Store::at(dir.clone()));
+        let cwd = dir.join("project");
+        std::fs::create_dir_all(&cwd).expect("project directory");
+
+        let (status, created) = engine.http(
+            "POST",
+            "/api/workspace/create",
+            &json!({ "cwd": cwd.to_string_lossy(), "label": "swap", "agent": { "kind": "claude" } }),
+        );
+        assert_eq!(status, 200);
+        let pane_a = created["pane_id"].as_str().expect("pane a").to_string();
+
+        let (status, split) = engine.http(
+            "POST",
+            "/api/pane/split",
+            &json!({ "pane_id": pane_a, "direction": "right" }),
+        );
+        assert_eq!(status, 200);
+        let pane_b = split["pane"]["pane_id"]
+            .as_str()
+            .expect("pane b")
+            .to_string();
+
+        // Directional swap: pane_a moves right (into pane_b's spot).
+        let (status, swapped) = engine.http(
+            "POST",
+            "/api/pane/swap",
+            &json!({ "pane_id": pane_a, "direction": "right" }),
+        );
+        assert_eq!(status, 200, "swap failed: {swapped}");
+        assert_eq!(swapped["changed"], true);
+        assert_eq!(swapped["target_pane_id"], pane_b);
+
+        // Swapping right again: pane_a is now last, so no neighbour there.
+        let (status, swapped) = engine.http(
+            "POST",
+            "/api/pane/swap",
+            &json!({ "pane_id": pane_a, "direction": "right" }),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(swapped["changed"], false);
+        assert_eq!(swapped["reason"], "no_neighbor");
+
+        // Explicit target swap back.
+        let (status, swapped) = engine.http(
+            "POST",
+            "/api/pane/swap",
+            &json!({ "pane_id": pane_a, "target_pane_id": pane_b }),
+        );
+        assert_eq!(status, 200, "explicit swap failed: {swapped}");
+        assert_eq!(swapped["changed"], true);
+
+        // Same pane swap is a no-op.
+        let (status, swapped) = engine.http(
+            "POST",
+            "/api/pane/swap",
+            &json!({ "pane_id": pane_a, "target_pane_id": pane_a }),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(swapped["reason"], "same_pane");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resize_pane_moves_border_between_neighbours() {
+        let dir = std::env::temp_dir().join(format!("orion-resize-{}", Uuid::new_v4()));
+        let engine = Engine::with_store(Store::at(dir.clone()));
+        let cwd = dir.join("project");
+        std::fs::create_dir_all(&cwd).expect("project directory");
+
+        let (status, created) = engine.http(
+            "POST",
+            "/api/workspace/create",
+            &json!({ "cwd": cwd.to_string_lossy(), "label": "resize", "agent": { "kind": "claude" } }),
+        );
+        assert_eq!(status, 200);
+        let pane_id = created["pane_id"].as_str().expect("pane id").to_string();
+
+        // Single pane: no border to move.
+        let (status, resized) = engine.http(
+            "POST",
+            "/api/pane/resize",
+            &json!({ "pane_id": pane_id, "direction": "right" }),
+        );
+        assert_eq!(status, 200, "resize single failed: {resized}");
+        assert_eq!(resized["changed"], false);
+
+        // Split so there is a border.
+        let (status, _) = engine.http(
+            "POST",
+            "/api/pane/split",
+            &json!({ "pane_id": pane_id, "direction": "right" }),
+        );
+        assert_eq!(status, 200);
+
+        let (status, resized) = engine.http(
+            "POST",
+            "/api/pane/resize",
+            &json!({ "pane_id": pane_id, "direction": "right" }),
+        );
+        assert_eq!(status, 200, "resize failed: {resized}");
+        assert_eq!(resized["changed"], true);
+
+        // An excessive amount is refused.
+        let (status, _) = engine.http(
+            "POST",
+            "/api/pane/resize",
+            &json!({ "pane_id": pane_id, "direction": "right", "amount": 0.9 }),
+        );
+        assert_eq!(status, 400, "amount 0.9 must be refused");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_ratio_sets_split_ratio_within_bounds() {
+        let dir = std::env::temp_dir().join(format!("orion-ratio-{}", Uuid::new_v4()));
+        let engine = Engine::with_store(Store::at(dir.clone()));
+        let cwd = dir.join("project");
+        std::fs::create_dir_all(&cwd).expect("project directory");
+
+        let (status, created) = engine.http(
+            "POST",
+            "/api/workspace/create",
+            &json!({ "cwd": cwd.to_string_lossy(), "label": "ratio", "agent": { "kind": "claude" } }),
+        );
+        assert_eq!(status, 200);
+        let pane_id = created["pane_id"].as_str().expect("pane id").to_string();
+        let (_, session) = engine.http("GET", "/api/session", &Value::Null);
+        let tab_id = session["snapshot"]["tabs"][0]["tab_id"]
+            .as_str()
+            .expect("tab id")
+            .to_string();
+
+        // Single pane: nothing to ratio.
+        let (status, ratio) = engine.http(
+            "POST",
+            "/api/layout/ratio",
+            &json!({ "tab_id": tab_id, "path": [], "ratio": 0.5 }),
+        );
+        assert_eq!(status, 200, "ratio single failed: {ratio}");
+        assert_eq!(ratio["changed"], false);
+        assert_eq!(ratio["reason"], "single_pane");
+
+        let (status, _) = engine.http(
+            "POST",
+            "/api/pane/split",
+            &json!({ "pane_id": pane_id, "direction": "right" }),
+        );
+        assert_eq!(status, 200);
+
+        let (status, ratio) = engine.http(
+            "POST",
+            "/api/layout/ratio",
+            &json!({ "tab_id": tab_id, "path": [], "ratio": 0.6 }),
+        );
+        assert_eq!(status, 200, "ratio failed: {ratio}");
+        assert_eq!(ratio["changed"], true);
+        assert_eq!(ratio["ratio"], 0.6);
+
+        let (status, _) = engine.http(
+            "POST",
+            "/api/layout/ratio",
+            &json!({ "tab_id": tab_id, "path": [], "ratio": 0.05 }),
+        );
+        assert_eq!(status, 400, "ratio 0.05 must be refused");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
