@@ -16,7 +16,7 @@ const STATUS_COLOR: Readonly<Record<KnownStatus, string>> = {
 
 /**
  * Derives a clean 2-letter monogram for a workspace or repository label.
- * E.g.: "orion" -> "OR", "orion-plugins" -> "HP", "auth_service" -> "AS".
+ * E.g.: "orion" -> "OR", "orion-plugins" -> "OP", "auth_service" -> "AS".
  */
 export function workspaceMonogram(label: string): string {
   const clean = label.normalize("NFKC").replace(OTHER_CONTROL, "").trim();

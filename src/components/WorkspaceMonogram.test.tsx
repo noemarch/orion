@@ -5,7 +5,7 @@ import { WorkspaceMonogram } from "./WorkspaceMonogram.tsx";
 
 test("workspaceMonogram extracts 2 letters from various label styles", () => {
   expect(workspaceMonogram("orion")).toBe("OR");
-  expect(workspaceMonogram("orion-plugins")).toBe("HP");
+  expect(workspaceMonogram("orion-plugins")).toBe("OP");
   expect(workspaceMonogram("auth_service")).toBe("AS");
   expect(workspaceMonogram("web-ui-client")).toBe("WU");
   expect(workspaceMonogram("api")).toBe("AP");
