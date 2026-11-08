@@ -664,6 +664,17 @@ impl Engine {
             ("PUT", "/api/preferences") => self.put_preferences(body),
             ("POST", "/api/workspace/create") => self.create_workspace(body),
             ("POST", "/api/workspace/rename") => self.rename_workspace(body),
+            ("GET", "/api/plugins/actions") => Ok((200, json!({ "plugins": [] }))),
+            ("POST", "/api/plugin/action") => Ok(api_error(
+                404,
+                "plugin_not_found",
+                "No plugins are installed on this PC.",
+            )),
+            ("GET", "/api/plugin/action") => Ok(api_error(
+                404,
+                "plugin_log_not_found",
+                "No plugin runs are recorded on this PC.",
+            )),
             ("POST", "/api/workspace/move") => self.move_workspace(body),
             ("POST", "/api/workspace/close") => self.close_workspace(body),
             ("GET", "/api/worktree/list") => self.worktree_list(&query),
@@ -686,6 +697,7 @@ impl Engine {
             ("GET", "/api/pane/read") => self.read_pane(&query),
             ("GET", "/api/pane/conversation") => self.conversation(&query),
             ("GET", "/api/pane/omo-tasks") => self.omo_tasks(&query),
+            ("GET", "/api/pane/commands") => Ok((200, json!({ "commands": [] }))),
             ("GET", "/api/pane/prompt") => self.prompt(&query),
             ("POST", "/api/pane/prompt/answer") => self.answer_prompt(body),
             ("GET", "/api/pane/scroll") => self.scroll(&query),
@@ -3359,6 +3371,47 @@ mod tests {
         assert_eq!(status, 404);
     }
 
+    #[test]
+    fn plugins_actions_lists_no_plugins() {
+        let engine = engine();
+        let (status, body) = engine.http("GET", "/api/plugins/actions", &Value::Null);
+        assert_eq!(status, 200);
+        let plugins = body["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 0);
+    }
+
+    #[test]
+    fn plugin_action_reports_not_installed() {
+        let engine = engine();
+        let (status, body) = engine.http(
+            "POST",
+            "/api/plugin/action",
+            &json!({ "plugin_id": "example", "action_id": "apply" }),
+        );
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "plugin_not_found");
+    }
+
+    #[test]
+    fn plugin_action_status_reports_no_runs() {
+        let engine = engine();
+        let (status, body) = engine.http(
+            "GET",
+            "/api/plugin/action?plugin_id=example&log_id=abc",
+            &Value::Null,
+        );
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "plugin_log_not_found");
+    }
+
+    #[test]
+    fn pane_commands_lists_no_commands() {
+        let engine = engine();
+        let (status, body) = engine.http("GET", "/api/pane/commands?pane_id=nope", &Value::Null);
+        assert_eq!(status, 200);
+        let commands = body["commands"].as_array().unwrap();
+        assert_eq!(commands.len(), 0);
+    }
     #[test]
     fn echo_round_trips_a_megabyte_byte_for_byte() {
         // One MiB of four-byte characters exercises every UTF-8 boundary and the JSON string path.
