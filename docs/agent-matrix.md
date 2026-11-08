@@ -12,8 +12,8 @@ instance; Orion has no generic shell tabs.
 | Omp | yes | yes | — | — | senpi family |
 | Pi | yes | yes | — | — | `/tree` abandoned paths |
 | Hermes | yes | yes | — | — | `state.db`, status inferred |
-| Grok | no | — | — | — | deferred (M5) |
-| Cursor | no | — | — | — | deferred (M5) |
+| Grok | yes | yes | — | — | JSONL updates log (`updates.jsonl`) |
+| Cursor | yes | yes | — | — | `state.vscdb` reader (ItemTable/cursorDiskKV) |
 | Agy | no | — | — | — | deferred (M5) |
 | Devin | no | — | — | — | deferred (M5) |
 
