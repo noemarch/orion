@@ -231,7 +231,17 @@ fn unauthorized(state: &AppState, headers: &axum::http::HeaderMap, path: &str) -
     }
 }
 
-async fn events_handler(State(state): State<AppState>) -> impl IntoResponse {
+async fn events_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if unauthorized(&state, &headers, "/api/machines/events") {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": { "code": "unauthorized", "message": "token required" } })),
+        )
+            .into_response();
+    }
     let (tx, rx) = mpsc::unbounded_channel::<Value>();
     let id = state.engine.connect(Arc::new(move |frame: Value| {
         let _ = tx.send(frame);
@@ -277,11 +287,25 @@ async fn events_handler(State(state): State<AppState>) -> impl IntoResponse {
         },
     );
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if unauthorized(&state, &headers, "/ws") {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": { "code": "unauthorized", "message": "token required" } })),
+        )
+            .into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
+        .into_response()
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
