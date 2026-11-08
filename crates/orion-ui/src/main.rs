@@ -1,7 +1,7 @@
 //! Orion native UI entry point (GPUI).
 //!
-//! Placeholder for P0 Step 2: a minimal GPUI window that opens and renders.
-//! Later steps will replace this with the workspace sidebar + terminal pane.
+//! Main binary for the GPUI-based Orion shell. Renders the workspace sidebar
+//! and a live terminal pane driven by `orion_core::Engine`.
 
 use orion_ui::app::run;
 

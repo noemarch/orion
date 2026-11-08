@@ -1,16 +1,16 @@
 //! Main application view with engine integration.
 
-use crate::terminal::TerminalPane;
-use crate::workspace::WorkspaceSidebar;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rems, rgb, rgba, white, App, Application, Context, Entity, Render, Size, Window,
-    WindowBounds, WindowOptions,
+    div, px, App, Application, Context, Entity, Render, Size, Window, WindowBounds, WindowOptions,
 };
 use orion_core::{AgentKind, Engine, FrameSink, LaunchSpec, PaneConfig, Role, TerminalSize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use crate::terminal::TerminalPane;
+use crate::workspace::WorkspaceSidebar;
 
 pub struct OrionApp {
     workspace_sidebar: Entity<WorkspaceSidebar>,
@@ -20,8 +20,8 @@ pub struct OrionApp {
 
 impl OrionApp {
     pub fn new(cx: &mut App) -> Self {
-        let workspace_sidebar = cx.new(|cx| WorkspaceSidebar::new(cx));
-        let terminal_pane = cx.new(|cx| TerminalPane::new(cx));
+        let workspace_sidebar = cx.new(WorkspaceSidebar::new);
+        let terminal_pane = cx.new(TerminalPane::new);
         let engine = Arc::new(Engine::new());
 
         let mut app = Self {
@@ -30,7 +30,6 @@ impl OrionApp {
             engine,
         };
 
-        // Spawn a pane and connect its output to the terminal
         app.spawn_initial_pane(cx);
         app
     }
@@ -40,7 +39,6 @@ impl OrionApp {
         let engine = Arc::clone(&self.engine);
 
         cx.spawn(async move |cx| {
-            // Create a pane config
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let spec = LaunchSpec::for_agent(
                 AgentKind::Claude,
@@ -73,24 +71,35 @@ impl OrionApp {
                 },
             };
 
-            // Spawn the pane through the engine
             let pane = engine.spawn_pane(config).expect("pane spawn");
 
-            // Attach to the pane with a custom sink that forwards to the terminal pane
-            let sender = terminal_pane
-                .read_with(cx, |view, _| view.sender())
-                .unwrap();
+            // The attach sink runs on the PTY reader thread, so it can only push into a
+            // channel; the async task below drains that channel, feeds the grid, and
+            // notifies the view so GPUI repaints.
+            let (pty_tx, pty_rx) = flume::unbounded::<String>();
             let sink: FrameSink = Arc::new(move |frame: Value| {
                 if frame["type"] == "pty-data" {
                     if let Some(data) = frame["data"].as_str() {
-                        let _ = sender.send(data.as_bytes().to_vec());
+                        let _ = pty_tx.send(data.to_string());
                     }
                 }
             });
 
-            let _ = pane
-                .attach("gpu-terminal", sink, Role::Interact, 120, 32, false)
+            pane.attach("gpu-terminal", sink, Role::Interact, 120, 32, false)
                 .expect("attach");
+
+            while let Ok(first) = pty_rx.recv_async().await {
+                // If the app is gone, there is nothing to repaint.
+                let _ = cx.update(|cx| {
+                    terminal_pane.update(cx, |pane, cx| {
+                        pane.feed(&first);
+                        while let Ok(more) = pty_rx.try_recv() {
+                            pane.feed(&more);
+                        }
+                        cx.notify();
+                    });
+                });
+            }
         })
         .detach();
     }

@@ -1,42 +1,28 @@
 //! Terminal pane view — renders the PTY output using the vt100 parser grid.
 //!
-//! Receives PTY output from an `orion_core::pane::Pane` via an mpsc channel
-//! and feeds it into `orion_core::screen::ScreenState`.
+//! PTY output arrives from the engine via `feed()`; each feed mutates the grid
+//! and the caller notifies the view so GPUI repaints.
 
 use gpui::prelude::*;
 use gpui::{
     div, px, rems, rgb, white, Context, IntoElement, Render, StyledText, TextStyle, Window,
 };
 use orion_core::screen::ScreenState;
-use std::sync::mpsc;
 
 pub struct TerminalPane {
     screen: ScreenState,
-    tx: mpsc::Sender<Vec<u8>>,
-    rx: mpsc::Receiver<Vec<u8>>,
 }
 
 impl TerminalPane {
     pub fn new(_cx: &mut Context<Self>) -> Self {
-        let (tx, rx) = mpsc::channel();
         Self {
             screen: ScreenState::new(32, 120),
-            tx,
-            rx,
         }
     }
 
-    /// Get a sender that can be used to feed PTY output into this pane.
-    pub fn sender(&self) -> mpsc::Sender<Vec<u8>> {
-        self.tx.clone()
-    }
-
-    fn process_pty_output(&mut self) {
-        while let Ok(data) = self.rx.try_recv() {
-            if let Ok(text) = std::str::from_utf8(&data) {
-                self.screen.process(text);
-            }
-        }
+    /// Feed a chunk of PTY text into the grid.
+    pub fn feed(&mut self, text: &str) {
+        self.screen.process(text);
     }
 
     fn render_grid(&self) -> impl IntoElement {
@@ -45,7 +31,7 @@ impl TerminalPane {
 
         for (row_text, _wrapped) in rows {
             let style = TextStyle {
-                color: white().into(),
+                color: white(),
                 font_size: rems(0.8125).into(), // 13px
                 line_height: px(1.0).into(),
                 ..Default::default()
@@ -63,8 +49,6 @@ impl TerminalPane {
 
 impl Render for TerminalPane {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        self.process_pty_output();
-
         div()
             .id("terminal-pane")
             .flex_col()

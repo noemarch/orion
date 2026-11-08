@@ -8,7 +8,9 @@ use gpui::{
 pub struct WorkspaceSidebar {
     workspaces: Vec<WorkspaceEntry>,
     focused_workspace: Option<usize>,
+    #[allow(dead_code)]
     focused_tab: Option<usize>,
+    #[allow(dead_code)]
     focused_pane: Option<usize>,
 }
 
