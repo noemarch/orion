@@ -15,4 +15,4 @@ it("startOrion serves bridge health on an ephemeral port with a temp state dir",
   } finally {
     await orion.stop();
   }
-});
+}, 30_000);

@@ -130,7 +130,7 @@ it("serves a 2.x OpenCode transcript through the gateway", async () => {
 });
 
 const ORBIT_FIXTURE =
-  "C:\\herdr-plugins-project\\orbit\\server\\fixtures\\skill-invocations\\opencode.jsonl";
+  process.env.ORBIT_OPENCODE_FIXTURE ?? "fixtures/opencode.jsonl";
 
 it.skipIf(!existsSync(ORBIT_FIXTURE))(
   "replays the recorded 1.x OpenCode skill invocation",

@@ -253,7 +253,7 @@ it("serves Hermes's session store through the gateway", async () => {
   }
 });
 
-const ORBIT_FIXTURE = "C:\\herdr-plugins-project\\orbit\\server\\fixtures\\skill-invocations\\hermes.txt";
+const ORBIT_FIXTURE = process.env.ORBIT_HERMES_FIXTURE ?? "fixtures/hermes.txt";
 
 it.skipIf(!existsSync(ORBIT_FIXTURE))("chips a Hermes skill invocation with the request the user typed", async () => {
   const prompt = readFileSync(ORBIT_FIXTURE, "utf8");

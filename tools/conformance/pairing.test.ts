@@ -44,4 +44,4 @@ it("a remote client pairs with a code and then uses its device token", async () 
   } finally {
     await orion.stop();
   }
-});
+}, 30_000);

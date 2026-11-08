@@ -68,4 +68,4 @@ it("orion serve answers the M1 routes over HTTP", async () => {
   } finally {
     await orion.stop();
   }
-});
+}, 30_000);

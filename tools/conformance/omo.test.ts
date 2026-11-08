@@ -8,7 +8,7 @@ import { getJson, postJson } from "./orion-client.ts";
 import { startOrion } from "./startOrion.ts";
 
 const ORBIT_FIXTURE =
-  "C:\\herdr-plugins-project\\orbit\\server\\fixtures\\skill-invocations\\omp.jsonl";
+  process.env.ORBIT_OMP_FIXTURE ?? "fixtures/omp.jsonl";
 
 interface Conversation {
   source: string;
