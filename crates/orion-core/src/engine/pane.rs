@@ -578,7 +578,12 @@ fn update_status(
     // the only record, and it is read when the chat asks (Pane::note_transcript_status).
     if matches!(
         agent,
-        AgentKind::Omo | AgentKind::Omp | AgentKind::Pi | AgentKind::Hermes
+        AgentKind::Omo
+            | AgentKind::Omp
+            | AgentKind::Pi
+            | AgentKind::Hermes
+            | AgentKind::Grok
+            | AgentKind::Cursor
     ) {
         return;
     }
@@ -802,6 +807,10 @@ mod tests {
         update_status(&mut state, "p1", AgentKind::Pi, &events);
         assert_eq!(state.status, AgentStatus::Working);
         update_status(&mut state, "p1", AgentKind::Hermes, &events);
+        assert_eq!(state.status, AgentStatus::Working);
+        update_status(&mut state, "p1", AgentKind::Grok, &events);
+        assert_eq!(state.status, AgentStatus::Working);
+        update_status(&mut state, "p1", AgentKind::Cursor, &events);
         assert_eq!(state.status, AgentStatus::Working);
     }
 }
