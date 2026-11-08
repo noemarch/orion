@@ -36,5 +36,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4RUJDOEY5MkQzQTExQkIKUldRWmxXbmk2VlVvditKbkd1bTR2TGZlTmVIdWk3R3hMTHZ5YmhjN3F2RndIeUN1dWpLNmNxOHAK",
+      "endpoints": [
+        "https://github.com/hamzahraihan/orion/releases/latest/download/latest.json"
+      ]
+    }
   }
 }
