@@ -147,12 +147,16 @@ pub struct TabInfo {
     pub layout: TabLayout,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TabLayout {
+    #[default]
+    #[serde(rename = "single")]
     Single,
+    #[serde(rename = "horizontal")]
     SplitHorizontal,
+    #[serde(rename = "vertical")]
     SplitVertical,
+    #[serde(rename = "grid")]
     Grid,
 }
 
@@ -312,4 +316,17 @@ pub struct RemoteAccessStatus {
     pub port: u16,
     pub qr_code_svg: Option<String>,
     pub pairing_code: Option<String>,
+}
+
+/// The JSON payload inside every web push notification (RFC 8291).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PushPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+    pub pane_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    pub title: String,
+    pub body: String,
+    pub tag: String,
 }
