@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::engine::store::Store;
 
@@ -99,7 +100,10 @@ impl DeviceStore {
             }
         }
         let mut current = pending.take()?;
-        if current.code != code {
+        // Constant-time comparison: a 6-digit code must not leak its prefix.
+        let codes_match = current.code.len() == code.len()
+            && bool::from(current.code.as_bytes().ct_eq(code.as_bytes()));
+        if !codes_match {
             current.attempts += 1;
             if current.attempts < CODE_ATTEMPTS {
                 *pending = Some(current);
@@ -151,7 +155,11 @@ impl DeviceStore {
     pub fn matches(&self, token: &str) -> bool {
         let hash = hash(token);
         let devices = self.devices.lock();
-        devices.iter().any(|device| device.token_hash == hash)
+        // Constant-time over every stored hash so the list length leaks nothing.
+        devices.iter().any(|device| {
+            device.token_hash.len() == hash.len()
+                && bool::from(device.token_hash.as_bytes().ct_eq(hash.as_bytes()))
+        })
     }
 }
 
@@ -172,11 +180,15 @@ fn normalize_label(label: &str) -> String {
 }
 
 fn random_code() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.subsec_nanos() as u64)
-        .unwrap_or(0);
-    format!("{:06}", nanos % 1_000_000)
+    // A 6-digit code from a UUID's hex digits — not a timestamp, so it cannot
+    // be predicted from when it was issued.
+    let hex = uuid::Uuid::new_v4().simple().to_string();
+    let digits: String = hex.chars().filter(|c| c.is_ascii_digit()).collect();
+    let mut code = digits;
+    while code.len() < 6 {
+        code.push('0');
+    }
+    code[..6].to_string()
 }
 
 fn random_token() -> String {
