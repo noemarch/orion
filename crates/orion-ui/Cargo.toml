@@ -1,0 +1,17 @@
+[package]
+name = "orion-ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+gpui = { version = "0.2", default-features = false }
+orion-core = { path = "../orion-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+portable-pty = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
