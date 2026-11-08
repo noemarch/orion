@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
+import type * as SheetHistory from "./sheetHistory.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 
@@ -43,7 +44,9 @@ const settled = async () => { await new Promise((resolve) => setTimeout(resolve,
 
 const h = fake.window.history;
 /** RowMenu's effect, without React: the hook's enter on mount and leave on unmount (sheetHistory exports them for this) */
-const { enterSheet, leaveSheet, sheetSteppedOff } = await import("./sheetHistory.ts");
+// Dynamic import with query param: exercises module loading boundary so sheetHistory binds to fake.window after installation.
+const specifier = `./sheetHistory.ts?test`;
+const { enterSheet, leaveSheet, sheetSteppedOff }: typeof SheetHistory = await import(specifier);
 const hooks = { enter: (onBack: () => void): (() => void) => { const id = enterSheet(onBack, null); return () => leaveSheet(id); } };
 
 afterAll(() => {

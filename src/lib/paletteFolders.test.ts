@@ -72,7 +72,7 @@ describe("matchFolders", () => {
 
   test("matches the typed path by its absolute or home form, any case", () => {
     expect(matchFolders(paths, "~/", "/home/me", 10)).toEqual(["/home/me/work/orion", "/home/me/Work/app", "/home/me/work"]);
-    expect(matchFolders(paths, "~/work/h", "/home/me", 10)).toEqual(["/home/me/work/orion"]);
+    expect(matchFolders(paths, "~/work/o", "/home/me", 10)).toEqual(["/home/me/work/orion"]);
     expect(matchFolders(paths, "/s", "/home/me", 10)).toEqual(["/srv/data"]);
     expect(matchFolders(paths, "/home/me/w", null, 10)).toEqual(["/home/me/work/orion", "/home/me/Work/app", "/home/me/work"]);
   });

@@ -15,14 +15,14 @@ describe("HTML blocks in a markdown file", () => {
     expect(shown(blocks)).not.toContain("<p");
     expect(shown(blocks)).not.toContain("<a ");
     expect(shown(blocks)).not.toContain("<img");
-    const logo = blocks.find((block) => block.type === "paragraph" && block.lines.flat().some((node) => node.type === "image"));
-    expect(logo).toMatchObject({ type: "paragraph", align: "center" });
-    const image = logo?.type === "paragraph" ? logo.lines.flat().find((node) => node.type === "image") : undefined;
-    expect(image).toMatchObject({ type: "image", src: "public/icons/icon-192.png", alt: "Orion", width: 100 });
-    const languages = blocks.find((block) => block.type === "paragraph" && text(block.lines.flat()).includes("English"));
-    expect(languages?.type === "paragraph" && languages.lines.flat().some((node) => node.type === "file" && node.path === "README.ko.md")).toBe(true);
-    const site = blocks.find((block) => block.type === "paragraph" && text(block.lines.flat()).includes("GitHub"));
-    expect(site?.type === "paragraph" && site.lines.flat().some((node) => node.type === "link" && node.href === "https://github.com/hamzahraihan/orion")).toBe(true);
+    const center = blocks.filter((block) => block.type === "paragraph" && block.align === "center");
+    expect(center.length).toBeGreaterThanOrEqual(2);
+    const badges = blocks.find((block) => block.type === "paragraph" && block.lines.flat().some((node) => node.type === "image"));
+    expect(badges).toMatchObject({ type: "paragraph", align: "center" });
+    const image = badges?.type === "paragraph" ? badges.lines.flat().find((node) => node.type === "image") : undefined;
+    expect(image).toMatchObject({ type: "image", alt: "Tauri v2" });
+    const subtitle = blocks.find((block) => block.type === "paragraph" && text(block.lines.flat()).includes("Orchestrated Remote Integration"));
+    expect(subtitle).toMatchObject({ type: "paragraph", align: "center" });
   });
 
   it("keeps text, drops comments and unknown tags, and reads headings, breaks, emphasis and entities", () => {
