@@ -92,3 +92,19 @@ Before submitting any code change:
    bun run build
    ```
 3. **Smoke Proof:** Any change touching agent launching or PTY streaming must verify that the spawned process is an identified AI agent CLI and that stdin/stdout/resize function properly.
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues for `noemarch/orion`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The default five-role triage vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout using root `GLOSSARY.md` and `docs/adr/`. See `docs/agents/domain.md`.
