@@ -341,7 +341,7 @@ impl Render for WorkspaceSidebar {
                     .flex_row()
                     .items_center()
                     .gap(px(8.0 * scale))
-                    .min_h(px(row_h))
+                    .min_h(px(row_h.max(44.0)))
                     .px_2()
                     .rounded_md()
                     .bg(if is_chosen {
@@ -433,7 +433,7 @@ impl Render for WorkspaceSidebar {
                             .flex_row()
                             .items_center()
                             .gap(px(8.0 * scale))
-                            .min_h(px(row_h))
+                            .min_h(px(row_h.max(44.0)))
                             .px_2()
                             .rounded_md()
                             .bg(if agent.selected {
@@ -462,9 +462,19 @@ impl Render for WorkspaceSidebar {
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.0 * scale))
-                                    .text_color(theme.text)
-                                    .child(agent.title.clone()),
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0 * scale))
+                                            .text_color(theme.text)
+                                            .child(agent.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0 * scale))
+                                            .text_color(theme.text_dim)
+                                            .child(agent.context.clone()),
+                                    ),
                             )
                             .child(
                                 div().flex_1().flex_row().justify_end().child(
