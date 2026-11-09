@@ -538,6 +538,14 @@ mod tests {
     }
 
     #[test]
+    fn settings_defaults_match_orbit_defaults() {
+        let prefs = Preferences::default();
+        assert_eq!(prefs.theme.as_wire(), "dark");
+        assert_eq!(prefs.density.as_wire(), "comfortable");
+        assert_eq!(prefs.key_bar_extras, vec!["alt".to_string()]);
+    }
+
+    #[test]
     fn extras_sanitize_against_known_list() {
         let settings = json!({
             "theme": "light", "density": "compact",
