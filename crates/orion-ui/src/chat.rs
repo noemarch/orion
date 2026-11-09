@@ -45,6 +45,10 @@ pub struct ChatView {
     row_seq: usize,
 }
 
+fn conversation_error_message(_status: u16) -> String {
+    "Couldn't load the conversation. Try again.".to_string()
+}
+
 impl ChatView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let scroll_handle = ScrollHandle::new();
@@ -94,7 +98,7 @@ impl ChatView {
         let path = format!("/api/pane/conversation?pane_id={}", self.pane_id);
         let (status, body) = engine.http("GET", &path, &Value::Null);
         if status != 200 {
-            self.error = Some(format!("conversation fetch failed ({status})"));
+            self.error = Some(conversation_error_message(status));
             return;
         }
         let encoded = body.to_string();
@@ -580,6 +584,13 @@ impl ChatView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_fetch_failure_is_plain_language_with_retry() {
+        let message = conversation_error_message(404);
+        assert_eq!(message, "Couldn't load the conversation. Try again.");
+        assert!(message.contains("Try again"));
+    }
 
     #[test]
     fn truncates_at_bound_with_terminal_marker() {
