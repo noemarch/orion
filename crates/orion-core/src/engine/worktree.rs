@@ -115,16 +115,6 @@ fn main_root(cwd: &Path) -> Option<PathBuf> {
     common.parent().map(Path::to_path_buf)
 }
 
-/// The parent branch's tip, for diffing a worktree against what it was cut from.
-pub fn base_branch(cwd: &Path) -> Option<String> {
-    git(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"])
-        .ok()
-        .and_then(|text| {
-            let text = text.trim().to_string();
-            (!text.is_empty() && text != "HEAD").then_some(text)
-        })
-}
-
 pub fn default_worktree_path(cwd: &Path, branch: &str) -> PathBuf {
     let leaf = branch.replace(['/', '\\'], "-");
     cwd.join("..").join(format!("{}-{}", cwd_name(cwd), leaf))
