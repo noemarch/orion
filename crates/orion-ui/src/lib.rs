@@ -1,5 +1,6 @@
 //! Orion native UI (GPUI) — application crate root.
 
+pub mod agents;
 pub mod app;
 pub mod chat;
 pub mod chat_entities;
