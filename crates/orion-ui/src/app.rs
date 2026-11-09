@@ -460,55 +460,81 @@ impl Render for OrionApp {
         let extras = KeyBarExtras::from_preferences(&prefs);
         self.terminal_pane
             .update(cx, |view, _cx| view.set_key_bar_extras(extras));
-        let lens_body = match self.lens {
-            Lens::Chat => {
-                if let Some(card) = self
-                    .chat_view
-                    .update(cx, |view, cx| view.prompt_card_entity(cx))
-                {
-                    div()
-                        .id("main-content")
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .child(self.chat_view.clone())
-                        .child(card)
-                } else {
-                    div()
-                        .id("main-content")
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .child(self.chat_view.clone())
-                }
-            }
-            Lens::Terminal => div()
+        let has_workspaces = self
+            .workspace_sidebar
+            .update(cx, |view, _cx| !view.workspaces().is_empty());
+        let lens_body = if !has_workspaces {
+            div()
                 .id("main-content")
                 .flex()
                 .flex_col()
                 .flex_1()
-                .child(self.terminal_pane.clone()),
-            Lens::Changes => div()
-                .id("main-content")
-                .flex()
-                .flex_row()
-                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap(px(8.0))
                 .child(
                     div()
-                        .id("changes-left")
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .child(self.file_tree.clone()),
+                        .text_size(px(14.0))
+                        .text_color(Theme::current().text_strong)
+                        .child("No workspace open"),
                 )
                 .child(
                     div()
-                        .id("changes-right")
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .child(self.changes_view.clone()),
-                ),
+                        .text_size(px(12.0))
+                        .text_color(Theme::current().text_dim)
+                        .child("Open a workspace to begin."),
+                )
+        } else {
+            match self.lens {
+                Lens::Chat => {
+                    if let Some(card) = self
+                        .chat_view
+                        .update(cx, |view, cx| view.prompt_card_entity(cx))
+                    {
+                        div()
+                            .id("main-content")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .child(self.chat_view.clone())
+                            .child(card)
+                    } else {
+                        div()
+                            .id("main-content")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .child(self.chat_view.clone())
+                    }
+                }
+                Lens::Terminal => div()
+                    .id("main-content")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .child(self.terminal_pane.clone()),
+                Lens::Changes => div()
+                    .id("main-content")
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .child(
+                        div()
+                            .id("changes-left")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .child(self.file_tree.clone()),
+                    )
+                    .child(
+                        div()
+                            .id("changes-right")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .child(self.changes_view.clone()),
+                    ),
+            }
         };
         div()
             .id("app")
