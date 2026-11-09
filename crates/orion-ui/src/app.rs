@@ -13,9 +13,9 @@ use crate::chat::ChatView;
 use crate::diff_view::ChangesView;
 use crate::files_view::FileTree;
 use crate::settings::{KeyBarExtras, SettingsModal};
+use crate::shell_model::{lens_segment_state, HeaderModel, ShellLayout};
 use crate::terminal::TerminalPane;
 use crate::theme::Theme;
-use crate::shell_model::{lens_segment_state, HeaderModel, ShellLayout};
 use crate::workspace::WorkspaceSidebar;
 
 /// The lenses over the same pane: chat-first by default, terminal one click away,
@@ -209,16 +209,12 @@ impl OrionApp {
                     .child(header.workspace),
             )
             .child(
-                div()
-                    .flex_1()
-                    .flex_row()
-                    .justify_end()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.text_dim)
-                            .child(header.connection),
-                    ),
+                div().flex_1().flex_row().justify_end().child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_dim)
+                        .child(header.connection),
+                ),
             )
     }
 

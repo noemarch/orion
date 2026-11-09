@@ -45,7 +45,10 @@ pub fn agent_rows(snapshot: &Value) -> Vec<AgentRow> {
             let workspace_id = str_field(pane, "workspace_id");
             let tab_id = str_field(pane, "tab_id");
             let workspace_label = workspaces
-                .and_then(|rows| rows.iter().find(|w| str_field(w, "workspace_id") == workspace_id))
+                .and_then(|rows| {
+                    rows.iter()
+                        .find(|w| str_field(w, "workspace_id") == workspace_id)
+                })
                 .and_then(|w| str_field(w, "label"));
             let tab_label = tabs
                 .and_then(|rows| rows.iter().find(|t| str_field(t, "tab_id") == tab_id))
@@ -72,7 +75,8 @@ mod tests {
 
     #[test]
     fn missing_agent_fields_are_unavailable_not_defaulted() {
-        let snapshot = serde_json::json!({ "panes": [{ "pane_id": "p1" }], "tabs": [], "workspaces": [] });
+        let snapshot =
+            serde_json::json!({ "panes": [{ "pane_id": "p1" }], "tabs": [], "workspaces": [] });
         let rows = agent_rows(&snapshot);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "p1");

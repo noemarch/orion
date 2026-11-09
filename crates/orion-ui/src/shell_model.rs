@@ -79,8 +79,17 @@ mod tests {
 
     #[test]
     fn lens_segment_marks_only_the_active_lens() {
-        assert_eq!(lens_segment_state(crate::app::Lens::Chat), (true, false, false));
-        assert_eq!(lens_segment_state(crate::app::Lens::Terminal), (false, true, false));
-        assert_eq!(lens_segment_state(crate::app::Lens::Changes), (false, false, true));
+        assert_eq!(
+            lens_segment_state(crate::app::Lens::Chat),
+            (true, false, false)
+        );
+        assert_eq!(
+            lens_segment_state(crate::app::Lens::Terminal),
+            (false, true, false)
+        );
+        assert_eq!(
+            lens_segment_state(crate::app::Lens::Changes),
+            (false, false, true)
+        );
     }
 }
