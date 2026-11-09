@@ -68,6 +68,7 @@ pub struct WorkspaceSidebar {
     focus_handle: FocusHandle,
     row_seq: usize,
     pulse_phase: u32,
+    rail: bool,
 }
 
 impl WorkspaceSidebar {
@@ -79,6 +80,7 @@ impl WorkspaceSidebar {
             focus_handle: cx.focus_handle(),
             row_seq: 0,
             pulse_phase: 0,
+            rail: false,
         };
         view.start_poll(cx);
         view.start_pulse(cx);
@@ -94,6 +96,10 @@ impl WorkspaceSidebar {
     pub fn attach(&mut self, engine: Arc<Engine>) {
         self.engine = Some(engine);
         self.refresh();
+    }
+
+    pub fn set_rail(&mut self, rail: bool) {
+        self.rail = rail;
     }
 
     /// The snapshot body (`snapshot` object) backing the current render.
@@ -368,18 +374,25 @@ impl Render for WorkspaceSidebar {
                             .text_color(theme.text_strong)
                             .child(mark),
                     )
-                    .child(StyledText::new(ws.label.clone()).with_default_highlights(
-                        &TextStyle {
-                            color: if is_chosen {
-                                theme.text_strong.into()
-                            } else {
-                                theme.text.into()
+                    .child(
+                        StyledText::new(if self.rail {
+                            String::new()
+                        } else {
+                            ws.label.clone()
+                        })
+                        .with_default_highlights(
+                            &TextStyle {
+                                color: if is_chosen {
+                                    theme.text_strong.into()
+                                } else {
+                                    theme.text.into()
+                                },
+                                font_size: gpui::rems(0.875).into(),
+                                ..Default::default()
                             },
-                            font_size: gpui::rems(0.875).into(),
-                            ..Default::default()
-                        },
-                        [],
-                    ))
+                            [],
+                        ),
+                    )
                     .child(
                         div().flex_1().flex().flex_row().justify_end().child(
                             div()

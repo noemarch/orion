@@ -39,6 +39,7 @@ pub struct OrionApp {
     editing_tab: Option<(String, String)>,
     split_chat_view: Entity<ChatView>,
     split_terminal_pane: Entity<TerminalPane>,
+    split_attached_pane: Option<String>,
     split_file_tree: Entity<FileTree>,
     split_changes_view: Entity<ChangesView>,
 }
@@ -69,6 +70,7 @@ impl OrionApp {
             editing_tab: None,
             split_chat_view,
             split_terminal_pane,
+            split_attached_pane: None,
             split_file_tree,
             split_changes_view,
         };
@@ -597,6 +599,8 @@ impl Render for OrionApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let layout = ShellLayout::for_width(window.bounds().size.width.into());
         let sidebar_w = layout.sidebar_width_px;
+        self.workspace_sidebar
+            .update(cx, |view, _cx| view.set_rail(layout.rail));
         // The Changes lens' 2s polls run only while it is active; views are
         // preserved between lens switches (entities stay mounted above).
         let changes_active = self.lens == Lens::Changes;
@@ -706,33 +710,36 @@ impl Render for OrionApp {
                 inner
             } else {
                 let second_id = split_panes[1].clone();
-                if let Some(second_pane) = self.engine.pane_by_id(&second_id) {
-                    self.split_chat_view.update(cx, |view, _cx| {
-                        view.attach(
-                            Arc::clone(&self.engine),
-                            Arc::clone(&second_pane),
-                            second_id.clone(),
-                        );
-                    });
-                    self.split_terminal_pane
-                        .update(cx, |view, _cx| view.set_pane(Arc::clone(&second_pane)));
-                    self.split_file_tree.update(cx, |view, cx| {
-                        view.attach(
-                            cx,
-                            Arc::clone(&self.engine),
-                            Arc::clone(&second_pane),
-                            second_id.clone(),
-                        );
-                        view.set_visible(cx, true);
-                    });
-                    self.split_changes_view.update(cx, |view, _cx| {
-                        view.attach(
-                            Arc::clone(&self.engine),
-                            Arc::clone(&second_pane),
-                            second_id.clone(),
-                        );
-                        view.set_visible(true);
-                    });
+                if self.split_attached_pane.as_deref() != Some(second_id.as_str()) {
+                    self.split_attached_pane = Some(second_id.clone());
+                    if let Some(second_pane) = self.engine.pane_by_id(&second_id) {
+                        self.split_chat_view.update(cx, |view, _cx| {
+                            view.attach(
+                                Arc::clone(&self.engine),
+                                Arc::clone(&second_pane),
+                                second_id.clone(),
+                            );
+                        });
+                        self.split_terminal_pane
+                            .update(cx, |view, _cx| view.set_pane(Arc::clone(&second_pane)));
+                        self.split_file_tree.update(cx, |view, cx| {
+                            view.attach(
+                                cx,
+                                Arc::clone(&self.engine),
+                                Arc::clone(&second_pane),
+                                second_id.clone(),
+                            );
+                            view.set_visible(cx, true);
+                        });
+                        self.split_changes_view.update(cx, |view, _cx| {
+                            view.attach(
+                                Arc::clone(&self.engine),
+                                Arc::clone(&second_pane),
+                                second_id.clone(),
+                            );
+                            view.set_visible(true);
+                        });
+                    }
                 }
                 let second_body = match self.lens {
                     Lens::Chat => div()
