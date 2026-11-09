@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::engine::Inner;
+use crate::engine::connection_registry::ConnectionRegistry;
 
 pub struct Watcher {
     stop: Arc<AtomicBool>,
@@ -16,12 +16,12 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    pub(crate) fn start(cwd: PathBuf, inner: Arc<Inner>) -> Self {
+    pub(crate) fn start(cwd: PathBuf, connections: Arc<ConnectionRegistry>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
             .name(format!("orion-watch-{}", cwd.display()))
-            .spawn(move || watch_loop(&cwd, &inner, &flag))
+            .spawn(move || watch_loop(&cwd, &connections, &flag))
             .ok();
         Self { stop, thread }
     }
@@ -40,7 +40,7 @@ impl Drop for Watcher {
     }
 }
 
-fn watch_loop(cwd: &Path, inner: &Inner, stop: &Arc<AtomicBool>) {
+fn watch_loop(cwd: &Path, connections: &ConnectionRegistry, stop: &Arc<AtomicBool>) {
     use notify::{RecursiveMode, Watcher as _};
     let (tx, rx) = std::sync::mpsc::channel();
     let Ok(mut watcher) = notify::recommended_watcher(tx) else {
@@ -56,7 +56,7 @@ fn watch_loop(cwd: &Path, inner: &Inner, stop: &Arc<AtomicBool>) {
                 // Debounce burst changes into one broadcast.
                 if last.elapsed() >= std::time::Duration::from_millis(500) {
                     last = std::time::Instant::now();
-                    inner.broadcast(serde_json::json!({ "type": "session-changed" }));
+                    connections.broadcast(serde_json::json!({ "type": "session-changed" }));
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
