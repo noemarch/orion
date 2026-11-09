@@ -225,6 +225,12 @@ impl Engine {
         self.routes.spawn_pane(config)
     }
 
+    /// The live pane handle for a session pane id, if it is open. Native views
+    /// use this to attach a second lens body (e.g. split panes).
+    pub fn pane_by_id(&self, pane_id: &str) -> Option<Arc<Pane>> {
+        self.session.pane(pane_id)
+    }
+
     /// Dispatches one request without a push connection. Used by bounded commands and tests.
     pub fn dispatch(&self, request: &Value) -> crate::error::Result<Value, String> {
         self.dispatch_from(None, request)

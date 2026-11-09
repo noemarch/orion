@@ -37,6 +37,8 @@ pub struct OrionApp {
     engine: Arc<Engine>,
     lens: Lens,
     editing_tab: Option<(String, String)>,
+    split_chat_view: Entity<ChatView>,
+    split_terminal_pane: Entity<TerminalPane>,
 }
 
 impl OrionApp {
@@ -47,6 +49,8 @@ impl OrionApp {
         let file_tree = cx.new(FileTree::new);
         let changes_view = cx.new(ChangesView::new);
         let settings = cx.new(SettingsModal::new);
+        let split_chat_view = cx.new(ChatView::new);
+        let split_terminal_pane = cx.new(TerminalPane::new);
         let engine = Arc::new(Engine::new());
 
         let mut app = Self {
@@ -59,6 +63,8 @@ impl OrionApp {
             engine,
             lens: Lens::Chat,
             editing_tab: None,
+            split_chat_view,
+            split_terminal_pane,
         };
 
         app.spawn_initial_pane(cx);
@@ -693,26 +699,51 @@ impl Render for OrionApp {
             if split_panes.is_empty() {
                 inner
             } else {
+                let second_id = split_panes[1].clone();
+                if let Some(second_pane) = self.engine.pane_by_id(&second_id) {
+                    self.split_chat_view.update(cx, |view, _cx| {
+                        view.attach(
+                            Arc::clone(&self.engine),
+                            Arc::clone(&second_pane),
+                            second_id.clone(),
+                        );
+                    });
+                    self.split_terminal_pane
+                        .update(cx, |view, _cx| view.set_pane(Arc::clone(&second_pane)));
+                }
+                let second_body = match self.lens {
+                    Lens::Chat => div()
+                        .id("pane-split-second-chat")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .child(self.split_chat_view.clone()),
+                    Lens::Terminal => div()
+                        .id("pane-split-second-terminal")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .child(self.split_terminal_pane.clone()),
+                    Lens::Changes => div()
+                        .id("pane-split-second")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .p_3()
+                        .gap(px(8.0))
+                        .bg(Theme::current().surface_panel)
+                        .text_size(px(12.0))
+                        .text_color(Theme::current().text_dim)
+                        .child(format!("Split pane · {}", second_id))
+                        .child("Open this pane in its tab to inspect."),
+                };
                 div()
                     .id("pane-split-canvas")
                     .flex()
                     .flex_row()
                     .flex_1()
                     .child(inner)
-                    .child(
-                        div()
-                            .id("pane-split-second")
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .p_3()
-                            .gap(px(8.0))
-                            .bg(Theme::current().surface_panel)
-                            .text_size(px(12.0))
-                            .text_color(Theme::current().text_dim)
-                            .child(format!("Split pane · {}", split_panes[1]))
-                            .child("Open this pane in its tab to inspect."),
-                    )
+                    .child(second_body)
             }
         };
         div()
