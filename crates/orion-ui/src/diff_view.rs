@@ -455,8 +455,25 @@ impl Render for ChangesView {
         let header = match &self.list {
             Some(list) => {
                 let total = list.total.unwrap_or(list.files.len() as u64);
+                let added = list
+                    .files
+                    .iter()
+                    .filter(|f| {
+                        matches!(f.status, RepoDiffStatus::Added | RepoDiffStatus::Untracked)
+                    })
+                    .count();
+                let modified = list
+                    .files
+                    .iter()
+                    .filter(|f| matches!(f.status, RepoDiffStatus::Modified))
+                    .count();
+                let deleted = list
+                    .files
+                    .iter()
+                    .filter(|f| matches!(f.status, RepoDiffStatus::Deleted))
+                    .count();
                 format!(
-                    "{} file(s){}",
+                    "{} file(s) · {added} added · {modified} modified · {deleted} deleted{}",
                     total,
                     if list.truncated { " (truncated)" } else { "" }
                 )
