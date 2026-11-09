@@ -36,6 +36,7 @@ pub struct OrionApp {
     settings: Entity<SettingsModal>,
     engine: Arc<Engine>,
     lens: Lens,
+    editing_tab: Option<(String, String)>,
 }
 
 impl OrionApp {
@@ -57,6 +58,7 @@ impl OrionApp {
             settings,
             engine,
             lens: Lens::Chat,
+            editing_tab: None,
         };
 
         app.spawn_initial_pane(cx);
@@ -362,7 +364,23 @@ impl OrionApp {
                 let pane_id_for_split = pane_id.clone();
                 let engine_split = engine.clone();
                 let tab_id = tab.id.clone();
+                let tab_id_for_edit = tab_id.clone();
+                let tab_label_for_edit = tab.label.clone();
+                let tab_id_for_key = tab_id.clone();
                 let engine_close = engine.clone();
+                let engine_rename = engine.clone();
+                let editing = self
+                    .editing_tab
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &tab_id);
+                let edit_text = if editing {
+                    self.editing_tab
+                        .as_ref()
+                        .map(|(_, text)| text.clone())
+                        .unwrap_or_default()
+                } else {
+                    tab.label.clone()
+                };
                 let row = div()
                     .id(self.next_row_id())
                     .flex()
@@ -383,7 +401,53 @@ impl OrionApp {
                         theme.text_dim
                     })
                     .text_size(px(12.0 * scale))
-                    .child(tab.label.clone())
+                    .child(edit_text)
+                    .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, _, cx| {
+                        let Some((editing_id, text)) = this.editing_tab.as_mut() else {
+                            return;
+                        };
+                        if editing_id != &tab_id_for_key {
+                            return;
+                        }
+                        if ev.keystroke.key == "escape" {
+                            this.editing_tab = None;
+                            cx.notify();
+                            return;
+                        }
+                        if ev.keystroke.key == "enter" {
+                            let label = text.clone();
+                            let _ = engine_rename.http(
+                                "POST",
+                                "/api/tab/rename",
+                                &json!({ "tab_id": tab_id_for_key, "label": label }),
+                            );
+                            this.editing_tab = None;
+                            cx.notify();
+                            return;
+                        }
+                        if ev.keystroke.key == "backspace" {
+                            text.pop();
+                            cx.notify();
+                            return;
+                        }
+                        if let Some(ch) = ev.keystroke.key_char.clone() {
+                            text.push_str(&ch);
+                            cx.notify();
+                        }
+                    }))
+                    .child(
+                        div()
+                            .id(self.next_row_id())
+                            .px_1()
+                            .text_size(px(12.0 * scale))
+                            .text_color(theme.text_dim)
+                            .child("✎")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.editing_tab =
+                                    Some((tab_id_for_edit.clone(), tab_label_for_edit.clone()));
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         div()
                             .id(self.next_row_id())
