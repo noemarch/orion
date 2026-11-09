@@ -73,21 +73,28 @@ fn extra_keys(extra: &str) -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// The saved preferences shape (P4 scope): theme, density, key-bar extras.
+/// The saved preferences shape: theme, density, key-bar extras, alerts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preferences {
     pub theme: ThemeMode,
     pub density: Density,
     pub key_bar_extras: Vec<String>,
+    pub alerts_on: bool,
+    pub alert_input: bool,
+    pub alert_done: String,
 }
 
 impl Default for Preferences {
-    /// `DEFAULT_SETTINGS` in `src/lib/settings.ts`: dark, comfortable, `["alt"]`.
+    /// `DEFAULT_SETTINGS` in Orbit `src/lib/settings.ts`: dark, comfortable,
+    /// `["alt"]`, alerts on, input alerts on, done alerts long.
     fn default() -> Self {
         Self {
             theme: ThemeMode::Dark,
             density: Density::Comfortable,
             key_bar_extras: vec!["alt".to_string()],
+            alerts_on: true,
+            alert_input: true,
+            alert_done: "long".to_string(),
         }
     }
 }
@@ -111,6 +118,9 @@ impl Preferences {
             "theme": self.theme.as_wire(),
             "density": self.density.as_wire(),
             "keyBarExtras": self.key_bar_extras,
+            "alertsOn": self.alerts_on,
+            "alertInput": self.alert_input,
+            "alertDone": self.alert_done,
         })
     }
 
@@ -138,10 +148,25 @@ impl Preferences {
             "comfortable" => Density::Comfortable,
             _ => defaults.density,
         };
+        let alerts_on = settings
+            .get("alertsOn")
+            .and_then(Value::as_bool)
+            .unwrap_or(defaults.alerts_on);
+        let alert_input = settings
+            .get("alertInput")
+            .and_then(Value::as_bool)
+            .unwrap_or(defaults.alert_input);
+        let alert_done = match get_str("alertDone") {
+            "off" | "long" | "always" => get_str("alertDone").to_string(),
+            _ => defaults.alert_done.clone(),
+        };
         Self {
             theme,
             density,
             key_bar_extras: extras,
+            alerts_on,
+            alert_input,
+            alert_done,
         }
     }
 }
@@ -334,174 +359,254 @@ impl Render for SettingsModal {
                 .child(label)
         };
 
-        let body = div()
-            .id("settings-panel")
-            .flex_col()
-            .gap(px(12.0 * scale))
-            .w(px(360.0))
-            .p_4()
-            .rounded_lg()
-            .bg(theme.surface_panel)
-            .border_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(14.0 * scale))
-                            .text_color(theme.text_strong)
-                            .child("Settings"),
-                    )
-                    .child(
-                        div()
-                            .id("settings-close")
-                            .flex()
-                            .size(px(32.0 * scale))
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .bg(theme.surface_hover)
-                            .text_color(theme.text)
-                            .child("✕")
-                            .on_click(cx.listener(|this, _, _, _cx| this.close())),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(11.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child("APPEARANCE"),
-                    )
-                    .child(
-                        div()
-                            .flex_row()
-                            .gap_2()
-                            .child(radio("settings-theme-dark", "Dark", dark).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.prefs.theme = ThemeMode::Dark;
-                                    this.save();
-                                    cx.notify();
-                                }),
-                            ))
-                            .child(radio("settings-theme-light", "Light", !dark).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.prefs.theme = ThemeMode::Light;
-                                    this.save();
-                                    cx.notify();
-                                }),
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(11.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child("DENSITY"),
-                    )
-                    .child(
-                        div()
-                            .flex_row()
-                            .gap_2()
-                            .child(
-                                radio("settings-density-comfortable", "Comfortable", !compact)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.prefs.density = Density::Comfortable;
-                                        this.save();
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                radio("settings-density-compact", "Compact", compact).on_click(
+        let body =
+            div()
+                .id("settings-panel")
+                .flex_col()
+                .gap(px(12.0 * scale))
+                .w(px(360.0))
+                .p_4()
+                .rounded_lg()
+                .bg(theme.surface_panel)
+                .border_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(14.0 * scale))
+                                .text_color(theme.text_strong)
+                                .child("Settings"),
+                        )
+                        .child(
+                            div()
+                                .id("settings-close")
+                                .flex()
+                                .size(px(32.0 * scale))
+                                .items_center()
+                                .justify_center()
+                                .rounded_md()
+                                .bg(theme.surface_hover)
+                                .text_color(theme.text)
+                                .child("✕")
+                                .on_click(cx.listener(|this, _, _, _cx| this.close())),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(11.0 * scale))
+                                .text_color(theme.text_dim)
+                                .child("APPEARANCE"),
+                        )
+                        .child(
+                            div()
+                                .flex_row()
+                                .gap_2()
+                                .child(radio("settings-theme-dark", "Dark", dark).on_click(
                                     cx.listener(|this, _, _, cx| {
-                                        this.prefs.density = Density::Compact;
+                                        this.prefs.theme = ThemeMode::Dark;
                                         this.save();
                                         cx.notify();
                                     }),
-                                ),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(11.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child("KEY BAR EXTRAS"),
-                    )
-                    .children(KEY_BAR_EXTRAS.iter().map(|extra| {
-                        let extra = *extra;
-                        let on = prefs.has_extra(extra);
-                        div()
-                            .id(self.next_row_id())
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0 * scale))
-                            .h(px(row_h))
-                            .px_2()
-                            .rounded_md()
-                            .bg(if on {
-                                theme.accent_tint
-                            } else {
-                                theme.surface_elevated
-                            })
-                            .text_color(if on {
-                                theme.text_strong
-                            } else {
-                                theme.text_dim
-                            })
-                            .child(if on { "✓" } else { "○" })
-                            .child(extra_label(extra))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.prefs.toggle_extra(extra);
-                                this.save();
-                                cx.notify();
-                            }))
-                    })),
-            )
-            .child(
-                div()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(11.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child("ABOUT"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child("Orbit · native GPUI shell · Engine: live"),
-                    ),
-            )
-            .child(
-                div().flex_row().justify_end().child(
+                                ))
+                                .child(radio("settings-theme-light", "Light", !dark).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.prefs.theme = ThemeMode::Light;
+                                        this.save();
+                                        cx.notify();
+                                    }),
+                                )),
+                        ),
+                )
+                .child(
                     div()
-                        .id("settings-done")
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .bg(theme.primary)
-                        .text_color(theme.text)
-                        .child("Done")
-                        .on_click(cx.listener(|this, _, _, _cx| this.close())),
-                ),
-            );
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(11.0 * scale))
+                                .text_color(theme.text_dim)
+                                .child("DENSITY"),
+                        )
+                        .child(
+                            div()
+                                .flex_row()
+                                .gap_2()
+                                .child(
+                                    radio("settings-density-comfortable", "Comfortable", !compact)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.prefs.density = Density::Comfortable;
+                                            this.save();
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    radio("settings-density-compact", "Compact", compact).on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.prefs.density = Density::Compact;
+                                            this.save();
+                                            cx.notify();
+                                        }),
+                                    ),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(11.0 * scale))
+                                .text_color(theme.text_dim)
+                                .child("KEY BAR EXTRAS"),
+                        )
+                        .children(KEY_BAR_EXTRAS.iter().map(|extra| {
+                            let extra = *extra;
+                            let on = prefs.has_extra(extra);
+                            div()
+                                .id(self.next_row_id())
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0 * scale))
+                                .h(px(row_h))
+                                .px_2()
+                                .rounded_md()
+                                .bg(if on {
+                                    theme.accent_tint
+                                } else {
+                                    theme.surface_elevated
+                                })
+                                .text_color(if on {
+                                    theme.text_strong
+                                } else {
+                                    theme.text_dim
+                                })
+                                .child(if on { "✓" } else { "○" })
+                                .child(extra_label(extra))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.prefs.toggle_extra(extra);
+                                    this.save();
+                                    cx.notify();
+                                }))
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(11.0 * scale))
+                                .text_color(theme.text_dim)
+                                .child("ALERTS"),
+                        )
+                        .child(
+                            div()
+                                .flex_row()
+                                .gap_2()
+                                .child(
+                                    radio("settings-alerts-on", "Alerts on", prefs.alerts_on)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.prefs.alerts_on = !this.prefs.alerts_on;
+                                            this.save();
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    radio("settings-alert-input", "Input", prefs.alert_input)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.prefs.alert_input = !this.prefs.alert_input;
+                                            this.save();
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_row()
+                                .gap_2()
+                                .child(
+                                    radio(
+                                        "settings-alert-done-long",
+                                        "Done: long",
+                                        prefs.alert_done == "long",
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.prefs.alert_done = "long".to_string();
+                                            this.save();
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    radio(
+                                        "settings-alert-done-always",
+                                        "Done: always",
+                                        prefs.alert_done == "always",
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.prefs.alert_done = "always".to_string();
+                                            this.save();
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    radio(
+                                        "settings-alert-done-off",
+                                        "Done: off",
+                                        prefs.alert_done == "off",
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.prefs.alert_done = "off".to_string();
+                                            this.save();
+                                            cx.notify();
+                                        },
+                                    )),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(11.0 * scale))
+                                .text_color(theme.text_dim)
+                                .child("ABOUT"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0 * scale))
+                                .text_color(theme.text_dim)
+                                .child("Orbit · native GPUI shell · Engine: live"),
+                        ),
+                )
+                .child(
+                    div().flex_row().justify_end().child(
+                        div()
+                            .id("settings-done")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme.primary)
+                            .text_color(theme.text)
+                            .child("Done")
+                            .on_click(cx.listener(|this, _, _, _cx| this.close())),
+                    ),
+                );
 
         div()
             .id("settings-overlay")
@@ -560,6 +665,9 @@ mod tests {
         assert_eq!(prefs.theme.as_wire(), "dark");
         assert_eq!(prefs.density.as_wire(), "comfortable");
         assert_eq!(prefs.key_bar_extras, vec!["alt".to_string()]);
+        assert!(prefs.alerts_on);
+        assert!(prefs.alert_input);
+        assert_eq!(prefs.alert_done, "long");
     }
 
     #[test]
