@@ -3,12 +3,7 @@
   "productName": "Orion",
   "version": "0.1.0",
   "identifier": "com.orion.desktop",
-  "build": {
-    "beforeDevCommand": "bun run dev",
-    "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "bun run build",
-    "frontendDist": "../dist"
-  },
+  "build": {},
   "app": {
     "windows": [
       {

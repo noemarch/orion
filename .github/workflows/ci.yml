@@ -27,18 +27,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  web:
-    name: web
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun run build
-
   # Nothing named after the tool Orion replaces may appear in code, paths or dependencies. This
   # is an enforcement rule, not product prose: the pattern has to be spelled out to be checked.
   no-foreign-artifacts:
@@ -52,10 +40,8 @@ jobs:
           # Split so this workflow does not match itself.
           foreign="her""dr"
           if grep -rniI "$foreign" \
-              --exclude-dir=node_modules \
               --exclude-dir=target \
-              --exclude-dir=.git \
-              --exclude-dir=dist . ; then
+              --exclude-dir=.git . ; then
             echo "::error::a foreign artifact name is present"
             exit 1
           fi
