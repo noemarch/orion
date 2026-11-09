@@ -600,6 +600,24 @@ impl Render for OrionApp {
         let has_workspaces = self
             .workspace_sidebar
             .update(cx, |view, _cx| !view.workspaces().is_empty());
+        let split_panes = self.workspace_sidebar.update(cx, |view, _cx| {
+            let workspaces = view.workspaces();
+            let focused = workspaces
+                .iter()
+                .find(|w| w.focused)
+                .or_else(|| workspaces.first());
+            let Some(ws) = focused else {
+                return Vec::new();
+            };
+            let tabs = view.tabs(&ws.id);
+            let focused_tab = tabs.iter().find(|t| t.focused).or_else(|| tabs.first());
+            match focused_tab {
+                Some(tab) if tab.layout != "single" && tab.pane_ids.len() >= 2 => {
+                    tab.pane_ids.clone()
+                }
+                _ => Vec::new(),
+            }
+        });
         let lens_body = if !has_workspaces {
             div()
                 .id("main-content")
@@ -622,7 +640,7 @@ impl Render for OrionApp {
                         .child("Open a workspace to begin."),
                 )
         } else {
-            match self.lens {
+            let inner = match self.lens {
                 Lens::Chat => {
                     if let Some(card) = self
                         .chat_view
@@ -671,6 +689,30 @@ impl Render for OrionApp {
                             .flex_1()
                             .child(self.changes_view.clone()),
                     ),
+            };
+            if split_panes.is_empty() {
+                inner
+            } else {
+                div()
+                    .id("pane-split-canvas")
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .child(inner)
+                    .child(
+                        div()
+                            .id("pane-split-second")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .p_3()
+                            .gap(px(8.0))
+                            .bg(Theme::current().surface_panel)
+                            .text_size(px(12.0))
+                            .text_color(Theme::current().text_dim)
+                            .child(format!("Split pane · {}", split_panes[1]))
+                            .child("Open this pane in its tab to inspect."),
+                    )
             }
         };
         div()

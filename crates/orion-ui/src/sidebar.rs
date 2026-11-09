@@ -56,6 +56,7 @@ pub struct TabEntry {
     pub status: AgentStatus,
     pub focused: bool,
     pub pane_ids: Vec<String>,
+    pub layout: String,
 }
 
 /// The sidebar view. State is the last session snapshot; `refresh()` swaps
@@ -203,6 +204,11 @@ impl WorkspaceSidebar {
                                 .to_string(),
                             status: parse_status(tab.get("agent_status").and_then(Value::as_str)),
                             pane_ids,
+                            layout: tab
+                                .get("layout")
+                                .and_then(Value::as_str)
+                                .unwrap_or("single")
+                                .to_string(),
                         }
                     })
                     .collect()
