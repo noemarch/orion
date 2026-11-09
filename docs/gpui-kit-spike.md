@@ -1,15 +1,38 @@
 # gpui-kit Spike
 
-Date: 2026-11-10
+Date: 2026-11-10 (updated)
 
 ## Attempt
 
-Created a temporary spike crate depending on `gpui = "0.2"` and `gpui-kit = "0.1"`. The crates.io index resolved `gpui-kit 0.1.0`, but a full `cargo check` timed out while compiling shared Windows/image dependencies before producing rendered component evidence.
+Created a temporary spike crate depending on `gpui-kit = { version = "0.9.0", features = ["gpui-fast"] }` and rendered a styled component:
+
+```rust
+use gpui_kit::*;
+use gpui_kit::component::button::{Button, ButtonVariants};
+
+struct Hello;
+
+impl Render for Hello {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child(Button::new("hello").label("Hello").primary())
+    }
+}
+
+fn main() {
+    gpui_kit::application().run(|cx| {
+        gpui_kit::init(cx);
+        gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| Hello))
+            .expect("failed to open window");
+    });
+}
+```
+
+`cargo check` passes on Windows with the pinned toolchain.
 
 ## Finding
 
-gpui-kit resolves with the pinned GPUI 0.2 line, but this spike did not produce a rendered Button/Dialog proof within the allotted time. The failure is in dependency compilation coverage, not in Orion code.
+`gpui-kit 0.9.1` (with `gpui-fast`) builds cleanly and provides `component::button::Button` through the `gpui_kit` facade. The earlier `gpui-kit 0.1.0` crate is a placeholder binary (`Hello, world!`) and must not be used.
 
 ## Recommendation
 
-Defer gpui-kit adoption for #7. Use raw GPUI with the same component boundaries and Orbit token contract defined in the design spec. Revisit gpui-kit only if a later spike produces a rendered component on the pinned Windows toolchain.
+Adopt gpui-kit 0.9 with `gpui-fast` for shell chrome (Button, Tabs, Sidebar, Dialog, Badge) in a follow-up migration. Keep the custom VT grid and Orbit token contract. The migration must replace the raw `gpui` dependency in `crates/orion-ui/Cargo.toml` and verify the full workspace build, clippy, and screenshots.
