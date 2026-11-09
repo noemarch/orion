@@ -12,6 +12,19 @@ pub struct AgentRow {
     pub selected: bool,
 }
 
+impl AgentRow {
+    pub fn status_word(&self) -> &'static str {
+        match self.status {
+            AgentStatus::Working => "Working",
+            AgentStatus::Blocked => "Waiting",
+            AgentStatus::Done => "Done",
+            AgentStatus::Error => "Error",
+            AgentStatus::Idle => "Idle",
+            AgentStatus::Unknown => "Unknown",
+        }
+    }
+}
+
 fn parse_status(raw: Option<&str>) -> AgentStatus {
     match raw {
         Some("working") => AgentStatus::Working,
@@ -53,14 +66,28 @@ pub fn agent_rows(snapshot: &Value) -> Vec<AgentRow> {
             let tab_label = tabs
                 .and_then(|rows| rows.iter().find(|t| str_field(t, "tab_id") == tab_id))
                 .and_then(|t| str_field(t, "label"));
-            let context = [workspace_label, tab_label, str_field(pane, "cwd")]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(" · ");
+            let status = parse_status(pane.get("agent_status").and_then(Value::as_str));
+            let status_word = match status {
+                AgentStatus::Working => "Working",
+                AgentStatus::Blocked => "Waiting",
+                AgentStatus::Done => "Done",
+                AgentStatus::Error => "Error",
+                AgentStatus::Idle => "Idle",
+                AgentStatus::Unknown => "Unknown",
+            };
+            let context = [
+                workspace_label,
+                tab_label,
+                str_field(pane, "cwd"),
+                Some(status_word),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
             Some(AgentRow {
                 selected: focused_pane_id == Some(pane_id.as_str()),
-                status: parse_status(pane.get("agent_status").and_then(Value::as_str)),
+                status,
                 pane_id,
                 title,
                 context,
@@ -72,6 +99,18 @@ pub fn agent_rows(snapshot: &Value) -> Vec<AgentRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_word_is_written_not_color_only() {
+        let snapshot = serde_json::json!({
+            "panes": [{ "pane_id": "p1", "agent_status": "working" }],
+            "tabs": [],
+            "workspaces": [],
+        });
+        let rows = agent_rows(&snapshot);
+        assert_eq!(rows[0].status_word(), "Working");
+        assert!(rows[0].context.contains("Working"));
+    }
 
     #[test]
     fn missing_agent_fields_are_unavailable_not_defaulted() {

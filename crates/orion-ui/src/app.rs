@@ -218,6 +218,24 @@ impl OrionApp {
                         .child(header.connection),
                 ),
             )
+            .child(
+                div()
+                    .id("header-settings")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme.surface_elevated)
+                    .text_color(theme.text)
+                    .child("Settings")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let settings = this.settings.clone();
+                        settings.update(cx, |view, cx| {
+                            view.set_open(true);
+                            cx.notify();
+                        });
+                        cx.notify();
+                    })),
+            )
     }
 
     fn render_lens_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {

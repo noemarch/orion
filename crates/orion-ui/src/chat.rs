@@ -10,7 +10,9 @@
 //! Scroll-follow: new content scrolls to the bottom until the user scrolls up
 //! (wheel sets `at_bottom = false`).
 
-use crate::chat_entities::{ChatPart, ChatPrompt, ChatRole, ChatTurn, ConversationResponse};
+use crate::chat_entities::{
+    cap_turns, ChatPart, ChatPrompt, ChatRole, ChatTurn, ConversationResponse,
+};
 use crate::markdown::{parse_markdown, MarkdownLine, RunKind};
 use crate::prompt_card::PromptCard;
 use crate::theme::Theme;
@@ -247,11 +249,7 @@ impl Render for ChatView {
             let mut column = div().id("chat-turns").flex().flex_col().gap(px(12.0)).p_3();
             let (turns, total_turns): (Vec<ChatTurn>, usize) = match &self.response {
                 Some(response) => (
-                    response
-                        .recent(MAX_RECENT_TURNS)
-                        .into_iter()
-                        .cloned()
-                        .collect(),
+                    cap_turns(response.turns.clone(), MAX_RECENT_TURNS),
                     response.turns.len(),
                 ),
                 None => (Vec::new(), 0),
