@@ -5,7 +5,7 @@ use gpui::{
     div, px, App, Application, Context, Entity, Render, Size, Window, WindowBounds, WindowOptions,
 };
 use orion_core::{AgentKind, Engine, FrameSink, LaunchSpec, PaneConfig, Role, TerminalSize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -343,8 +343,9 @@ impl OrionApp {
             let ws_id = focused.map(|ws| ws.id.clone()).unwrap_or_default();
             (tabs, ws_id)
         });
-        let _ = ws_id;
         let scale = theme.density_scale();
+        let engine = self.engine.clone();
+        let ws_id_for_new = ws_id.clone();
         div()
             .id("tab-strip")
             .flex()
@@ -358,8 +359,14 @@ impl OrionApp {
             .children(tabs.iter().map(|tab| {
                 let is_active = tab.focused;
                 let pane_id = tab.pane_ids.first().cloned();
+                let tab_id = tab.id.clone();
+                let engine_close = engine.clone();
                 let row = div()
                     .id(self.next_row_id())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
                     .px_3()
                     .py_1()
                     .rounded_md()
@@ -374,7 +381,23 @@ impl OrionApp {
                         theme.text_dim
                     })
                     .text_size(px(12.0 * scale))
-                    .child(tab.label.clone());
+                    .child(tab.label.clone())
+                    .child(
+                        div()
+                            .id(self.next_row_id())
+                            .px_1()
+                            .text_size(px(12.0 * scale))
+                            .text_color(theme.text_dim)
+                            .child("×")
+                            .on_click(cx.listener(move |_this, _, _, cx| {
+                                let _ = engine_close.http(
+                                    "POST",
+                                    "/api/tab/close",
+                                    &json!({ "tab_id": tab_id }),
+                                );
+                                cx.notify();
+                            })),
+                    );
                 if let Some(pane_id) = pane_id {
                     row.on_click(cx.listener(move |this, _, _, cx| {
                         let sidebar = this.workspace_sidebar.clone();
@@ -385,6 +408,29 @@ impl OrionApp {
                     row
                 }
             }))
+            .child(
+                div()
+                    .id(self.next_row_id())
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme.surface_elevated)
+                    .text_color(theme.text)
+                    .text_size(px(12.0 * scale))
+                    .child("+")
+                    .on_click(cx.listener(move |_this, _, _, cx| {
+                        let _ = engine.http(
+                            "POST",
+                            "/api/tab/create",
+                            &json!({
+                                "workspace_id": ws_id_for_new,
+                                "agent": { "kind": "claude" },
+                                "label": "Claude",
+                            }),
+                        );
+                        cx.notify();
+                    })),
+            )
     }
 
     fn next_row_id(&self) -> usize {
