@@ -15,6 +15,7 @@ use crate::files_view::FileTree;
 use crate::settings::{KeyBarExtras, SettingsModal};
 use crate::terminal::TerminalPane;
 use crate::theme::Theme;
+use crate::shell_model::{lens_segment_state, HeaderModel, ShellLayout};
 use crate::workspace::WorkspaceSidebar;
 
 /// The lenses over the same pane: chat-first by default, terminal one click away,
@@ -168,13 +169,62 @@ impl OrionApp {
         self.lens = lens;
     }
 
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::current();
+        let sidebar = self.workspace_sidebar.clone();
+        let header = sidebar.update(cx, |view, _cx| {
+            let workspaces = view.workspaces();
+            let focused = workspaces
+                .iter()
+                .find(|w| w.focused)
+                .or_else(|| workspaces.first());
+            if let Some(ws) = focused {
+                HeaderModel {
+                    title: "Orbit".to_string(),
+                    workspace: ws.label.clone(),
+                    connection: "Live".to_string(),
+                }
+            } else {
+                HeaderModel::empty()
+            }
+        });
+        div()
+            .id("app-header")
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .h(px(48.0))
+            .px_3()
+            .bg(theme.surface_panel)
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .text_color(theme.text_strong)
+                    .child(header.title),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_dim)
+                    .child(header.workspace),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex_row()
+                    .justify_end()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.text_dim)
+                            .child(header.connection),
+                    ),
+            )
+    }
+
     fn render_lens_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
-        let (chat_active, terminal_active, changes_active) = match self.lens {
-            Lens::Chat => (true, false, false),
-            Lens::Terminal => (false, true, false),
-            Lens::Changes => (false, false, true),
-        };
+        let (chat_active, terminal_active, changes_active) = lens_segment_state(self.lens);
         div()
             .id("lens-toggle")
             .flex_row()
@@ -182,6 +232,7 @@ impl OrionApp {
             .gap(px(8.0))
             .h(px(40.0))
             .px_3()
+            .max_w(px(420.0))
             .bg(theme.surface_panel)
             .child(
                 div()
@@ -329,8 +380,8 @@ impl OrionApp {
 
 impl Render for OrionApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let narrow = window.bounds().size.width < px(900.0);
-        let sidebar_w = if narrow { 64.0 } else { 280.0 };
+        let layout = ShellLayout::for_width(window.bounds().size.width.into());
+        let sidebar_w = layout.sidebar_width_px;
         // The Changes lens' 2s polls run only while it is active; views are
         // preserved between lens switches (entities stay mounted above).
         let changes_active = self.lens == Lens::Changes;
@@ -403,6 +454,8 @@ impl Render for OrionApp {
                     .id("main-column")
                     .flex_col()
                     .flex_1()
+                    .min_w(px(0.0))
+                    .child(self.render_header(cx))
                     .child(self.render_lens_toggle(cx))
                     .child(self.render_tab_strip(cx))
                     .child(lens_body),

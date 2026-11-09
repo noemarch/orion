@@ -21,6 +21,7 @@
 //! `workspace.rs` now re-exports this module's `WorkspaceSidebar` so
 //! existing imports keep working.
 
+use crate::agents::agent_rows;
 use crate::theme::Theme;
 use gpui::prelude::*;
 use gpui::{div, px, Context, FocusHandle, Render, Styled, StyledText, TextStyle, Window};
@@ -317,6 +318,11 @@ impl Render for WorkspaceSidebar {
             .and_then(Value::as_str)
             .map(str::to_string);
         let workspaces = self.workspaces();
+        let agents = self
+            .snapshot
+            .as_ref()
+            .map(agent_rows)
+            .unwrap_or_default();
 
         let empty = workspaces.is_empty();
         let list = div()
@@ -408,6 +414,76 @@ impl Render for WorkspaceSidebar {
                     .child("WORKSPACES"),
             )
             .child(list)
+            .child(
+                div()
+                    .flex_row()
+                    .items_center()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(11.0 * scale))
+                    .text_color(theme.text_dim)
+                    .child("AGENTS"),
+            )
+            .child(div().flex_col().gap_1().px_2().py_2().children(
+                agents.iter().map(|agent| {
+                    let pane_id = agent.pane_id.clone();
+                    div()
+                        .id(self.next_row_id())
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0 * scale))
+                        .h(px(row_h))
+                        .px_2()
+                        .rounded_md()
+                        .bg(if agent.selected {
+                            theme.surface_hover
+                        } else {
+                            Theme::transparent()
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .size(px(22.0 * scale))
+                                .rounded_md()
+                                .items_center()
+                                .justify_center()
+                                .bg(theme.accent_tint)
+                                .text_color(theme.text_strong)
+                                .child(
+                                    agent
+                                        .title
+                                        .chars()
+                                        .next()
+                                        .unwrap_or('?')
+                                        .to_ascii_uppercase()
+                                        .to_string(),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0 * scale))
+                                .text_color(theme.text)
+                                .child(agent.title.clone()),
+                        )
+                        .child(
+                            div().flex_1().flex_row().justify_end().child(
+                                div()
+                                    .size(px(8.0))
+                                    .rounded_full()
+                                    .bg(Self::status_color(
+                                        agent.status,
+                                        &theme,
+                                        self.pulse_phase,
+                                    ))
+                                    .id(self.next_row_id()),
+                            ),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.focus_pane(&pane_id);
+                            cx.notify();
+                        }))
+                }),
+            ))
             .child(div().flex_1().child(if empty {
                 div()
                     .px_2()
