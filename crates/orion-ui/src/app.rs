@@ -359,6 +359,8 @@ impl OrionApp {
             .children(tabs.iter().map(|tab| {
                 let is_active = tab.focused;
                 let pane_id = tab.pane_ids.first().cloned();
+                let pane_id_for_split = pane_id.clone();
+                let engine_split = engine.clone();
                 let tab_id = tab.id.clone();
                 let engine_close = engine.clone();
                 let row = div()
@@ -382,6 +384,27 @@ impl OrionApp {
                     })
                     .text_size(px(12.0 * scale))
                     .child(tab.label.clone())
+                    .child(
+                        div()
+                            .id(self.next_row_id())
+                            .px_1()
+                            .text_size(px(12.0 * scale))
+                            .text_color(theme.text_dim)
+                            .child("◫")
+                            .on_click(cx.listener(move |_this, _, _, cx| {
+                                if let Some(pane_id) = pane_id_for_split.clone() {
+                                    let _ = engine_split.http(
+                                        "POST",
+                                        "/api/pane/split",
+                                        &json!({
+                                            "pane_id": pane_id,
+                                            "direction": "right",
+                                        }),
+                                    );
+                                }
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         div()
                             .id(self.next_row_id())
