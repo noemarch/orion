@@ -1,6 +1,6 @@
 # Orion: Engineering Guidelines & Agent Invariants
 
-> **Scope:** These rules govern any engineer or AI coding assistant modifying the Orion codebase (`C:\rust-projects\orion`). Orion is a local-first, standalone AI agent orchestrator and multi-device control panel built with a native Rust core (`orion-core`), a Tauri v2 desktop shell (`src-tauri`), and a React 19 companion frontend (`src/`).
+> **Scope:** These rules govern any engineer or AI coding assistant modifying the Orion codebase (`C:\rust-projects\orion`). Orion is a local-first, standalone AI agent orchestrator and multi-device control panel built with a native Rust core (`orion-core`) and a native GPUI desktop shell (`crates/orion-ui`). Tauri (`src-tauri`), where retained, is a launcher/tray host only and does not render the UI (see `docs/adr/desktop-shell-ownership.md`).
 
 ---
 
@@ -9,8 +9,8 @@
 1. **Agent-Only Orchestration (No Generic Shells):** Orion orchestrates AI agent CLIs exclusively (`claude`, `codex`, `opencode`, `cursor`, `grok`, `omp`, `omo`, `pi`, `agy`, `hermes`, `devin`). Orion does **not** provide generic bash/zsh/PowerShell terminal tabs. Every workspace pane is strictly a dedicated AI agent instance. The terminal lens in Orion is the live, inspectable PTY of that *agent's* interactive CLI, not an empty shell prompt.
 2. **No External Multiplexer:** Orion is an independent orchestrator. It does not wrap, bridge, or depend on any external terminal multiplexer. Orion directly allocates PTYs, supervises agent subprocesses, manages workspaces/worktrees, and serves remote clients.
 3. **Dual Delivery:**
-   - **Tauri v2 Desktop App:** Runs locally on Windows, macOS, and Linux with native OS window management and system tray integration.
-   - **Headless Server (`orion serve`):** Runs on headless workstations or devboxes, serving the exact same React 19 UI over Tailscale or LAN as a mobile-optimized PWA.
+   - **Native GPUI Desktop App:** Runs locally on Windows, macOS, and Linux with native OS window management and system tray integration.
+   - **Headless Server (`orion serve`):** Runs on headless workstations or devboxes, serving the Engine over Tailscale or LAN.
 4. **Bring-Your-Own-Subscription:** Orion drives standard agent CLIs using credentials already authenticated on the host machine (`claude auth login`, `codex login`, etc.).
 5. **Chat-First Clarity, Terminal Truth:** The primary interface renders structured conversational turns, syntax-highlighted diffs, and prompt approval cards; a live xterm.js PTY terminal of the agent CLI is always one click or tap away with zero state loss.
 
