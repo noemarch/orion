@@ -91,6 +91,24 @@ pub struct Theme {
     pub accent_tint: Rgba,
     /// Primary `--primary`.
     pub primary: Rgba,
+    /// Primary/hover `--primary-hover`.
+    pub primary_hover: Rgba,
+    /// Primary/text `--primary-text`.
+    pub primary_text: Rgba,
+    /// Primary/tint `--primary-tint`.
+    pub primary_tint: Rgba,
+    /// Syntax/keyword `--syntax-keyword`.
+    pub syntax_keyword: Rgba,
+    /// Syntax/string `--syntax-string`.
+    pub syntax_string: Rgba,
+    /// Syntax/number `--syntax-number`.
+    pub syntax_number: Rgba,
+    /// Syntax/type `--syntax-type`.
+    pub syntax_type: Rgba,
+    /// Syntax/variable `--syntax-variable`.
+    pub syntax_variable: Rgba,
+    /// Syntax/meta `--syntax-meta`.
+    pub syntax_meta: Rgba,
     /// Status/idle `--status-idle`.
     pub status_idle: Rgba,
     /// Status/working `--status-working` (#7fc4de dark).
@@ -168,6 +186,15 @@ impl Theme {
                 accent: rgb(0xa3185a),
                 accent_tint: tint(0xa3185a, 12),
                 primary: rgb(0x8f1a52),
+                primary_hover: rgb(0xa3185a),
+                primary_text: rgb(0xf2eef5),
+                primary_tint: tint(0x8f1a52, 28),
+                syntax_keyword: rgb(0xff8fa8),
+                syntax_string: rgb(0xa8d48a),
+                syntax_number: rgb(0xd2a8ff),
+                syntax_type: rgb(0x79c0ff),
+                syntax_variable: rgb(0xffb86b),
+                syntax_meta: rgb(0xb49dd6),
                 status_idle: rgb(0x9a93a6),
                 status_working: rgb(0x7fc4de),
                 status_blocked: rgb(0xff9a92),
@@ -205,6 +232,15 @@ impl Theme {
                 accent: rgb(0xa84370),
                 accent_tint: tint(0xa84370, 10),
                 primary: rgb(0xa84370),
+                primary_hover: rgb(0xc25081),
+                primary_text: rgb(0xfff7fa),
+                primary_tint: tint(0xa84370, 14),
+                syntax_keyword: rgb(0xa33a17),
+                syntax_string: rgb(0x4b6b18),
+                syntax_number: rgb(0x8a3f7a),
+                syntax_type: rgb(0x155a72),
+                syntax_variable: rgb(0x7a5418),
+                syntax_meta: rgb(0x5d4791),
                 status_idle: rgb(0x7a5570),
                 status_working: rgb(0x155a72),
                 status_blocked: rgb(0xa82323),
@@ -304,6 +340,14 @@ mod tests {
         assert_eq!(theme.surface_base, rgb(0xfaf5fa));
         assert_eq!(theme.text, rgb(0x501854));
         assert_eq!(theme.border, rgb(0xe4d8e0));
+    }
+
+    #[test]
+    fn orbit_token_table_matches_design_doc() {
+        let theme = Theme::dark();
+        assert_eq!(theme.primary_hover, gpui::rgb(0xa3185a));
+        assert_eq!(theme.primary_text, gpui::rgb(0xf2eef5));
+        assert_eq!(theme.syntax_keyword, gpui::rgb(0xff8fa8));
     }
 
     #[test]
