@@ -12,6 +12,7 @@ pub mod files_view;
 pub mod markdown;
 pub mod prompt_card;
 pub mod settings;
+pub mod shell_model;
 pub mod sidebar;
 pub mod terminal;
 pub mod theme;
