@@ -33,6 +33,8 @@ notify = "=6.1.1"
 parking_lot = "0.12"
 subtle = "2.6"
 rusqlite = { version = "0.32", features = ["bundled"] }
+pulldown-cmark = "0.13"
+similar = "2"
 
 # Web push delivery: reqwest with rustls-tls (no OpenSSL/curl-sys on Windows)
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
