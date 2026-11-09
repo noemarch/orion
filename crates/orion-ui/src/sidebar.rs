@@ -528,6 +528,15 @@ mod tests {
     use super::*;
     use gpui::rgb;
 
+    #[gpui::test]
+    fn sidebar_renders_empty_state_without_panic(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, size};
+        let cx = cx.add_empty_window();
+        cx.draw(point(px(0.), px(0.)), size(px(280.), px(800.)), |_, cx| {
+            cx.new(WorkspaceSidebar::new)
+        });
+    }
+
     #[test]
     fn status_parses_wire_names() {
         assert_eq!(parse_status(Some("working")), AgentStatus::Working);
