@@ -178,6 +178,7 @@ impl Render for FileReader {
         self.row_seq = 0;
         let mut root = div()
             .id("file-reader")
+            .flex()
             .flex_col()
             .size_full()
             .bg(Theme::current().surface_base)
@@ -198,6 +199,7 @@ impl Render for FileReader {
         root = root.child(
             div()
                 .id(self.next_row_id())
+                .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
@@ -274,7 +276,7 @@ impl Render for FileReader {
                 );
             }
             Some(_) => {
-                let mut body = div().id(self.next_row_id()).flex_col().px_3().py_2();
+                let mut body = div().id(self.next_row_id()).flex().flex_col().px_3().py_2();
                 if let Some(text) = self.text.clone() {
                     for line in text.lines() {
                         body = body.child(

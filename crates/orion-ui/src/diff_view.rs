@@ -306,6 +306,7 @@ impl ChangesView {
     fn render_scope_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut bar = div()
             .id(self.next_row_id())
+            .flex()
             .flex_row()
             .items_center()
             .gap(px(4.0))
@@ -398,6 +399,7 @@ impl Render for ChangesView {
         let mut root = div()
             .id("changes-view")
             .track_focus(&self.focus_handle)
+            .flex()
             .flex_col()
             .size_full()
             .bg(theme.surface_base)
@@ -443,12 +445,13 @@ impl Render for ChangesView {
 
         let mut panes = div()
             .id(self.next_row_id())
+            .flex()
             .flex_row()
             .flex_1()
             .min_h(px(0.0));
 
         // File list (left).
-        let mut list_column = div().id(self.next_row_id()).flex_col().w(px(360.0));
+        let mut list_column = div().id(self.next_row_id()).flex().flex_col().w(px(360.0));
         let header = match &self.list {
             Some(list) => {
                 let total = list.total.unwrap_or(list.files.len() as u64);
@@ -469,7 +472,7 @@ impl Render for ChangesView {
                 .text_color(Theme::current().text_dim)
                 .child(header),
         );
-        let mut file_rows = div().id(self.next_row_id()).flex_col();
+        let mut file_rows = div().id(self.next_row_id()).flex().flex_col();
         if let Some(list) = self.list.clone() {
             for file in &list.files {
                 let selected = self.selected_path.as_deref() == Some(file.path.as_str());
@@ -501,6 +504,7 @@ impl Render for ChangesView {
                 file_rows = file_rows.child(
                     div()
                         .id(self.next_row_id())
+                        .flex()
                         .flex_row()
                         .items_center()
                         .gap(px(8.0))
@@ -560,7 +564,7 @@ impl Render for ChangesView {
         panes = panes.child(list_column);
 
         // Patch (right).
-        let mut patch_column = div().id(self.next_row_id()).flex_col().flex_1();
+        let mut patch_column = div().id(self.next_row_id()).flex().flex_col().flex_1();
         match self.patch.clone() {
             Some(patch) => {
                 let title = format!("{} ({})", patch.file.path, patch.file.status.as_str());
@@ -577,13 +581,13 @@ impl Render for ChangesView {
                     // similar-driven: classify with ChangeTag semantics over
                     // the unified-diff line prefixes.
                     let diff = similar::TextDiff::from_lines(text, text);
-                    let mut patch_lines = div().id(self.next_row_id()).flex_col().px_3();
+                    let mut patch_lines = div().id(self.next_row_id()).flex().flex_col().px_3();
                     for change in diff.iter_all_changes() {
                         let line = change.to_string();
                         let line = line.trim_end_matches('\n');
                         let kind = classify_patch_line(line);
                         patch_lines = patch_lines.child(
-                            div().id(self.next_row_id()).flex_row().child(
+                            div().id(self.next_row_id()).flex().flex_row().child(
                                 StyledText::new(if line.is_empty() {
                                     " ".to_string()
                                 } else {

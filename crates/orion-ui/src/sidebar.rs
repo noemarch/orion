@@ -322,6 +322,7 @@ impl Render for WorkspaceSidebar {
 
         let empty = workspaces.is_empty();
         let list = div()
+            .flex()
             .flex_col()
             .gap_1()
             .px_2()
@@ -338,6 +339,7 @@ impl Render for WorkspaceSidebar {
                 let pane_id = ws.focus_pane.clone();
                 let row = div()
                     .id(self.next_row_id())
+                    .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(8.0 * scale))
@@ -373,7 +375,7 @@ impl Render for WorkspaceSidebar {
                         [],
                     ))
                     .child(
-                        div().flex_1().flex_row().justify_end().child(
+                        div().flex_1().flex().flex_row().justify_end().child(
                             div()
                                 .size(px(8.0))
                                 .rounded_full()
@@ -396,11 +398,14 @@ impl Render for WorkspaceSidebar {
         div()
             .id("workspace-sidebar")
             .track_focus(&self.focus_handle)
+            .flex()
+            .flex()
             .flex_col()
             .size_full()
             .bg(theme.surface_panel)
             .child(
                 div()
+                    .flex()
                     .flex_row()
                     .items_center()
                     .px_2()
@@ -412,6 +417,7 @@ impl Render for WorkspaceSidebar {
             .child(list)
             .child(
                 div()
+                    .flex()
                     .flex_row()
                     .items_center()
                     .px_2()
@@ -422,6 +428,7 @@ impl Render for WorkspaceSidebar {
             )
             .child(
                 div()
+                    .flex()
                     .flex_col()
                     .gap_1()
                     .px_2()
@@ -430,6 +437,7 @@ impl Render for WorkspaceSidebar {
                         let pane_id = agent.pane_id.clone();
                         div()
                             .id(self.next_row_id())
+                            .flex()
                             .flex_row()
                             .items_center()
                             .gap(px(8.0 * scale))
@@ -462,6 +470,7 @@ impl Render for WorkspaceSidebar {
                             )
                             .child(
                                 div()
+                                    .flex()
                                     .flex_col()
                                     .child(
                                         div()
@@ -477,7 +486,7 @@ impl Render for WorkspaceSidebar {
                                     ),
                             )
                             .child(
-                                div().flex_1().flex_row().justify_end().child(
+                                div().flex_1().flex().flex_row().justify_end().child(
                                     div()
                                         .size(px(8.0))
                                         .rounded_full()

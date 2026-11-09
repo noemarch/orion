@@ -190,6 +190,8 @@ impl OrionApp {
         });
         div()
             .id("app-header")
+            .flex()
+            .flex()
             .flex_row()
             .items_center()
             .gap(px(12.0))
@@ -209,7 +211,7 @@ impl OrionApp {
                     .child(header.workspace),
             )
             .child(
-                div().flex_1().flex_row().justify_end().child(
+                div().flex_1().flex().flex_row().justify_end().child(
                     div()
                         .text_size(px(12.0))
                         .text_color(theme.text_dim)
@@ -223,6 +225,8 @@ impl OrionApp {
         let (chat_active, terminal_active, changes_active) = lens_segment_state(self.lens);
         div()
             .id("lens-toggle")
+            .flex()
+            .flex()
             .flex_row()
             .items_center()
             .gap(px(8.0))
@@ -285,7 +289,7 @@ impl OrionApp {
                     })),
             )
             .child(
-                div().flex_1().flex_row().justify_end().child(
+                div().flex_1().flex().flex_row().justify_end().child(
                     div()
                         .id("settings-button")
                         .px_3()
@@ -325,6 +329,8 @@ impl OrionApp {
         let scale = theme.density_scale();
         div()
             .id("tab-strip")
+            .flex()
+            .flex()
             .flex_row()
             .items_center()
             .gap_1()
@@ -398,6 +404,7 @@ impl Render for OrionApp {
                 {
                     div()
                         .id("main-content")
+                        .flex()
                         .flex_col()
                         .flex_1()
                         .child(self.chat_view.clone())
@@ -405,6 +412,7 @@ impl Render for OrionApp {
                 } else {
                     div()
                         .id("main-content")
+                        .flex()
                         .flex_col()
                         .flex_1()
                         .child(self.chat_view.clone())
@@ -412,16 +420,19 @@ impl Render for OrionApp {
             }
             Lens::Terminal => div()
                 .id("main-content")
+                .flex()
                 .flex_col()
                 .flex_1()
                 .child(self.terminal_pane.clone()),
             Lens::Changes => div()
                 .id("main-content")
+                .flex()
                 .flex_row()
                 .flex_1()
                 .child(
                     div()
                         .id("changes-left")
+                        .flex()
                         .flex_col()
                         .flex_1()
                         .child(self.file_tree.clone()),
@@ -429,6 +440,7 @@ impl Render for OrionApp {
                 .child(
                     div()
                         .id("changes-right")
+                        .flex()
                         .flex_col()
                         .flex_1()
                         .child(self.changes_view.clone()),
@@ -436,11 +448,15 @@ impl Render for OrionApp {
         };
         div()
             .id("app")
+            .flex()
+            .flex()
             .flex_row()
             .size_full()
             .child(
                 div()
                     .id("sidebar")
+                    .flex()
+                    .flex()
                     .flex_col()
                     .w(px(sidebar_w))
                     .child(self.workspace_sidebar.clone()),
@@ -448,6 +464,8 @@ impl Render for OrionApp {
             .child(
                 div()
                     .id("main-column")
+                    .flex()
+                    .flex()
                     .flex_col()
                     .flex_1()
                     .min_w(px(0.0))

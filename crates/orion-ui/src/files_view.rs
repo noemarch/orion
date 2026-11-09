@@ -155,6 +155,7 @@ impl Render for FileTree {
         self.row_seq = 0;
         let mut tree = div()
             .id("file-tree")
+            .flex()
             .flex_col()
             .size_full()
             .bg(Theme::current().surface_base)
@@ -168,6 +169,7 @@ impl Render for FileTree {
         tree = tree.child(
             div()
                 .id(self.next_row_id())
+                .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
@@ -193,6 +195,7 @@ impl Render for FileTree {
         if let Some(listing) = self.listing.clone() {
             let mut nav = div()
                 .id(self.next_row_id())
+                .flex()
                 .flex_row()
                 .gap(px(4.0))
                 .px_3()
@@ -231,13 +234,14 @@ impl Render for FileTree {
             );
             tree = tree.child(nav);
 
-            let mut rows = div().id(self.next_row_id()).flex_col().px_3().py_1();
+            let mut rows = div().id(self.next_row_id()).flex().flex_col().px_3().py_1();
             for name in &listing.directories {
                 let child = join_path(&listing.path, name);
                 let label = format!("▸ {name}");
                 rows = rows.child(
                     div()
                         .id(self.next_row_id())
+                        .flex()
                         .flex_row()
                         .px_2()
                         .py_1()
@@ -257,6 +261,7 @@ impl Render for FileTree {
                 rows = rows.child(
                     div()
                         .id(self.next_row_id())
+                        .flex()
                         .flex_row()
                         .px_2()
                         .py_1()
@@ -302,12 +307,21 @@ impl Render for FileTree {
 
         div()
             .id("files-surface")
+            .flex()
             .flex_row()
             .size_full()
-            .child(div().id("files-left").flex_col().w(px(320.0)).child(tree))
+            .child(
+                div()
+                    .id("files-left")
+                    .flex()
+                    .flex_col()
+                    .w(px(320.0))
+                    .child(tree),
+            )
             .child(
                 div()
                     .id("files-right")
+                    .flex()
                     .flex_col()
                     .flex_1()
                     .child(self.file_reader.clone()),

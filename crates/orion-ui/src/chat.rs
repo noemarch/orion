@@ -179,16 +179,16 @@ fn render_text_block(text: &str, theme: Theme) -> Vec<impl IntoElement> {
     parse_markdown(text)
         .iter()
         .map(|line| {
-            div()
-                .flex_row()
-                .child(StyledText::new(line.text.clone()).with_default_highlights(
+            div().flex().flex_row().child(
+                StyledText::new(line.text.clone()).with_default_highlights(
                     &TextStyle {
                         color: crate::theme::hsla(theme.text),
                         font_size: rems(0.875).into(),
                         ..Default::default()
                     },
                     markdown_highlights(line, theme),
-                ))
+                ),
+            )
         })
         .collect()
 }
@@ -218,6 +218,7 @@ impl Render for ChatView {
         let chat = div()
             .id("chat-view")
             .track_focus(&self.focus_handle)
+            .flex()
             .flex_col()
             .size_full()
             .bg(theme.surface_base)
@@ -243,7 +244,7 @@ impl Render for ChatView {
         }
 
         let turn_column = {
-            let mut column = div().id("chat-turns").flex_col().gap(px(12.0)).p_3();
+            let mut column = div().id("chat-turns").flex().flex_col().gap(px(12.0)).p_3();
             let (turns, total_turns): (Vec<ChatTurn>, usize) = match &self.response {
                 Some(response) => (
                     response
@@ -264,6 +265,7 @@ impl Render for ChatView {
 
         let list = div()
             .id("chat-scroll")
+            .flex()
             .flex_col()
             .flex_1()
             .overflow_y_scroll()
@@ -293,6 +295,7 @@ impl ChatView {
             .unwrap_or_default();
         div()
             .id("chat-status")
+            .flex()
             .flex_row()
             .items_center()
             .gap(px(8.0))
@@ -312,6 +315,7 @@ impl ChatView {
         let is_user = turn.role == ChatRole::User;
         let mut card = div()
             .id(self.next_row_id())
+            .flex()
             .flex_col()
             .gap(px(6.0))
             .p_3()
@@ -336,6 +340,7 @@ impl ChatView {
         card = card.child(
             div()
                 .id(self.next_row_id())
+                .flex()
                 .flex_row()
                 .gap(px(8.0))
                 .text_size(px(11.0 * Theme::current().density_scale()))
@@ -359,7 +364,7 @@ impl ChatView {
     ) -> impl IntoElement {
         match part {
             ChatPart::Text { text, .. } => {
-                let mut column = div().id(self.next_row_id()).flex_col();
+                let mut column = div().id(self.next_row_id()).flex().flex_col();
                 for line in render_text_block(text, Theme::current()) {
                     column = column.child(line);
                 }
@@ -369,6 +374,7 @@ impl ChatView {
                 let open = *self.thinking_open.get(turn_index).unwrap_or(&false);
                 let mut folded = div()
                     .id(self.next_row_id())
+                    .flex()
                     .flex_col()
                     .gap(px(4.0))
                     .rounded_md()
@@ -410,6 +416,7 @@ impl ChatView {
                 };
                 let mut row = div()
                     .id(self.next_row_id())
+                    .flex()
                     .flex_col()
                     .gap(px(4.0))
                     .rounded_md()
@@ -418,6 +425,7 @@ impl ChatView {
                 row = row.child(
                     div()
                         .id(self.next_row_id())
+                        .flex()
                         .flex_row()
                         .gap(px(6.0))
                         .text_size(px(12.0 * Theme::current().density_scale()))
@@ -453,7 +461,7 @@ impl ChatView {
                 }
                 if !tool.output.is_empty() {
                     if is_diff_output(&tool.output) {
-                        let mut diff_column = div().id(self.next_row_id()).flex_col();
+                        let mut diff_column = div().id(self.next_row_id()).flex().flex_col();
                         for (line, inserted) in diff_lines(&truncate_output(&tool.output)) {
                             diff_column = diff_column.child(
                                 div()
@@ -511,7 +519,7 @@ impl ChatView {
                     })
             }
             ChatPart::TaskResult { tasks } => {
-                let mut column = div().id(self.next_row_id()).flex_col().gap(px(2.0));
+                let mut column = div().id(self.next_row_id()).flex().flex_col().gap(px(2.0));
                 for task in tasks {
                     column = column.child(
                         div()

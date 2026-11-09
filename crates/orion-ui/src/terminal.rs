@@ -49,6 +49,7 @@ fn grid_line(
     highlights: Vec<(std::ops::Range<usize>, HighlightStyle)>,
 ) -> impl IntoElement {
     div()
+        .flex()
         .flex_row()
         .child(StyledText::new(text).with_default_highlights(&grid_style(), highlights))
 }
@@ -518,6 +519,7 @@ impl Render for TerminalPane {
                 ..Default::default()
             };
             div()
+                .flex()
                 .flex_row()
                 .items_center()
                 .h(px(TARGET_PX))
@@ -578,6 +580,7 @@ impl Render for TerminalPane {
         let theme = Theme::current();
         let key_bar = {
             let mut bar = div()
+                .flex()
                 .flex_row()
                 .flex_wrap()
                 .gap_1()
@@ -678,6 +681,7 @@ impl Render for TerminalPane {
             None => "starting agent…".to_string(),
         };
         let status_bar = div()
+            .flex()
             .flex_row()
             .items_center()
             .h(px(TARGET_PX * 0.75))
@@ -689,6 +693,7 @@ impl Render for TerminalPane {
         div()
             .id("terminal-pane")
             .track_focus(&self.focus_handle)
+            .flex()
             .flex_col()
             .size_full()
             .bg(theme.term_bg)
@@ -742,9 +747,17 @@ impl Render for TerminalPane {
             )
             .child(
                 div()
+                    .flex()
                     .flex_row()
                     .flex_1()
-                    .child(div().id("grid").flex_1().flex_col().children(grid_rows))
+                    .child(
+                        div()
+                            .id("grid")
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .children(grid_rows),
+                    )
                     .child(
                         div().id("scrollbar").w(px(10.0)).h_full().relative().child(
                             div()
