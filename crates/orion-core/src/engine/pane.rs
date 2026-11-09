@@ -68,6 +68,8 @@ pub struct PaneConfig {
     pub agent: AgentKind,
     pub label: String,
     pub cwd: PathBuf,
+    /// The resolved launch. Production callers resolve it through [`LaunchSpec::for_agent`],
+    /// which guarantees an identified agent CLI; tests may supply a stand-in.
     pub spec: LaunchSpec,
     /// The agent's own arguments, without the resume flags the spec adds: what a restart saves.
     pub args: Vec<String>,

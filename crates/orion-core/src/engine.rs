@@ -92,7 +92,6 @@ pub struct Engine {
     session: Arc<SessionState>,
     connections: Arc<ConnectionRegistry>,
     devices: Arc<DeviceStore>,
-    push: Arc<PushService>,
     version: String,
     routes: Arc<RouteTable>,
     frames: Arc<FrameDispatch>,
@@ -151,7 +150,6 @@ impl Engine {
             session,
             connections,
             devices,
-            push,
             version,
             routes,
             frames,
@@ -214,22 +212,17 @@ impl Engine {
         json!({ "type": "pong", "id": id })
     }
 
-    /// Spawns a new agent pane with the given configuration.
+    /// Spawns a new agent pane and registers it in the session.
     ///
-    /// This is a public wrapper allowing external UIs (like the GPUI shell) to start agents directly.
+    /// This is the public seam external UIs (like the GPUI shell) use to start agents directly.
+    /// The pane's Workspace and Tab are created when they are not open yet, and the new pane
+    /// becomes the focused one, so `/api/session` and the chat route can find it immediately.
+    ///
+    /// `config.spec` is the pane's resolved launch: production callers build it with
+    /// [`LaunchSpec::for_agent`], so the process is an identified agent CLI. Tests may pass a
+    /// stand-in through this seam to keep the bootstrap deterministic.
     pub fn spawn_pane(&self, config: PaneConfig) -> crate::error::Result<Arc<Pane>> {
-        let request = PaneRequest {
-            id: config.id,
-            workspace_id: config.workspace_id,
-            tab_id: config.tab_id,
-            agent: config.agent,
-            label: config.label,
-            cwd: config.cwd,
-            args: config.args,
-            session: None,
-            resume_last: false,
-        };
-        self.spawn_pane_request(request)
+        self.routes.spawn_pane(config)
     }
 
     /// Dispatches one request without a push connection. Used by bounded commands and tests.
@@ -287,50 +280,6 @@ impl Engine {
     /// Whether `token` belongs to a paired device (checked by the gateway's auth gate).
     pub fn device_authenticated(&self, token: &str) -> bool {
         self.devices.matches(token)
-    }
-
-    fn spawn_pane_request(&self, request: PaneRequest) -> crate::error::Result<Arc<Pane>> {
-        use crate::agents::LaunchSpec;
-        use crate::engine::store::DEFAULT_SIZE;
-        use crate::protocol::TerminalSize;
-        let spec = LaunchSpec::for_agent(
-            request.agent,
-            &request.args,
-            request.session.as_deref(),
-            request.session.is_none() && request.resume_last,
-        )?;
-        let size = TerminalSize {
-            rows: DEFAULT_SIZE.rows,
-            cols: DEFAULT_SIZE.cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
-        let on_event = self.on_event();
-        let pane = Pane::spawn(
-            PaneConfig {
-                id: request.id,
-                workspace_id: request.workspace_id,
-                tab_id: request.tab_id,
-                agent: request.agent,
-                label: request.label,
-                cwd: request.cwd,
-                spec,
-                args: request.args,
-                size,
-            },
-            on_event,
-        )?;
-        Ok(Arc::new(pane))
-    }
-
-    /// The pane-event fan-out: frames to attached clients, pushes for terminal states.
-    fn on_event(&self) -> Arc<dyn Fn(PaneEvent) + Send + Sync> {
-        let session = Arc::clone(&self.session);
-        let connections = Arc::clone(&self.connections);
-        let push = Arc::clone(&self.push);
-        Arc::new(move |event| {
-            on_pane_event(&session, &connections, &push, event);
-        })
     }
 
     /// Restores the workspaces saved by the last run.
@@ -408,18 +357,6 @@ pub(crate) fn on_pane_event(
             push.broadcast(&payload, AgentStatus::Done, agent_kind.as_deref());
         }
     }
-}
-
-struct PaneRequest {
-    id: String,
-    workspace_id: String,
-    tab_id: String,
-    agent: crate::protocol::AgentKind,
-    label: String,
-    cwd: PathBuf,
-    args: Vec<String>,
-    session: Option<String>,
-    resume_last: bool,
 }
 
 #[cfg(test)]

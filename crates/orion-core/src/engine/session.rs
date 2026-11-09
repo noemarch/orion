@@ -6,7 +6,7 @@
 //! (`to_saved`/`load`) lives here too, so the store adapter only moves bytes.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -113,10 +113,89 @@ impl SessionState {
         self.session.read().pane(pane_id).cloned()
     }
 
+    /// Inserts a just-spawned pane into the session, creating its workspace and tab when they
+    /// are not open yet. Returns `true` when the workspace itself was created, so the caller
+    /// starts its watcher.
+    ///
+    /// Every pane the engine spawns directly must reach the session through this seam: a pane
+    /// that exists only as a process is invisible to `/api/session` and every route that looks
+    /// panes up by id.
+    pub(crate) fn register_pane(
+        &self,
+        pane: &Arc<Pane>,
+        workspace_id: &str,
+        tab_id: &str,
+        label: &str,
+        cwd: &Path,
+    ) -> bool {
+        let pane_id = pane.id.clone();
+        let mut session = self.session.write();
+        let created_workspace = match session
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)
+        {
+            Some(workspace) => {
+                match workspace.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                    Some(tab) => {
+                        if !tab.panes.contains(&pane_id) {
+                            tab.panes.push(pane_id.clone());
+                        }
+                        tab.active_pane = pane_id.clone();
+                    }
+                    None => {
+                        let number = workspace.tabs.len() as u32 + 1;
+                        workspace.tabs.push(Tab {
+                            id: tab_id.to_string(),
+                            label: label.to_string(),
+                            number,
+                            panes: vec![pane_id.clone()],
+                            active_pane: pane_id.clone(),
+                            layout: TabLayout::Single,
+                            zoomed_pane: None,
+                            split_ratios: HashMap::new(),
+                        });
+                    }
+                }
+                // The pane's tab is the one the user is working in, whether it was just
+                // created or already open: focus and active tab must never disagree.
+                workspace.active_tab = tab_id.to_string();
+                false
+            }
+            None => {
+                session.next_number += 1;
+                let number = session.next_number;
+                session.workspaces.push(Workspace {
+                    id: workspace_id.to_string(),
+                    label: label.to_string(),
+                    cwd: cwd.to_path_buf(),
+                    number,
+                    tabs: vec![Tab {
+                        id: tab_id.to_string(),
+                        label: label.to_string(),
+                        number: 1,
+                        panes: vec![pane_id.clone()],
+                        active_pane: pane_id.clone(),
+                        layout: TabLayout::Single,
+                        zoomed_pane: None,
+                        split_ratios: HashMap::new(),
+                    }],
+                    active_tab: tab_id.to_string(),
+                });
+                true
+            }
+        };
+        session.panes.insert(pane_id.clone(), Arc::clone(pane));
+        session.focused_pane = Some(pane_id);
+        created_workspace
+    }
+
     /// The session as `SessionSnapshot`, for the wire.
     pub fn snapshot_value(&self, version: &str, protocol: u32) -> Value {
         let session = self.session.read();
         let focused = session.focused();
+        let mut focused_workspace_id: Option<String> = None;
+        let mut focused_tab_id: Option<String> = None;
         let mut workspaces = Vec::with_capacity(session.workspaces.len());
         let mut tabs = Vec::new();
         for workspace in &session.workspaces {
@@ -125,17 +204,25 @@ impl SessionState {
                 .iter()
                 .flat_map(|tab| tab.panes.iter().cloned())
                 .collect::<Vec<_>>();
+            let workspace_focused = pane_ids.iter().any(|id| Some(id) == focused.as_ref());
+            if workspace_focused {
+                focused_workspace_id.get_or_insert_with(|| workspace.id.clone());
+            }
             workspaces.push(json!({
                 "workspace_id": workspace.id,
                 "label": workspace.label,
                 "number": workspace.number,
-                "focused": pane_ids.iter().any(|id| Some(id) == focused.as_ref()),
+                "focused": workspace_focused,
                 "pane_count": pane_ids.len(),
                 "tab_count": workspace.tabs.len(),
                 "active_tab_id": workspace.active_tab,
                 "agent_status": aggregate_status(&session, &pane_ids).as_wire(),
             }));
             for tab in &workspace.tabs {
+                let tab_focused = tab.panes.iter().any(|id| Some(id) == focused.as_ref());
+                if tab_focused {
+                    focused_tab_id.get_or_insert_with(|| tab.id.clone());
+                }
                 tabs.push(json!({
                     "tab_id": tab.id,
                     "workspace_id": workspace.id,
@@ -143,7 +230,7 @@ impl SessionState {
                     "number": tab.number,
                     "layout": tab.layout,
                     "zoomed_pane": tab.zoomed_pane,
-                    "focused": tab.panes.iter().any(|id| Some(id) == focused.as_ref()),
+                    "focused": tab_focused,
                     "pane_count": tab.panes.len(),
                     "agent_status": aggregate_status(&session, &tab.panes).as_wire(),
                 }));
@@ -167,6 +254,8 @@ impl SessionState {
             "tabs": tabs,
             "workspaces": workspaces,
             "focused_pane_id": focused,
+            "focused_workspace_id": focused_workspace_id,
+            "focused_tab_id": focused_tab_id,
             "protocol": protocol,
             "version": version,
         })

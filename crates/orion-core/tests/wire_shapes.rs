@@ -61,6 +61,8 @@ fn rest_responses_keep_the_field_names_the_client_reads() {
             "panes",
             "agents",
             "focused_pane_id",
+            "focused_workspace_id",
+            "focused_tab_id",
             "protocol",
             "version",
         ],

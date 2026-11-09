@@ -324,15 +324,6 @@ impl Render for WorkspaceSidebar {
             .gap_1()
             .px_2()
             .py_2()
-            .child(
-                div()
-                    .id("sidebar-workspaces-head")
-                    .px_2()
-                    .py_1()
-                    .text_size(px(10.0 * scale))
-                    .text_color(theme.text_dim)
-                    .child("WORKSPACES"),
-            )
             .children(workspaces.iter().map(|ws| {
                 let is_chosen = ws.focused;
                 let mark = ws

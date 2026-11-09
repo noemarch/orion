@@ -2068,6 +2068,32 @@ impl RouteTable {
         }
     }
 
+    /// Spawns a pane for a direct caller (the native shell) and registers it in the session.
+    ///
+    /// `create_workspace` and `create_tab` are the structured routes; this is the same promise
+    /// for a caller that already knows the pane's workspace and tab ids: when it returns, the
+    /// Workspace, Tab, and Pane are visible to every route.
+    pub(crate) fn spawn_pane(&self, config: PaneConfig) -> Result<Arc<Pane>> {
+        let workspace_id = config.workspace_id.clone();
+        let tab_id = config.tab_id.clone();
+        let cwd = config.cwd.clone();
+        let cwd_label = folder_name(&cwd).unwrap_or_else(|| "Workspace".to_string());
+        let pane = Arc::new(Pane::spawn(config, self.on_event())?);
+        let created_workspace =
+            self.session
+                .register_pane(&pane, &workspace_id, &tab_id, &cwd_label, &cwd);
+        if created_workspace {
+            self.watchers.lock().insert(
+                workspace_id,
+                Watcher::start(cwd, Arc::clone(&self.connections)),
+            );
+        }
+        self.save();
+        self.connections
+            .broadcast(json!({ "type": "session-changed" }));
+        Ok(pane)
+    }
+
     fn spawn_pane_request(&self, request: PaneRequest) -> Result<Arc<Pane>> {
         use crate::agents::LaunchSpec;
         let spec = LaunchSpec::for_agent(
