@@ -39,6 +39,8 @@ pub struct OrionApp {
     editing_tab: Option<(String, String)>,
     split_chat_view: Entity<ChatView>,
     split_terminal_pane: Entity<TerminalPane>,
+    split_file_tree: Entity<FileTree>,
+    split_changes_view: Entity<ChangesView>,
 }
 
 impl OrionApp {
@@ -51,6 +53,8 @@ impl OrionApp {
         let settings = cx.new(SettingsModal::new);
         let split_chat_view = cx.new(ChatView::new);
         let split_terminal_pane = cx.new(TerminalPane::new);
+        let split_file_tree = cx.new(FileTree::new);
+        let split_changes_view = cx.new(ChangesView::new);
         let engine = Arc::new(Engine::new());
 
         let mut app = Self {
@@ -65,6 +69,8 @@ impl OrionApp {
             editing_tab: None,
             split_chat_view,
             split_terminal_pane,
+            split_file_tree,
+            split_changes_view,
         };
 
         app.spawn_initial_pane(cx);
@@ -710,6 +716,23 @@ impl Render for OrionApp {
                     });
                     self.split_terminal_pane
                         .update(cx, |view, _cx| view.set_pane(Arc::clone(&second_pane)));
+                    self.split_file_tree.update(cx, |view, cx| {
+                        view.attach(
+                            cx,
+                            Arc::clone(&self.engine),
+                            Arc::clone(&second_pane),
+                            second_id.clone(),
+                        );
+                        view.set_visible(cx, true);
+                    });
+                    self.split_changes_view.update(cx, |view, _cx| {
+                        view.attach(
+                            Arc::clone(&self.engine),
+                            Arc::clone(&second_pane),
+                            second_id.clone(),
+                        );
+                        view.set_visible(true);
+                    });
                 }
                 let second_body = match self.lens {
                     Lens::Chat => div()
@@ -725,17 +748,26 @@ impl Render for OrionApp {
                         .flex_1()
                         .child(self.split_terminal_pane.clone()),
                     Lens::Changes => div()
-                        .id("pane-split-second")
+                        .id("pane-split-second-changes")
                         .flex()
-                        .flex_col()
+                        .flex_row()
                         .flex_1()
-                        .p_3()
-                        .gap(px(8.0))
-                        .bg(Theme::current().surface_panel)
-                        .text_size(px(12.0))
-                        .text_color(Theme::current().text_dim)
-                        .child(format!("Split pane · {}", second_id))
-                        .child("Open this pane in its tab to inspect."),
+                        .child(
+                            div()
+                                .id("split-changes-left")
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .child(self.split_file_tree.clone()),
+                        )
+                        .child(
+                            div()
+                                .id("split-changes-right")
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .child(self.split_changes_view.clone()),
+                        ),
                 };
                 div()
                     .id("pane-split-canvas")
