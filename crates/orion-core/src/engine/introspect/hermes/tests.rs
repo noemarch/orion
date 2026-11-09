@@ -330,10 +330,15 @@ fn terminal_tools_decode_their_envelopes_and_mark_failures() {
     assert_eq!(tools[2]["error"], true);
     assert_eq!(tools[3]["output"], "not a json envelope");
     assert!(tools[3].get("error").is_none());
-    assert_eq!(
-        tools[4]["output"],
-        "{\"exit_code\":0,\"output\":\"json payload\"}"
-    );
+    // A non-terminal tool keeps its envelope as text. Compare the decoded value: serde_json
+    // preserves insertion order when the workspace enables it and sorts keys otherwise.
+    let envelope: Value = serde_json::from_str(
+        tools[4]["output"]
+            .as_str()
+            .expect("the raw envelope stays text"),
+    )
+    .expect("the raw envelope is still JSON");
+    assert_eq!(envelope, json!({"output": "json payload", "exit_code": 0}));
     assert!(tools[4].get("error").is_none());
 }
 
