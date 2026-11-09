@@ -473,6 +473,23 @@ impl Render for SettingsModal {
                     })),
             )
             .child(
+                div()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(11.0 * scale))
+                            .text_color(theme.text_dim)
+                            .child("ABOUT"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0 * scale))
+                            .text_color(theme.text_dim)
+                            .child("Orbit · native GPUI shell · Engine: live"),
+                    ),
+            )
+            .child(
                 div().flex_row().justify_end().child(
                     div()
                         .id("settings-done")
