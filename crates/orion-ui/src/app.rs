@@ -9,25 +9,53 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::chat::ChatView;
+use crate::diff_view::ChangesView;
+use crate::files_view::FileTree;
+use crate::settings::{KeyBarExtras, SettingsModal};
 use crate::terminal::TerminalPane;
+use crate::theme::Theme;
 use crate::workspace::WorkspaceSidebar;
+
+/// The lenses over the same pane: chat-first by default, terminal one click away,
+/// changes one click away like the terminal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Lens {
+    Chat,
+    Terminal,
+    Changes,
+}
 
 pub struct OrionApp {
     workspace_sidebar: Entity<WorkspaceSidebar>,
     terminal_pane: Entity<TerminalPane>,
+    chat_view: Entity<ChatView>,
+    file_tree: Entity<FileTree>,
+    changes_view: Entity<ChangesView>,
+    settings: Entity<SettingsModal>,
     engine: Arc<Engine>,
+    lens: Lens,
 }
 
 impl OrionApp {
     pub fn new(cx: &mut App) -> Self {
         let workspace_sidebar = cx.new(WorkspaceSidebar::new);
         let terminal_pane = cx.new(TerminalPane::new);
+        let chat_view = cx.new(ChatView::new);
+        let file_tree = cx.new(FileTree::new);
+        let changes_view = cx.new(ChangesView::new);
+        let settings = cx.new(SettingsModal::new);
         let engine = Arc::new(Engine::new());
 
         let mut app = Self {
             workspace_sidebar,
             terminal_pane,
+            chat_view,
+            file_tree,
+            changes_view,
+            settings,
             engine,
+            lens: Lens::Chat,
         };
 
         app.spawn_initial_pane(cx);
@@ -36,6 +64,11 @@ impl OrionApp {
 
     fn spawn_initial_pane(&mut self, cx: &mut App) {
         let terminal_pane = self.terminal_pane.clone();
+        let chat_view = self.chat_view.clone();
+        let file_tree = self.file_tree.clone();
+        let changes_view = self.changes_view.clone();
+        let workspace_sidebar = self.workspace_sidebar.clone();
+        let settings = self.settings.clone();
         let engine = Arc::clone(&self.engine);
 
         cx.spawn(async move |cx| {
@@ -88,6 +121,33 @@ impl OrionApp {
             pane.attach("gpu-terminal", sink, Role::Interact, 120, 32, false)
                 .expect("attach");
 
+            let pane_id = pane.id.clone();
+            let _ = cx.update(|cx| {
+                terminal_pane.update(cx, |view, cx| {
+                    view.set_pane(Arc::clone(&pane));
+                    cx.notify();
+                });
+                // The chat lens shares the same pane: conversation fetches go through
+                // the wire seam, prompt answers go straight to the in-process pane.
+                chat_view.update(cx, |view, _cx| {
+                    view.attach(Arc::clone(&engine), Arc::clone(&pane), pane_id.clone());
+                });
+                // The Changes lens shares the same pane: the file tree starts at
+                // the pane's cwd, the diff runs from the pane's repository.
+                file_tree.update(cx, |view, cx| {
+                    view.attach(cx, Arc::clone(&engine), Arc::clone(&pane), pane_id.clone());
+                });
+                changes_view.update(cx, |view, _cx| {
+                    view.attach(Arc::clone(&engine), Arc::clone(&pane), pane_id.clone());
+                });
+                workspace_sidebar.update(cx, |view, _cx| {
+                    view.attach(Arc::clone(&engine));
+                });
+                settings.update(cx, |view, _cx| {
+                    view.attach(Arc::clone(&engine));
+                });
+            });
+
             while let Ok(first) = pty_rx.recv_async().await {
                 // If the app is gone, there is nothing to repaint.
                 let _ = cx.update(|cx| {
@@ -103,10 +163,230 @@ impl OrionApp {
         })
         .detach();
     }
+
+    fn set_lens(&mut self, lens: Lens) {
+        self.lens = lens;
+    }
+
+    fn render_lens_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::current();
+        let (chat_active, terminal_active, changes_active) = match self.lens {
+            Lens::Chat => (true, false, false),
+            Lens::Terminal => (false, true, false),
+            Lens::Changes => (false, false, true),
+        };
+        div()
+            .id("lens-toggle")
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .h(px(40.0))
+            .px_3()
+            .bg(theme.surface_panel)
+            .child(
+                div()
+                    .id("lens-chat")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(if chat_active {
+                        theme.accent
+                    } else {
+                        theme.surface_elevated
+                    })
+                    .text_color(theme.text_strong)
+                    .child("Chat")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_lens(Lens::Chat);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("lens-terminal")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(if terminal_active {
+                        theme.accent
+                    } else {
+                        theme.surface_elevated
+                    })
+                    .text_color(theme.text_strong)
+                    .child("Terminal")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_lens(Lens::Terminal);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("lens-changes")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(if changes_active {
+                        theme.accent
+                    } else {
+                        theme.surface_elevated
+                    })
+                    .text_color(theme.text_strong)
+                    .child("Changes")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_lens(Lens::Changes);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div().flex_1().flex_row().justify_end().child(
+                    div()
+                        .id("settings-button")
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme.surface_elevated)
+                        .text_color(theme.text)
+                        .child("Settings")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let settings = this.settings.clone();
+                            settings.update(cx, |view, cx| {
+                                view.set_open(true);
+                                cx.notify();
+                            });
+                            cx.notify();
+                        })),
+                ),
+            )
+    }
+
+    /// The focused workspace's tabs, above the lens content (TabStrip
+    /// behavior): clicking a tab focuses its first pane.
+    fn render_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::current();
+        let sidebar = self.workspace_sidebar.clone();
+        let (tabs, ws_id) = sidebar.update(cx, |view, _cx| {
+            let workspaces = view.workspaces();
+            let focused = workspaces
+                .iter()
+                .find(|w| w.focused)
+                .or_else(|| workspaces.first());
+            let tabs = focused.map(|ws| view.tabs(&ws.id)).unwrap_or_default();
+            let ws_id = focused.map(|ws| ws.id.clone()).unwrap_or_default();
+            (tabs, ws_id)
+        });
+        let _ = ws_id;
+        let scale = theme.density_scale();
+        div()
+            .id("tab-strip")
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_3()
+            .py_1()
+            .bg(theme.surface_panel)
+            .children(tabs.iter().map(|tab| {
+                let is_active = tab.focused;
+                let pane_id = tab.pane_ids.first().cloned();
+                let row = div()
+                    .id(self.next_row_id())
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(if is_active {
+                        theme.accent_tint
+                    } else {
+                        Theme::transparent()
+                    })
+                    .text_color(if is_active {
+                        theme.text_strong
+                    } else {
+                        theme.text_dim
+                    })
+                    .text_size(px(12.0 * scale))
+                    .child(tab.label.clone());
+                if let Some(pane_id) = pane_id {
+                    row.on_click(cx.listener(move |this, _, _, cx| {
+                        let sidebar = this.workspace_sidebar.clone();
+                        sidebar.update(cx, |view, _cx| view.focus_pane(&pane_id));
+                        cx.notify();
+                    }))
+                } else {
+                    row
+                }
+            }))
+    }
+
+    fn next_row_id(&self) -> usize {
+        // GPUI element ids must be unique per render; the strip is small and
+        // static per frame, so a fixed base plus tab order is enough. The
+        // sidebar uses its own counter; ids only need to be unique within
+        // their parent element tree.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 impl Render for OrionApp {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let narrow = window.bounds().size.width < px(900.0);
+        let sidebar_w = if narrow { 64.0 } else { 280.0 };
+        // The Changes lens' 2s polls run only while it is active; views are
+        // preserved between lens switches (entities stay mounted above).
+        let changes_active = self.lens == Lens::Changes;
+        self.file_tree
+            .update(cx, |view, cx| view.set_visible(cx, changes_active));
+        self.changes_view
+            .update(cx, |view, _cx| view.set_visible(changes_active));
+        let prefs = self.settings.update(cx, |view, _cx| view.prefs().clone());
+        Theme::set_current(Theme::for_mode(prefs.theme, prefs.density));
+        let extras = KeyBarExtras::from_preferences(&prefs);
+        self.terminal_pane
+            .update(cx, |view, _cx| view.set_key_bar_extras(extras));
+        let lens_body = match self.lens {
+            Lens::Chat => {
+                if let Some(card) = self
+                    .chat_view
+                    .update(cx, |view, cx| view.prompt_card_entity(cx))
+                {
+                    div()
+                        .id("main-content")
+                        .flex_col()
+                        .flex_1()
+                        .child(self.chat_view.clone())
+                        .child(card)
+                } else {
+                    div()
+                        .id("main-content")
+                        .flex_col()
+                        .flex_1()
+                        .child(self.chat_view.clone())
+                }
+            }
+            Lens::Terminal => div()
+                .id("main-content")
+                .flex_col()
+                .flex_1()
+                .child(self.terminal_pane.clone()),
+            Lens::Changes => div()
+                .id("main-content")
+                .flex_row()
+                .flex_1()
+                .child(
+                    div()
+                        .id("changes-left")
+                        .flex_col()
+                        .flex_1()
+                        .child(self.file_tree.clone()),
+                )
+                .child(
+                    div()
+                        .id("changes-right")
+                        .flex_col()
+                        .flex_1()
+                        .child(self.changes_view.clone()),
+                ),
+        };
         div()
             .id("app")
             .flex_row()
@@ -115,16 +395,27 @@ impl Render for OrionApp {
                 div()
                     .id("sidebar")
                     .flex_col()
-                    .w(px(280.0))
+                    .w(px(sidebar_w))
                     .child(self.workspace_sidebar.clone()),
             )
             .child(
                 div()
-                    .id("main-content")
+                    .id("main-column")
                     .flex_col()
                     .flex_1()
-                    .child(self.terminal_pane.clone()),
+                    .child(self.render_lens_toggle(cx))
+                    .child(self.render_tab_strip(cx))
+                    .child(lens_body),
             )
+            .child(if self.settings.update(cx, |view, _cx| view.is_open()) {
+                div()
+                    .id("modal-host")
+                    .absolute()
+                    .inset_0()
+                    .child(self.settings.clone())
+            } else {
+                div().id("no-modal")
+            })
     }
 }
 
