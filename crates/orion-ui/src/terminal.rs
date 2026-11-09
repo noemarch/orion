@@ -23,6 +23,7 @@ use gpui::{
 use orion_core::engine::pane::Pane;
 use orion_core::screen::ScreenState;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Sidebar width in app.rs; mouse x-coordinates are window-relative.
 pub const SIDEBAR_WIDTH_PX: f32 = 280.0;
@@ -30,6 +31,8 @@ const FONT_PX: f32 = 13.0;
 const ROW_PITCH_PX: f32 = 16.0;
 /// Touch target height for key-bar and find-bar controls (DESIGN.md minimum).
 const TARGET_PX: f32 = 44.0;
+/// Resize requests are debounced this long before reaching the PTY.
+pub const RESIZE_DEBOUNCE_MS: u64 = 50;
 
 fn grid_style() -> TextStyle {
     TextStyle {
@@ -74,6 +77,7 @@ pub struct TerminalPane {
     char_w: f32,
     last_cols: u16,
     last_rows: u16,
+    last_resize: Instant,
 }
 
 impl TerminalPane {
@@ -99,6 +103,7 @@ impl TerminalPane {
             char_w: 7.81, // JetBrains Mono @ 13px; refined at render.
             last_cols: 120,
             last_rows: 32,
+            last_resize: Instant::now() - Duration::from_millis(RESIZE_DEBOUNCE_MS),
         }
     }
 
@@ -424,8 +429,11 @@ impl Render for TerminalPane {
             self.last_cols = cols;
             self.last_rows = rows;
             self.screen.resize(rows, cols);
-            if let Some(pane) = &self.pane {
-                let _ = pane.resize(cols, rows);
+            if self.last_resize.elapsed() >= Duration::from_millis(RESIZE_DEBOUNCE_MS) {
+                self.last_resize = Instant::now();
+                if let Some(pane) = &self.pane {
+                    let _ = pane.resize(cols, rows);
+                }
             }
         }
         self.char_w = avail_w / cols as f32;
@@ -776,6 +784,11 @@ mod tests {
             },
             is_held: false,
         }
+    }
+
+    #[test]
+    fn resize_debounce_delay_is_50ms() {
+        assert_eq!(RESIZE_DEBOUNCE_MS, 50);
     }
 
     #[test]
