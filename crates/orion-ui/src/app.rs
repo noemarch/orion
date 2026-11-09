@@ -243,6 +243,16 @@ impl OrionApp {
     fn render_lens_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         let (chat_active, terminal_active, changes_active) = lens_segment_state(self.lens);
+        let engine = self.engine.clone();
+        let focused_pane_id = self.workspace_sidebar.update(cx, |view, _cx| {
+            view.snapshot().and_then(|s| {
+                s.get("focused_pane_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+        });
+        let engine_zoom = engine.clone();
+        let focused_pane_id_zoom = focused_pane_id.clone();
         div()
             .id("lens-toggle")
             .flex()
@@ -305,6 +315,46 @@ impl OrionApp {
                     .child("Changes")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.set_lens(Lens::Changes);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("pane-zoom")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme.surface_elevated)
+                    .text_color(theme.text)
+                    .child("Zoom")
+                    .on_click(cx.listener(move |_this, _, _, cx| {
+                        if let Some(pane_id) = focused_pane_id_zoom.clone() {
+                            let _ = engine_zoom.http(
+                                "POST",
+                                "/api/pane/zoom",
+                                &json!({ "pane_id": pane_id, "mode": "toggle" }),
+                            );
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("pane-close")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme.surface_elevated)
+                    .text_color(theme.text)
+                    .child("Close")
+                    .on_click(cx.listener(move |_this, _, _, cx| {
+                        if let Some(pane_id) = focused_pane_id.clone() {
+                            let _ = engine.http(
+                                "POST",
+                                "/api/pane/close",
+                                &json!({ "pane_id": pane_id }),
+                            );
+                        }
                         cx.notify();
                     })),
             )
