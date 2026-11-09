@@ -35,6 +35,15 @@ impl ConversationResponse {
     }
 }
 
+/// Keep the most recent `cap` items, preserving order. Used to bound rendered
+/// conversation turns without virtualization.
+pub fn cap_turns<T>(mut turns: Vec<T>, cap: usize) -> Vec<T> {
+    if turns.len() > cap {
+        turns.drain(..turns.len() - cap);
+    }
+    turns
+}
+
 /// One conversation turn: a user message or one assistant response step.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ChatTurn {
@@ -244,6 +253,21 @@ mod tests {
         assert_eq!(response.turns[1].parts.len(), 7);
         assert!(matches!(&response.turns[1].parts[1], ChatPart::Tool(tool) if tool.error));
         assert!(matches!(response.turns[1].parts[6], ChatPart::Unknown));
+    }
+
+    #[test]
+    fn large_transcript_caps_rendered_turns() {
+        let turns = (0..500)
+            .map(|i| ChatTurn {
+                role: ChatRole::User,
+                ts: Some(i.to_string()),
+                end_ts: None,
+                parts: vec![],
+            })
+            .collect::<Vec<_>>();
+        let rendered = cap_turns(turns, 200);
+        assert_eq!(rendered.len(), 200);
+        assert_eq!(rendered[0].ts.as_deref(), Some("300"));
     }
 
     #[test]
