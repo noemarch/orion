@@ -11,6 +11,7 @@ pub mod file_reader;
 pub mod files_entities;
 pub mod files_view;
 pub mod markdown;
+pub mod new_workspace;
 pub mod prompt_card;
 pub mod settings;
 pub mod shell_model;
