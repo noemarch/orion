@@ -37,7 +37,10 @@ pub struct ChatModel {
     phase: ChatPhase,
     source: String,
     turns: Vec<ChatTurn>,
-    thinking: ThinkingRows,
+    /// The reasoning rows the reader opened (they start folded away).
+    thinking_rows: OpenRows,
+    /// The tool rows the reader folded away (they start open).
+    tool_rows: OpenRows,
     follow: FollowBottom,
 }
 
@@ -54,7 +57,8 @@ impl ChatModel {
             phase: ChatPhase::Loading,
             source: String::new(),
             turns: Vec::new(),
-            thinking: ThinkingRows::default(),
+            thinking_rows: OpenRows::new(false),
+            tool_rows: OpenRows::new(true),
             follow: FollowBottom::default(),
         }
     }
@@ -89,8 +93,9 @@ impl ChatModel {
         } else {
             ChatPhase::Ready
         };
-        // Turns only ever grow, so the open thinking rows stay open.
-        self.thinking.retain(self.turns.len());
+        // Turns only ever grow, so the rows the reader opened stay open.
+        self.thinking_rows.retain(self.turns.len());
+        self.tool_rows.retain(self.turns.len());
     }
 
     /// The fetch failed: the message is plain language and a Retry is offered.
@@ -122,14 +127,25 @@ impl ChatModel {
         }
     }
 
-    /// Whether a thinking row is open.
+    /// Whether a thinking row is open. Reasoning starts folded away.
     pub fn is_thinking_open(&self, turn: usize, part: usize) -> bool {
-        self.thinking.is_open(turn, part)
+        self.thinking_rows.is_open(turn, part)
     }
 
     /// Open or close one thinking row.
     pub fn toggle_thinking(&mut self, turn: usize, part: usize) {
-        self.thinking.toggle(turn, part);
+        self.thinking_rows.toggle(turn, part);
+    }
+
+    /// Whether a tool row is open. A tool's work starts open: the reader
+    /// came for it.
+    pub fn is_tool_open(&self, turn: usize, part: usize) -> bool {
+        self.tool_rows.is_open(turn, part)
+    }
+
+    /// Open or close one tool row.
+    pub fn toggle_tool(&mut self, turn: usize, part: usize) {
+        self.tool_rows.toggle(turn, part);
     }
 
     /// Whether new turns follow the bottom.
@@ -149,30 +165,50 @@ impl ChatModel {
     }
 }
 
-/// Which thinking rows are open, per turn and part.
-#[derive(Debug, Clone, Default)]
-pub struct ThinkingRows {
-    open: Vec<(usize, usize)>,
+/// Which rows of a turn the reader opened, per turn and part. A row the
+/// reader never touched keeps the kind's own default.
+#[derive(Debug, Clone)]
+pub struct OpenRows {
+    /// The state of a row the reader touched.
+    states: Vec<((usize, usize), bool)>,
+    /// Whether a row of this kind starts open.
+    default: bool,
 }
 
-impl ThinkingRows {
-    /// Whether one thinking row is open.
+impl OpenRows {
+    /// Rows of a kind that starts `default`.
+    pub fn new(default: bool) -> Self {
+        Self {
+            states: Vec::new(),
+            default,
+        }
+    }
+
+    /// Whether one row is open.
     pub fn is_open(&self, turn: usize, part: usize) -> bool {
-        self.open.contains(&(turn, part))
+        self.states
+            .iter()
+            .find(|((row_turn, row_part), _)| *row_turn == turn && *row_part == part)
+            .map(|(_, open)| *open)
+            .unwrap_or(self.default)
     }
 
     /// Open a closed row, close an open one.
     pub fn toggle(&mut self, turn: usize, part: usize) {
-        if let Some(index) = self.open.iter().position(|entry| *entry == (turn, part)) {
-            self.open.remove(index);
-        } else {
-            self.open.push((turn, part));
+        let open = !self.is_open(turn, part);
+        match self
+            .states
+            .iter_mut()
+            .find(|((row_turn, row_part), _)| *row_turn == turn && *row_part == part)
+        {
+            Some(entry) => entry.1 = open,
+            None => self.states.push(((turn, part), open)),
         }
     }
 
     /// Drop rows of turns that are gone.
     pub fn retain(&mut self, turns: usize) {
-        self.open.retain(|(turn, _)| *turn < turns);
+        self.states.retain(|((turn, _), _)| *turn < turns);
     }
 }
 
@@ -351,6 +387,23 @@ mod tests {
         );
         model.toggle_thinking(0, 0);
         assert!(!model.is_thinking_open(0, 0));
+    }
+
+    #[test]
+    fn a_tool_row_starts_open_and_folds_away() {
+        let mut model = ChatModel::new();
+        assert!(
+            model.is_tool_open(0, 0),
+            "a tool's work starts open: the reader came for it"
+        );
+        model.toggle_tool(0, 0);
+        assert!(!model.is_tool_open(0, 0), "the row folds away");
+        model.toggle_tool(0, 0);
+        assert!(model.is_tool_open(0, 0), "and opens again");
+        assert!(
+            !model.is_thinking_open(0, 0),
+            "reasoning starts folded away"
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::chat::ChatView;
+use crate::chat::{ChatEvent, ChatView};
 use crate::diff_view::ChangesView;
 use crate::files_view::FileTree;
 use crate::new_workspace::{recent_directory, NewWorkspaceEvent, NewWorkspaceModal};
@@ -20,6 +20,14 @@ use crate::sidebar::SidebarEvent;
 use crate::terminal::TerminalPane;
 use crate::theme::Theme;
 use crate::workspace::WorkspaceSidebar;
+
+/// Which chat asked the shell for something: the focused pane's chat, or the
+/// split canvas's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ChatPane {
+    Focused,
+    Split,
+}
 
 /// The lenses over the same pane: chat-first by default, terminal one click away,
 /// changes one click away like the terminal.
@@ -128,7 +136,19 @@ impl OrionApp {
             this.attach_pane(cx, pane_id);
             cx.notify();
         });
-        app.subscriptions = vec![sidebar_sub, modal_sub];
+        // The chat asks the shell for the Terminal Lens or for a file: the
+        // lens switch and the file viewer live in the app root.
+        let chat_events = app.chat_view.clone();
+        let split_chat_events = app.split_chat_view.clone();
+        let chat_sub = cx.subscribe(&chat_events, |this, _, event: &ChatEvent, cx| {
+            this.handle_chat_event(event, ChatPane::Focused, cx);
+            cx.notify();
+        });
+        let split_chat_sub = cx.subscribe(&split_chat_events, |this, _, event: &ChatEvent, cx| {
+            this.handle_chat_event(event, ChatPane::Split, cx);
+            cx.notify();
+        });
+        app.subscriptions = vec![sidebar_sub, modal_sub, chat_sub, split_chat_sub];
 
         app.start_session(cx);
         app
@@ -280,6 +300,38 @@ impl OrionApp {
 
     fn set_lens(&mut self, lens: Lens) {
         self.lens_book.set(self.focused_pane.as_deref(), lens);
+    }
+
+    /// What the chat asks for: the Terminal Lens has the whole output, and
+    /// the Changes Lens opens the file. The split canvas answers for its own
+    /// pane, not for the focused one.
+    fn handle_chat_event(&mut self, event: &ChatEvent, pane: ChatPane, cx: &mut App) {
+        match event {
+            ChatEvent::ShowTerminal => match pane {
+                ChatPane::Focused => self.set_lens(Lens::Terminal),
+                ChatPane::Split => {
+                    if let Some(split_pane) = self.split_attached_pane.clone() {
+                        self.lens_book.set(Some(&split_pane), Lens::Terminal);
+                    }
+                }
+            },
+            ChatEvent::OpenFile(path) => {
+                match pane {
+                    ChatPane::Focused => self.set_lens(Lens::Changes),
+                    ChatPane::Split => {
+                        if let Some(split_pane) = self.split_attached_pane.clone() {
+                            self.lens_book.set(Some(&split_pane), Lens::Changes);
+                        }
+                    }
+                }
+                let tree = match pane {
+                    ChatPane::Focused => self.file_tree.clone(),
+                    ChatPane::Split => self.split_file_tree.clone(),
+                };
+                let reader = tree.read(cx).file_reader().clone();
+                reader.update(cx, |reader, _cx| reader.open(path.clone()));
+            }
+        }
     }
 
     /// Runs one lifecycle command through the Route Table. A failure becomes

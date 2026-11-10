@@ -10,8 +10,12 @@
 //! Rendering is a plain scrollable column with a recent-N cap (last 200
 //! turns): GPUI virtualization is deliberately not used; the cap mirrors the
 //! terminal scrollback bound and keeps oversized tool outputs truncated with a
-//! "View full in Terminal" marker (see `truncate_output`). A [`PromptCard`]
-//! sits at the top whenever `pane.prompt()` is `Some`.
+//! "View full in Terminal" control (see [`crate::tool_card::clipped_output`]).
+//! A [`PromptCard`] sits at the top whenever `pane.prompt()` is `Some`.
+//!
+//! The chat asks the shell for two things through [`ChatEvent`]: the Terminal
+//! Lens, which has the whole output, and a file, which the Changes Lens
+//! opens.
 //!
 //! The terminal grid never becomes a turn: the chat reads the agent's own
 //! transcript, and an agent that keeps none shows the empty state, not its
@@ -27,6 +31,10 @@ use crate::markdown::{
 };
 use crate::prompt_card::PromptCard;
 use crate::theme::{Theme, CHAT_INLINE_CODE_RATIO, CHAT_LINE_HEIGHT};
+use crate::tool_card::{
+    clipped_output, lines_with_paths, part_card, tool_object, tool_verb, DiffLine, PartCard,
+    ToolCard, ToolStatus, MAX_FILE_LINKS,
+};
 use gpui::prelude::*;
 use gpui::{
     div, px, Context, Entity, FontStyle, FontWeight, IntoElement, Render, ScrollHandle,
@@ -40,8 +48,16 @@ use std::time::Duration;
 
 /// Recent-turn cap: chat renders the newest `MAX_RECENT_TURNS` turns only.
 pub const MAX_RECENT_TURNS: usize = 200;
-/// Tool input/output truncation bound (chars), with a marker.
-pub const MAX_TOOL_CHARS: usize = 2000;
+/// What the chat asks the shell for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatEvent {
+    /// The reader wants the whole output: the Terminal Lens has it.
+    ShowTerminal,
+    /// The reader clicked a file path.
+    OpenFile(String),
+}
+
+impl gpui::EventEmitter<ChatEvent> for ChatView {}
 
 pub struct ChatView {
     engine: Option<Arc<Engine>>,
@@ -190,17 +206,9 @@ impl ChatView {
     }
 }
 
-/// Truncate oversized text; the marker names the terminal as the full surface.
-pub fn truncate_output(text: &str) -> String {
-    if text.len() <= MAX_TOOL_CHARS {
-        return text.to_string();
-    }
-    let cut = text.floor_char_boundary(MAX_TOOL_CHARS);
-    format!(
-        "{}\n… (truncated at {MAX_TOOL_CHARS} chars — View full in Terminal)",
-        &text[..cut]
-    )
-}
+/// The bound on the output a tool card shows, and the marker that says where
+/// the rest is.
+pub use crate::tool_card::MAX_TOOL_CHARS;
 
 /// The text style of one span: the Quiet Slate type scale, plus the span's own
 /// character (inline code, a link, bold, italic).
@@ -382,24 +390,6 @@ fn render_text_block(text: &str, theme: Theme, row_seq: &mut usize) -> Vec<gpui:
         index += 1;
     }
     blocks
-}
-
-fn diff_lines(output: &str) -> Vec<(String, bool)> {
-    // Unified-diff-ish output gets green/red rows via `similar`'s line diff;
-    // otherwise the caller shows plain truncated output.
-    let diff = similar::TextDiff::from_lines("", output);
-    diff.iter_all_changes()
-        .map(|change| {
-            (
-                change.to_string(),
-                change.tag() == similar::ChangeTag::Insert,
-            )
-        })
-        .collect()
-}
-
-fn is_diff_output(output: &str) -> bool {
-    output.contains("diff --git") || output.contains("\n@@ ")
 }
 
 impl Render for ChatView {
@@ -667,9 +657,9 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::current();
-        match part {
-            ChatPart::Text { text, .. } => self.render_prose(text, theme),
-            ChatPart::Thinking { text } => {
+        match part_card(part) {
+            PartCard::Text { text } => self.render_prose(&text, theme),
+            PartCard::Thinking { text } => {
                 let open = self.model.is_thinking_open(turn_index, part_index);
                 let mut folded = div()
                     .id(self.next_row_id())
@@ -689,9 +679,10 @@ impl ChatView {
                         .px_2()
                         .py_1()
                         .min_h(px(44.0))
+                        .cursor_pointer()
                         .text_size(px(12.0 * theme.density_scale()))
                         .text_color(theme.text_dim)
-                        .child(if open { "▾" } else { "▸" })
+                        .child(if open { "\u{25be}" } else { "\u{25b8}" })
                         .child(if open {
                             "Thinking (collapse)"
                         } else {
@@ -709,7 +700,7 @@ impl ChatView {
                         .px_2()
                         .py_1();
                     let mut row_seq = self.row_seq;
-                    for line in render_text_block(text, theme, &mut row_seq) {
+                    for line in render_text_block(&text, theme, &mut row_seq) {
                         body = body.child(line);
                     }
                     self.row_seq = row_seq;
@@ -717,118 +708,37 @@ impl ChatView {
                 }
                 folded.into_any_element()
             }
-            ChatPart::Tool(tool) => {
-                let color = if tool.error {
-                    theme.danger_text
-                } else {
-                    theme.status_done
-                };
-                let mut row = div()
-                    .id(self.next_row_id())
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .rounded_md()
-                    .bg(theme.surface_panel)
-                    .p_2();
-                row = row.child(
-                    div()
-                        .id(self.next_row_id())
-                        .flex()
-                        .flex_row()
-                        .gap(px(6.0))
-                        .text_size(px(12.0 * theme.density_scale()))
-                        .child(
-                            div()
-                                .id(self.next_row_id())
-                                .text_color(color)
-                                .child(tool.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .id(self.next_row_id())
-                                .text_color(theme.text_dim)
-                                .child(tool.summary.clone()),
-                        ),
-                );
-                if !tool.input.is_empty() {
-                    row = row.child(
-                        div()
-                            .id(self.next_row_id())
-                            .text_size(px(11.0 * theme.density_scale()))
-                            .text_color(theme.text_dim)
-                            .child(truncate_output(&tool.input)),
-                    );
-                }
-                if tool.arguments_omitted {
-                    row = row.child(
-                        div()
-                            .id(self.next_row_id())
-                            .text_size(px(11.0 * theme.density_scale()))
-                            .child("Arguments omitted (too large for the transcript page)."),
-                    );
-                }
-                if !tool.output.is_empty() {
-                    if is_diff_output(&tool.output) {
-                        let mut diff_column = div().id(self.next_row_id()).flex().flex_col();
-                        for (line, inserted) in diff_lines(&truncate_output(&tool.output)) {
-                            diff_column = diff_column.child(
-                                div()
-                                    .id(self.next_row_id())
-                                    .text_size(px(11.0 * theme.density_scale()))
-                                    .text_color(if inserted {
-                                        theme.status_done
-                                    } else {
-                                        theme.text
-                                    })
-                                    .child(line),
-                            );
-                        }
-                        row = row.child(diff_column);
-                    } else {
-                        row = row.child(
-                            div()
-                                .id(self.next_row_id())
-                                .text_size(px(11.0 * theme.density_scale()))
-                                .text_color(if tool.error {
-                                    theme.status_blocked
-                                } else {
-                                    theme.text
-                                })
-                                .child(truncate_output(&tool.output)),
-                        );
-                    }
-                }
-                if tool.error {
-                    row = row.child(
-                        div()
-                            .id(self.next_row_id())
-                            .text_size(px(11.0 * theme.density_scale()))
-                            .text_color(theme.danger_text)
-                            .child("Tool call failed — View full in Terminal"),
-                    );
-                }
-                row.into_any_element()
+            PartCard::Tool(card) => self.render_tool_row(turn_index, part_index, &card, &[], cx),
+            PartCard::Diff { card, lines } => {
+                self.render_tool_row(turn_index, part_index, &card, &lines, cx)
             }
-            ChatPart::Compact { text } => div()
-                .id(self.next_row_id())
-                .text_size(px(12.0 * theme.density_scale()))
-                .text_color(theme.text_dim)
-                .child(format!("Compacted: {text}"))
-                .into_any_element(),
-            ChatPart::Notice { text, source } => {
-                let source = source.clone().unwrap_or_default();
+            PartCard::Notice { text, source } => {
+                let source = source.unwrap_or_default();
                 div()
                     .id(self.next_row_id())
                     .text_size(px(12.0 * theme.density_scale()))
                     .text_color(theme.notice)
                     .child(if source.is_empty() {
-                        text.clone()
+                        text
                     } else {
                         format!("[{source}] {text}")
                     })
                     .into_any_element()
             }
+            PartCard::Compact { text } => div()
+                .id(self.next_row_id())
+                .text_size(px(12.0 * theme.density_scale()))
+                .text_color(theme.text_dim)
+                .child(format!("Compacted: {text}"))
+                .into_any_element(),
+            PartCard::Other | PartCard::Unknown => self.render_other_part(part, theme),
+        }
+    }
+
+    /// The parts this shell does not draw as a card of their own: background
+    /// tasks, skills, images.
+    fn render_other_part(&mut self, part: &ChatPart, theme: Theme) -> gpui::AnyElement {
+        match part {
             ChatPart::TaskResult { tasks } => {
                 let mut column = div().id(self.next_row_id()).flex().flex_col().gap(px(2.0));
                 for task in tasks {
@@ -859,15 +769,274 @@ impl ChatView {
             } => div()
                 .id(self.next_row_id())
                 .text_size(px(12.0 * theme.density_scale()))
-                .child(format!("Image ({media_type}) — {image_ref}"))
+                .child(format!("Image ({media_type}) \u{2014} {image_ref}"))
                 .into_any_element(),
-            ChatPart::Unknown => div()
+            _ => div()
                 .id(self.next_row_id())
                 .text_size(px(12.0 * theme.density_scale()))
                 .text_color(theme.text_dim)
                 .child("(unsupported part)")
                 .into_any_element(),
         }
+    }
+
+    /// A tool call: a row that folds away, with its work inside.
+    fn render_tool_row(
+        &mut self,
+        turn_index: usize,
+        part_index: usize,
+        card: &ToolCard,
+        lines: &[DiffLine],
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = Theme::current();
+        let open = self.model.is_tool_open(turn_index, part_index);
+        let failed = card.status == ToolStatus::Failed;
+
+        let mut row = div()
+            .id(self.next_row_id())
+            .debug_selector(|| "chat-tool".to_string())
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .rounded_md()
+            .bg(theme.surface_panel)
+            .p_2();
+
+        // The header: caret, verb, object (DESIGN.md §5).
+        let verb = tool_verb(&card.name);
+        let object = tool_object(&card.summary, &card.name);
+        row = row.child(
+            div()
+                .id(self.next_row_id())
+                .debug_selector(|| "chat-tool-header".to_string())
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .min_h(px(44.0))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.model.toggle_tool(turn_index, part_index);
+                    cx.notify();
+                }))
+                .child(div().text_color(theme.text_dim).child(if open {
+                    "\u{25be}"
+                } else {
+                    "\u{25b8}"
+                }))
+                .child(
+                    div()
+                        .text_size(px(13.0 * theme.density_scale()))
+                        .text_color(if failed {
+                            theme.status_blocked
+                        } else {
+                            theme.text_dim
+                        })
+                        .child(match verb {
+                            Some(verb) => verb.to_string(),
+                            None => card.name.clone(),
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0 * theme.density_scale()))
+                        .font_family("JetBrains Mono")
+                        .text_color(if failed {
+                            theme.status_blocked
+                        } else {
+                            theme.text
+                        })
+                        .child(object),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0 * theme.density_scale()))
+                        .text_color(theme.status_blocked)
+                        .child(if failed { "failed" } else { "" }),
+                ),
+        );
+
+        if open {
+            if !card.input.is_empty() {
+                let (input, clipped) = clipped_output(&card.input);
+                row = row.child(self.render_tool_text(&input, theme, cx));
+                if clipped {
+                    row = row.child(self.render_terminal_path(cx));
+                }
+            }
+            if card.arguments_omitted {
+                row = row.child(
+                    div()
+                        .id(self.next_row_id())
+                        .text_size(px(11.0 * theme.density_scale()))
+                        .text_color(theme.text_dim)
+                        .child("Arguments omitted (too large for the transcript page)."),
+                );
+            }
+            if !lines.is_empty() {
+                row = row.child(self.render_diff(lines, theme));
+            } else {
+                let (output, clipped) = clipped_output(&card.output);
+                if !output.is_empty() {
+                    row = row.child(self.render_tool_text(&output, theme, cx));
+                }
+                if clipped {
+                    // The rest of the output is in the Terminal Lens.
+                    row = row.child(self.render_terminal_path(cx));
+                }
+            }
+            if failed && card.output.is_empty() {
+                row = row.child(
+                    div()
+                        .id(self.next_row_id())
+                        .text_size(px(11.0 * theme.density_scale()))
+                        .text_color(theme.status_blocked)
+                        .child("This tool call failed."),
+                );
+            }
+        }
+        row.into_any_element()
+    }
+
+    /// A tool's input or output: mono, line by line, with its file paths as
+    /// controls inside the line they sit on.
+    fn render_tool_text(
+        &mut self,
+        text: &str,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let text_style = TextStyle {
+            color: crate::theme::hsla(theme.text),
+            font_size: px(theme.chat_code_size()).into(),
+            font_family: "JetBrains Mono".into(),
+            ..Default::default()
+        };
+        let mut block = div()
+            .id(self.next_row_id())
+            .debug_selector(|| "chat-tool-output".to_string())
+            .flex()
+            .flex_col()
+            .rounded_md()
+            .bg(theme.surface_elevated)
+            .px_2()
+            .py_1()
+            // A long line stays inside the panel; the whole output is in the
+            // Terminal Lens.
+            .overflow_x_hidden();
+
+        for line in lines_with_paths(text) {
+            let mut row = div()
+                .id(self.next_row_id())
+                .flex()
+                .flex_row()
+                .w_full()
+                // A long line stays inside the panel.
+                .overflow_hidden();
+            let mut cursor = 0;
+            for (range, path) in line.paths.iter().take(MAX_FILE_LINKS) {
+                if range.start > cursor {
+                    if let Some(before) = line.text.get(cursor..range.start) {
+                        row = row.child(
+                            StyledText::new(before.to_string())
+                                .with_default_highlights(&text_style, Vec::new()),
+                        );
+                    }
+                }
+                // The path is a control: it opens the file.
+                let target = path.clone();
+                row = row.child(
+                    div()
+                        .id(self.next_row_id())
+                        .debug_selector(|| "chat-file-path".to_string())
+                        .text_color(theme.accent)
+                        .underline()
+                        .cursor_pointer()
+                        .child(path.clone())
+                        .on_click(cx.listener(move |_this, _, _, cx| {
+                            cx.emit(ChatEvent::OpenFile(target.clone()));
+                            cx.notify();
+                        })),
+                );
+                cursor = range.end;
+            }
+            if let Some(rest) = line.text.get(cursor..) {
+                if !rest.is_empty() {
+                    row = row.child(
+                        StyledText::new(rest.to_string())
+                            .with_default_highlights(&text_style, Vec::new()),
+                    );
+                }
+            }
+            block = block.child(row);
+        }
+        block.into_any_element()
+    }
+
+    /// An edit diff: the added lines in `--syntax-inserted`, the deleted ones
+    /// in `--syntax-deleted`, with the context between them.
+    fn render_diff(&mut self, lines: &[DiffLine], theme: Theme) -> gpui::AnyElement {
+        let mut block = div()
+            .id(self.next_row_id())
+            .debug_selector(|| "chat-diff".to_string())
+            .flex()
+            .flex_col()
+            .rounded_md()
+            .bg(theme.surface_elevated)
+            .px_2()
+            .py_1();
+        for line in lines {
+            let color = match line {
+                DiffLine::Added(_) => theme.status_done,
+                DiffLine::Removed(_) => theme.status_blocked,
+                DiffLine::Context(_) => theme.text_dim,
+            };
+            let text_style = TextStyle {
+                color: crate::theme::hsla(color),
+                font_size: px(theme.chat_code_size()).into(),
+                font_family: "JetBrains Mono".into(),
+                ..Default::default()
+            };
+            block = block.child(
+                div()
+                    .id(self.next_row_id())
+                    .flex()
+                    .flex_row()
+                    .gap(px(6.0))
+                    .child(
+                        StyledText::new(line.sign().to_string())
+                            .with_default_highlights(&text_style, Vec::new()),
+                    )
+                    .child(
+                        StyledText::new(line.text().to_string())
+                            .with_default_highlights(&text_style, Vec::new()),
+                    ),
+            );
+        }
+        block.into_any_element()
+    }
+
+    /// The path to the whole output: the Terminal Lens has it.
+    fn render_terminal_path(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = Theme::current();
+        div()
+            .id(self.next_row_id())
+            .debug_selector(|| "chat-terminal-path".to_string())
+            .flex()
+            .flex_row()
+            .items_center()
+            .min_h(px(44.0))
+            .px_2()
+            .text_size(px(11.0 * theme.density_scale()))
+            .text_color(theme.accent)
+            .cursor_pointer()
+            .child("View full in Terminal")
+            .on_click(cx.listener(|_this, _, _, cx| {
+                cx.emit(ChatEvent::ShowTerminal);
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     /// The prompt card slot: a fresh `PromptCard` entity keyed by prompt id so a
@@ -938,25 +1107,6 @@ mod tests {
             "This pane is no longer open.",
             "a retry will not bring a closed pane back"
         );
-    }
-
-    #[test]
-    fn truncates_at_bound_with_terminal_marker() {
-        let long = "x".repeat(MAX_TOOL_CHARS + 100);
-        let truncated = truncate_output(&long);
-        assert!(truncated.contains("View full in Terminal"));
-        assert!(truncated.len() <= MAX_TOOL_CHARS + 64);
-        assert_eq!(truncate_output("short"), "short");
-    }
-
-    #[test]
-    fn detects_diff_output() {
-        assert!(is_diff_output(
-            "diff --git a/x b/x
-@@ -1 +1 @@
-"
-        ));
-        assert!(!is_diff_output("plain output"));
     }
 
     #[gpui::test]
@@ -1229,6 +1379,219 @@ let x = 1;
             cx.debug_bounds("chat-turn").is_none(),
             "a chat that has not read yet has no turns"
         );
+    }
+
+    /// A transcript with one tool call, as the tool card reads it.
+    fn tool_turn(input: &str, output: &str, error: bool) -> Value {
+        json!({
+            "source": "claude-transcript",
+            "turns": [
+                { "role": "assistant", "ts": "2026-01-01T00:00:00Z",
+                  "parts": [
+                    { "kind": "tool", "name": "Bash", "summary": "run a command",
+                      "input": input, "output": output, "error": error },
+                  ],
+                },
+            ],
+        })
+    }
+
+    #[gpui::test]
+    fn a_tool_call_is_a_row_with_its_work_inside(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            chat.update(app, |view, _cx| {
+                view.apply_conversation(response(tool_turn(
+                    "{\"command\":\"ls\"}",
+                    "src\nCargo.toml\n",
+                    false,
+                )));
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("chat-tool").is_some(),
+            "the tool row is drawn"
+        );
+        assert!(
+            cx.debug_bounds("chat-tool-header").is_some(),
+            "the row has a header"
+        );
+        assert!(
+            cx.debug_bounds("chat-tool-output").is_some(),
+            "a tool's work starts open"
+        );
+    }
+
+    #[gpui::test]
+    fn a_tool_row_folds_away_on_a_click(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            chat.update(app, |view, _cx| {
+                view.apply_conversation(response(tool_turn(
+                    "{\"command\":\"ls\"}",
+                    "src\n",
+                    false,
+                )));
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let before = cx.debug_bounds("chat-tool").expect("the tool row");
+        let bounds = cx
+            .debug_bounds("chat-tool-header")
+            .expect("the tool row's header");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let after = cx.debug_bounds("chat-tool").expect("the tool row");
+        assert!(
+            after.size.height < before.size.height,
+            "the click folded the work away: {before:?} then {after:?}"
+        );
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            assert!(
+                !chat.read(app).model().is_tool_open(0, 0),
+                "the row's state is the model's"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_failed_tool_call_says_so_and_stays(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            chat.update(app, |view, _cx| {
+                view.apply_conversation(response(tool_turn("{}", "boom", true)));
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("chat-tool").is_some(),
+            "a failed tool call does not disappear"
+        );
+        assert!(
+            cx.debug_bounds("chat-tool-output").is_some(),
+            "and it keeps what it said"
+        );
+    }
+
+    #[gpui::test]
+    fn an_edit_shows_its_diff(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        let input = json!({
+            "file_path": "C:/work/src/main.rs",
+            "old_string": "one\ntwo\n",
+            "new_string": "one\nthree\n",
+        })
+        .to_string();
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            chat.update(app, |view, _cx| {
+                view.apply_conversation(response(tool_turn(&input, "updated", false)));
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("chat-diff").is_some(),
+            "the edit shows its diff"
+        );
+    }
+
+    #[gpui::test]
+    fn a_file_path_in_a_tool_card_is_a_control(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        // The subscription must outlive the test, or the events go nowhere.
+        let subscription = cx.update(|_window, app| {
+            app.subscribe(
+                &root.read(app).view.clone(),
+                move |_entity, event: &ChatEvent, _cx| {
+                    collected.borrow_mut().push(event.clone());
+                },
+            )
+        });
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            chat.update(app, |view, _cx| {
+                view.apply_conversation(response(tool_turn(
+                    "{\"file_path\":\"C:/work/src/main.rs\"}",
+                    "wrote C:/work/src/main.rs",
+                    false,
+                )));
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("chat-file-path").is_some(),
+            "the path is its own control"
+        );
+
+        let bounds = cx.debug_bounds("chat-file-path").expect("the path");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        assert!(
+            events
+                .borrow()
+                .contains(&ChatEvent::OpenFile("C:/work/src/main.rs".to_string())),
+            "the click asked for the file: {:?}",
+            events.borrow()
+        );
+        drop(subscription);
+    }
+
+    #[gpui::test]
+    fn output_beyond_the_bound_points_at_the_terminal(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        // The subscription must outlive the test, or the events go nowhere.
+        let subscription = cx.update(|_window, app| {
+            app.subscribe(
+                &root.read(app).view.clone(),
+                move |_entity, event: &ChatEvent, _cx| {
+                    collected.borrow_mut().push(event.clone());
+                },
+            )
+        });
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            chat.update(app, |view, _cx| {
+                view.apply_conversation(response(tool_turn(
+                    "{}",
+                    &"x".repeat(crate::tool_card::MAX_TOOL_CHARS + 100),
+                    false,
+                )));
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("chat-terminal-path").is_some(),
+            "the cut output points at the Terminal Lens"
+        );
+
+        let bounds = cx.debug_bounds("chat-terminal-path").expect("the path");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        assert!(
+            events.borrow().contains(&ChatEvent::ShowTerminal),
+            "the click asked for the Terminal Lens: {:?}",
+            events.borrow()
+        );
+        drop(subscription);
     }
 
     #[gpui::test]
