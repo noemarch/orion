@@ -32,6 +32,15 @@ The complete in-memory and persisted runtime state of open workspaces, tabs, pan
 #### Transcript
 The structured conversational history of an agent session (turns, user messages, assistant thinking, tool executions, approval requests). Introspected in read-only mode from agent CLI storage (e.g. SQLite databases, JSONL logs) or captured from PTY streams.
 
+#### Composer
+The Chat Lens's message box: the only way the reader drives an agent conversation without the Terminal Lens. It holds the reader's draft, delivers it to the agent, and stops the agent's turn. Its states are **idle**, **pending** (a message is on its way), and **failed** (the last action did not go through; a failed send keeps its words and offers a retry).
+
+#### Prompt Card
+The blocking card the Chat Lens shows while an agent's menu is on screen. It carries the agent's question and its numbered options, and it is answered from the keyboard (the option's number) or the pointer. Answering it resumes the agent and removes the card.
+
+#### Pane Seam
+The one boundary the Chat Lens uses to reach an agent: deliver a message, stop a turn, answer a menu, and read the agent's state. A live Pane answers it in-process; a test answers it with a recording double, so the lens's behaviour is observable without an agent process.
+
 #### Connection Registry
 The subsystem managing connected remote or desktop clients, their WebSocket channels, and fan-out of PTY output and state change events.
 
