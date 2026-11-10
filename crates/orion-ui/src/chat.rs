@@ -25,11 +25,13 @@ use crate::chat_entities::{
     cap_turns, ChatPart, ChatPrompt, ChatRole, ChatTurn, ConversationResponse,
 };
 use crate::chat_model::{at_bottom, format_timestamp, ChatModel};
+use crate::composer::Composer;
 use crate::markdown::{
     block_style, list_item_parts, opens_in_browser, parse_markdown, spans, BlockKind, MarkdownLine,
     TextSpan,
 };
-use crate::prompt_card::PromptCard;
+use crate::pane_seam::PaneSeam;
+use crate::prompt_card::{answer_hint, PromptCard, PromptCardEvent};
 use crate::theme::{Theme, CHAT_INLINE_CODE_RATIO, CHAT_LINE_HEIGHT};
 use crate::tool_card::{
     clipped_output, lines_with_paths, part_card, tool_object, tool_verb, DiffLine, PartCard,
@@ -37,17 +39,21 @@ use crate::tool_card::{
 };
 use gpui::prelude::*;
 use gpui::{
-    div, px, Context, Entity, FontStyle, FontWeight, IntoElement, Render, ScrollHandle,
-    ScrollWheelEvent, StyledText, TextStyle, Window,
+    div, px, App, Context, Entity, FocusHandle, FontStyle, FontWeight, IntoElement, Render,
+    ScrollHandle, ScrollWheelEvent, StyledText, Subscription, TextStyle, Window,
 };
-use orion_core::engine::pane::Pane;
 use orion_core::Engine;
 use serde_json::Value;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Recent-turn cap: chat renders the newest `MAX_RECENT_TURNS` turns only.
 pub const MAX_RECENT_TURNS: usize = 200;
+/// How long a menu the reader just answered stays answered. The agent's
+/// screen may still show the menu for a moment, and the card must not come
+/// back and block the composer. After the grace, the same menu is a new
+/// question.
+pub const ANSWERED_PROMPT_GRACE: Duration = Duration::from_secs(3);
 /// What the chat asks the shell for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatEvent {
@@ -59,14 +65,50 @@ pub enum ChatEvent {
 
 impl gpui::EventEmitter<ChatEvent> for ChatView {}
 
+/// Whether the menu the reader answered is the menu on screen.
+///
+/// The agent's screen may still show the menu it was given for a moment, and
+/// it is done with: the card must not come back and block the composer. After
+/// the grace, the same menu is a new question.
+pub fn answered_menu_still_shows(
+    answered: Option<&(String, Instant)>,
+    prompt_id: &str,
+    now: Instant,
+) -> bool {
+    answered
+        .is_some_and(|(id, at)| id == prompt_id && now.duration_since(*at) < ANSWERED_PROMPT_GRACE)
+}
+
+/// What must take the focus on the next draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusWanted {
+    /// Nothing is waiting for the focus.
+    None,
+    /// The composer: the reader's message box.
+    Composer,
+    /// The prompt card: the agent is waiting for an answer.
+    Prompt,
+}
+
 pub struct ChatView {
     engine: Option<Arc<Engine>>,
-    pane: Option<Arc<Pane>>,
+    /// The agent this lens talks to.
+    seam: Option<Arc<dyn PaneSeam>>,
     pane_id: String,
     /// What the transcript column shows: phase, turns, thinking rows, follow.
     model: ChatModel,
     last_body: Option<String>,
+    /// The reader's message box: the only way to drive the conversation.
+    composer: Entity<Composer>,
+    /// The agent's menu, while it waits for an answer.
     prompt_card: Option<Entity<PromptCard>>,
+    /// The subscriptions that keep the card's answers in step with this view.
+    prompt_subscriptions: Vec<Subscription>,
+    /// The menu the reader answered, and when: the agent's screen may still
+    /// show it for a moment, and the card must not come back.
+    answered_prompt: Option<(String, Instant)>,
+    /// What takes the focus on the next draw.
+    focus_wanted: FocusWanted,
     scroll_handle: ScrollHandle,
     focus_handle: gpui::FocusHandle,
     row_seq: usize,
@@ -99,13 +141,18 @@ fn source_label(source: &str) -> &'static str {
 impl ChatView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let scroll_handle = ScrollHandle::new();
+        let composer = cx.new(Composer::new);
         let view = Self {
             engine: None,
-            pane: None,
+            seam: None,
             pane_id: "pane-1".to_string(),
             model: ChatModel::new(),
             last_body: None,
+            composer,
             prompt_card: None,
+            prompt_subscriptions: Vec::new(),
+            answered_prompt: None,
+            focus_wanted: FocusWanted::None,
             scroll_handle,
             focus_handle: cx.focus_handle(),
             row_seq: 0,
@@ -120,26 +167,80 @@ impl ChatView {
         id
     }
 
-    /// Wire the engine + pane once they exist (called from `app.rs` after spawn).
-    pub fn attach(&mut self, engine: Arc<Engine>, pane: Arc<Pane>, pane_id: String) {
-        self.engine = Some(engine);
-        self.pane = Some(pane);
+    /// Wire the engine + the agent once they exist (called from `app.rs` after spawn).
+    ///
+    /// The engine is what reads the transcript; the seam is what talks to the
+    /// agent. A pane without an engine has no transcript to show.
+    pub fn attach(
+        &mut self,
+        engine: Option<Arc<Engine>>,
+        seam: Arc<dyn PaneSeam>,
+        pane_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.engine = engine;
+        self.seam = Some(seam);
         self.pane_id = pane_id;
         // A new pane is a new transcript: neither the old answer nor the old
         // thinking rows may linger.
         self.last_body = None;
         self.model.reset();
-        self.refresh();
+        self.prompt_card = None;
+        self.prompt_subscriptions.clear();
+        self.answered_prompt = None;
+        let working = self.agent_is_working();
+        self.composer.update(cx, |composer, _cx| {
+            composer.attach(self.seam());
+            composer.set_blocked(false);
+            composer.set_answer_hint(None);
+            composer.set_running(working);
+            // The draft belonged to the old agent.
+            composer.reset();
+        });
+        // The reader's box is where the conversation starts.
+        self.focus_wanted = FocusWanted::Composer;
+        self.refresh(cx);
     }
 
-    pub fn set_pane(&mut self, pane: Arc<Pane>) {
-        self.pane = Some(pane);
-        self.refresh();
+    /// The seam the composer and the prompt card talk to the agent through.
+    fn seam(&self) -> Arc<dyn PaneSeam> {
+        match &self.seam {
+            Some(seam) => Arc::clone(seam),
+            None => Arc::new(NoAgent),
+        }
     }
 
     /// The transcript the pane's agent wrote, as the chat draws it.
     pub fn model(&self) -> &ChatModel {
         &self.model
+    }
+
+    /// The reader's message box.
+    pub fn composer(&self) -> &Entity<Composer> {
+        &self.composer
+    }
+
+    /// The reader's box takes the focus on the next draw: the chat is the
+    /// lens the reader is looking at, and their next word goes there.
+    pub fn take_focus(&mut self) {
+        self.focus_wanted = FocusWanted::Composer;
+    }
+
+    /// Whether the agent's menu is on screen.
+    pub fn has_prompt_card(&self) -> bool {
+        self.prompt_card.is_some()
+    }
+
+    /// The handle the reader's box takes the focus with.
+    pub fn composer_focus(&self, cx: &App) -> FocusHandle {
+        self.composer.read(cx).focus_handle().clone()
+    }
+
+    /// The card's focus handle, when the agent's menu is on screen.
+    pub fn prompt_card_focus(&self, cx: &App) -> Option<FocusHandle> {
+        self.prompt_card
+            .as_ref()
+            .map(|card| card.read(cx).focus_handle().clone())
     }
 
     /// A read answered: the turns are on screen.
@@ -153,15 +254,16 @@ impl ChatView {
     }
 
     /// The reader asked for the transcript again.
-    pub fn retry(&mut self) {
+    pub fn retry(&mut self, cx: &mut Context<Self>) {
         self.model.retry();
         self.last_body = None;
-        self.refresh();
+        self.refresh(cx);
     }
 
     /// Fetch the conversation through the wire seam (`Engine::http`); the prompt
     /// card re-syncs from `pane.prompt()` so its DetectPrompt id is always fresh.
-    pub fn refresh(&mut self) {
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        // The stop control is live while the agent works.
         let Some(engine) = self.engine.clone() else {
             return;
         };
@@ -183,13 +285,16 @@ impl ChatView {
             Ok(response) => self.apply_conversation(response),
             Err(error) => self.fail_conversation(parse_error_message(&error)),
         }
+        let working = self.agent_is_working();
+        self.composer
+            .update(cx, |composer, _cx| composer.set_running(working));
     }
 
     fn start_poll(&self, cx: &mut Context<Self>) {
         let _ = self;
         cx.spawn(async move |view, cx| loop {
             cx.background_executor().timer(Duration::from_secs(2)).await;
-            let _ = view.update(cx, |view, _cx| view.refresh());
+            let _ = view.update(cx, |view, cx| view.refresh(cx));
             if view.upgrade().is_none() {
                 break;
             }
@@ -197,12 +302,139 @@ impl ChatView {
         .detach();
     }
 
+    /// Whether the agent owes the reader an answer: it says it is working, or
+    /// the reader's message is the last word in the transcript.
+    ///
+    /// The stop control is live while this holds. The agent's own status is
+    /// not enough on its own: a grid that says nothing about the turn leaves
+    /// the status idle while the agent works.
+    fn agent_is_working(&self) -> bool {
+        if self.seam.as_ref().is_some_and(|seam| seam.is_working()) {
+            return true;
+        }
+        self.model
+            .turns()
+            .last()
+            .is_some_and(|turn| turn.role == ChatRole::User)
+    }
+
     /// The agent whose transcript this is, for the role label.
     fn agent_label(&self) -> String {
-        self.pane
+        self.seam
             .as_ref()
-            .map(|pane| pane.agent.display_name().to_string())
+            .map(|seam| seam.agent_label())
             .unwrap_or_else(|| "Agent".to_string())
+    }
+
+    /// The agent's menu, if it is showing one.
+    ///
+    /// The card blocks the conversation while it waits: it takes the focus when
+    /// it appears, and the composer takes the focus back when it goes.
+    fn sync_prompt_card(&mut self, cx: &mut Context<Self>) -> Option<Entity<PromptCard>> {
+        let Some(seam) = self.seam.clone() else {
+            return self.prompt_card.clone();
+        };
+        let Some(detected) = seam.prompt() else {
+            // The menu is gone: the card goes with it, and so does the record
+            // of what was answered.
+            if self.prompt_card.take().is_some() {
+                self.prompt_subscriptions.clear();
+                self.focus_wanted = FocusWanted::Composer;
+            }
+            self.set_composer_blocked(false, cx);
+            return None;
+        };
+        let Some(prompt) = ChatPrompt::from_value(&detected.to_wire()) else {
+            // The shell cannot read the menu: the reader is not blocked by
+            // something it cannot see.
+            self.set_composer_blocked(false, cx);
+            return None;
+        };
+        // The menu the reader answered a moment ago is not a new question: the
+        // agent's screen may still show it, but it is done with.
+        if answered_menu_still_shows(self.answered_prompt.as_ref(), &prompt.id, Instant::now()) {
+            self.prompt_card = None;
+            self.prompt_subscriptions.clear();
+            self.set_composer_blocked(false, cx);
+            return None;
+        }
+        let same = self
+            .prompt_card
+            .as_ref()
+            .is_some_and(|card| card.read(cx).prompt_id() == prompt.id);
+        if same {
+            self.set_composer_blocked(true, cx);
+            return self.prompt_card.clone();
+        }
+
+        let hint = answer_hint(&prompt);
+        let card = cx.new(|cx| PromptCard::new(seam, prompt, cx));
+        let subscription = cx.subscribe(&card, |this, card, event, cx| {
+            match event {
+                PromptCardEvent::Answered => {
+                    // The answer went out: the card is done, and the reader's
+                    // box takes the focus back.
+                    this.answered_prompt =
+                        Some((card.read(cx).prompt_id().to_string(), Instant::now()));
+                    this.set_composer_blocked(false, cx);
+                    this.focus_wanted = FocusWanted::Composer;
+                    cx.notify();
+                }
+            }
+        });
+        self.prompt_subscriptions.clear();
+        self.prompt_subscriptions.push(subscription);
+        self.prompt_card = Some(card.clone());
+        self.set_composer_blocked(true, cx);
+        self.composer.update(cx, |composer, _cx| {
+            composer.set_answer_hint(Some(hint));
+        });
+        self.focus_wanted = FocusWanted::Prompt;
+        Some(card)
+    }
+
+    /// The composer stops accepting messages while the agent waits for an
+    /// answer.
+    fn set_composer_blocked(&self, blocked: bool, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, _cx| composer.set_blocked(blocked));
+    }
+}
+
+/// An agent that is not there: the composer says so instead of pretending.
+struct NoAgent;
+
+impl PaneSeam for NoAgent {
+    fn submit(&self, _message: &str) -> Result<(), String> {
+        Err(crate::pane_seam::AGENT_GONE.to_string())
+    }
+
+    fn stop(&self) -> Result<(), String> {
+        Err(crate::pane_seam::AGENT_GONE.to_string())
+    }
+
+    fn answer(&self, _prompt_id: &str, _option_index: usize) -> Result<(), String> {
+        Err("prompt_changed".to_string())
+    }
+
+    fn answer_typed(&self, _prompt_id: &str, _text: &str) -> Result<(), String> {
+        Err("prompt_changed".to_string())
+    }
+
+    fn prompt(&self) -> Option<orion_core::prompt::DetectedPrompt> {
+        None
+    }
+
+    fn is_working(&self) -> bool {
+        false
+    }
+
+    fn status(&self) -> orion_core::protocol::AgentStatus {
+        orion_core::protocol::AgentStatus::Unknown
+    }
+
+    fn agent_label(&self) -> String {
+        "Agent".to_string()
     }
 }
 
@@ -407,7 +639,7 @@ fn render_text_block(text: &str, theme: Theme, row_seq: &mut usize) -> Vec<gpui:
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.row_seq = 0;
         let theme = Theme::current();
 
@@ -465,7 +697,43 @@ impl Render for ChatView {
             self.scroll_handle.scroll_to_bottom();
         }
 
-        root.child(list)
+        root = root.child(list);
+
+        // The agent's menu blocks the conversation while it waits for an answer.
+        let prompt_card = self.sync_prompt_card(cx);
+        if let Some(card) = &prompt_card {
+            root = root.child(
+                div()
+                    .id("chat-prompt-slot")
+                    .debug_selector(|| "chat-prompt-slot".to_string())
+                    .flex()
+                    .flex_col()
+                    .px_3()
+                    .pb_2()
+                    .child(card.clone()),
+            );
+        }
+
+        root = root.child(self.composer.clone());
+
+        // The focus follows the conversation: the card when the agent asks, the
+        // composer's box when it is the reader's turn again.
+        match self.focus_wanted {
+            FocusWanted::Prompt => {
+                if let Some(card) = &prompt_card {
+                    let handle = card.read(cx).focus_handle().clone();
+                    handle.focus(window);
+                }
+            }
+            FocusWanted::Composer => {
+                let handle = self.composer.read(cx).focus_handle().clone();
+                handle.focus(window);
+            }
+            FocusWanted::None => {}
+        }
+        self.focus_wanted = FocusWanted::None;
+
+        root
     }
 }
 
@@ -478,9 +746,9 @@ impl ChatView {
         };
         let count = self.model.turns().len();
         let status = self
-            .pane
+            .seam
             .as_ref()
-            .map(|p| p.status().as_wire().to_string())
+            .map(|seam| seam.status().as_wire().to_string())
             .unwrap_or_default();
         div()
             .id("chat-status")
@@ -581,7 +849,7 @@ impl ChatView {
                     .text_size(px(12.0 * theme.density_scale()))
                     .child("Try again")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.retry();
+                        this.retry(cx);
                         cx.notify();
                     })),
             )
@@ -1083,36 +1351,13 @@ impl ChatView {
             }))
             .into_any_element()
     }
-
-    /// The prompt card slot: a fresh `PromptCard` entity keyed by prompt id so a
-    /// new question never inherits a stale answer state.
-    pub fn prompt_card_entity(&mut self, cx: &mut Context<Self>) -> Option<Entity<PromptCard>> {
-        let pane = self.pane.clone()?;
-        let detected = pane.prompt()?;
-        let wire = detected.to_wire();
-        let prompt = ChatPrompt::from_value(&wire)?;
-        let matches = self
-            .prompt_card
-            .as_ref()
-            .map(|card| card.read(&*cx).prompt_id() == prompt.id)
-            .unwrap_or(false);
-        if matches {
-            return self.prompt_card.clone();
-        }
-        let card = cx.new(|_| PromptCard::new(pane, prompt));
-        self.prompt_card = Some(card.clone());
-        Some(card)
-    }
-
-    pub fn pane(&self) -> Option<&Arc<Pane>> {
-        self.pane.as_ref()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::chat_model::ChatPhase;
+    use crate::pane_seam::test_doubles::{menu_prompt, RecordingPane, SeamCall};
     use gpui::Window;
     use serde_json::json;
 
@@ -1732,12 +1977,444 @@ let x = 1;
         let cx = cx.add_empty_window();
         let view = cx.update(|_window, app| app.new(ChatView::new));
         cx.update(|_window, app| {
-            view.update(app, |view, _cx| {
+            view.update(app, |view, cx| {
                 view.fail_conversation("Couldn't load the conversation. Try again.".to_string());
-                view.retry();
+                view.retry(cx);
             });
             assert_eq!(view.read(app).model().failure(), None);
             assert_eq!(view.read(app).model().phase(), &ChatPhase::Loading);
         });
+    }
+
+    /// Give the chat an agent to talk to.
+    fn attach_agent(
+        cx: &mut gpui::VisualTestContext,
+        root: &Entity<ChatRoot>,
+        seam: Arc<RecordingPane>,
+    ) {
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            chat.update(app, |view, cx| {
+                let seam: Arc<dyn PaneSeam> = seam;
+                view.attach(None, seam, "p1".to_string(), cx);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn the_composer_sends_the_message_to_the_agent(cx: &mut gpui::TestAppContext) {
+        let seam = Arc::new(RecordingPane::new());
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        attach_agent(cx, &root, seam.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        // The box has the focus, so what the reader types lands in it.
+        cx.simulate_input("hello");
+        cx.simulate_keystrokes("enter");
+
+        assert_eq!(
+            seam.submitted(),
+            vec!["hello".to_string()],
+            "the agent has the message"
+        );
+    }
+
+    #[gpui::test]
+    fn an_empty_draft_cannot_be_sent(cx: &mut gpui::TestAppContext) {
+        let seam = Arc::new(RecordingPane::new());
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        attach_agent(cx, &root, seam.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let bounds = cx.debug_bounds("composer-send").expect("the send control");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+
+        assert!(
+            seam.submitted().is_empty(),
+            "an empty draft is not a message"
+        );
+    }
+
+    #[gpui::test]
+    fn a_send_on_its_way_is_visible(cx: &mut gpui::TestAppContext) {
+        let seam = Arc::new(RecordingPane::new());
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        attach_agent(cx, &root, seam.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        cx.simulate_input("hello");
+        // The keystroke is dispatched without letting the background executor
+        // run, so the message is caught on its way.
+        cx.update(|window, app| {
+            window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), app);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        assert!(
+            cx.debug_bounds("composer-pending").is_some(),
+            "the box says the message is on its way"
+        );
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            assert!(
+                chat.read(app)
+                    .composer()
+                    .read(app)
+                    .model()
+                    .state()
+                    .is_pending(),
+                "the send is still on its way"
+            );
+        });
+
+        // The executor runs the send through: the box settles.
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            assert!(
+                !chat
+                    .read(app)
+                    .composer()
+                    .read(app)
+                    .model()
+                    .state()
+                    .is_pending(),
+                "the agent has the message"
+            );
+        });
+        assert_eq!(seam.submitted(), vec!["hello".to_string()]);
+    }
+
+    #[gpui::test]
+    fn a_failed_send_offers_a_retry(cx: &mut gpui::TestAppContext) {
+        let seam = Arc::new(RecordingPane::new());
+        seam.fail_with("pty closed");
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        attach_agent(cx, &root, seam.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        cx.simulate_input("hello");
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        assert!(
+            cx.debug_bounds("composer-failed").is_some(),
+            "the failure is on screen"
+        );
+        assert_eq!(seam.submitted(), vec!["hello".to_string()]);
+
+        let bounds = cx.debug_bounds("composer-retry").expect("the retry");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            seam.submitted(),
+            vec!["hello".to_string(), "hello".to_string()],
+            "the retry sends the same words"
+        );
+    }
+
+    #[test]
+    fn an_answered_menu_is_the_same_question_only_for_a_moment() {
+        let now = Instant::now();
+        let answered = ("p1".to_string(), now - Duration::from_secs(1));
+        assert!(
+            answered_menu_still_shows(Some(&answered), "p1", now),
+            "the agent's screen may still show the menu for a moment"
+        );
+        assert!(
+            !answered_menu_still_shows(Some(&answered), "p2", now),
+            "another question is another question"
+        );
+        let old = ("p1".to_string(), now - Duration::from_secs(60));
+        assert!(
+            !answered_menu_still_shows(Some(&old), "p1", now),
+            "after the grace the same menu is a new question"
+        );
+        assert!(!answered_menu_still_shows(None, "p1", now));
+    }
+
+    #[gpui::test]
+    fn a_click_in_the_box_gives_it_the_focus(cx: &mut gpui::TestAppContext) {
+        let seam = Arc::new(RecordingPane::new());
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        attach_agent(cx, &root, seam.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let bounds = cx.debug_bounds("composer-input").expect("the box");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+
+        cx.update(|window, app| {
+            let chat = root.read(app).view.clone();
+            let composer = chat.read(app).composer_focus(app);
+            assert!(composer.is_focused(window), "the box took the focus");
+        });
+    }
+
+    #[gpui::test]
+    fn a_send_that_arrives_late_leaves_the_new_pane_alone(cx: &mut gpui::TestAppContext) {
+        let seam = Arc::new(RecordingPane::new());
+        seam.fail_with("pty closed");
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        attach_agent(cx, &root, seam.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        cx.simulate_input("for the first agent");
+        // The keystroke goes out without letting the background executor run:
+        // the message is on its way.
+        cx.update(|window, app| {
+            window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), app);
+        });
+
+        // Another pane takes the box while the message is on its way.
+        let other = Arc::new(RecordingPane::new());
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            chat.update(app, |view, cx| {
+                let seam: Arc<dyn PaneSeam> = other;
+                view.attach(None, seam, "p2".to_string(), cx);
+            });
+        });
+
+        // The first agent answers: the second pane must not hear about it.
+        cx.run_until_parked();
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            let composer = chat.read(app).composer();
+            assert_eq!(
+                composer.read(app).model().failure(),
+                None,
+                "the old pane's failure is not shown in the new pane"
+            );
+        });
+        assert_eq!(seam.submitted(), vec!["for the first agent".to_string()]);
+    }
+
+    #[gpui::test]
+    fn the_reader_pastes_what_they_copied(cx: &mut gpui::TestAppContext) {
+        let seam = Arc::new(RecordingPane::new());
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        attach_agent(cx, &root, seam.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("pasted words".to_string()));
+        cx.simulate_keystrokes("ctrl-v");
+
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            assert_eq!(
+                chat.read(app).composer().read(app).model().draft(),
+                "pasted words"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn the_stop_control_interrupts_the_running_agent(cx: &mut gpui::TestAppContext) {
+        let seam = Arc::new(RecordingPane::new());
+        seam.set_working(true);
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        attach_agent(cx, &root, seam.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let bounds = cx.debug_bounds("composer-stop").expect("the stop control");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            seam.calls(),
+            vec![SeamCall::Stop],
+            "the agent's turn was interrupted"
+        );
+    }
+
+    #[gpui::test]
+    fn a_prompt_card_blocks_the_conversation_until_it_is_answered(cx: &mut gpui::TestAppContext) {
+        let seam = Arc::new(RecordingPane::new());
+        seam.show_prompt(menu_prompt());
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        attach_agent(cx, &root, seam.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        // The card is on screen with the agent's question and its options.
+        assert!(
+            cx.debug_bounds("prompt-card").is_some(),
+            "the card is on screen"
+        );
+        assert!(cx.debug_bounds("prompt-question").is_some());
+        assert!(cx.debug_bounds("prompt-option-0").is_some());
+        assert!(cx.debug_bounds("prompt-option-1").is_some());
+
+        // The composer says why it is not taking messages.
+        assert!(cx.debug_bounds("chat-composer").is_some());
+        assert!(
+            cx.debug_bounds("composer-blocked").is_some(),
+            "the composer says the question comes first"
+        );
+
+        // The card took the focus: the agent is waiting for an answer.
+        cx.update(|window, app| {
+            let chat = root.read(app).view.clone();
+            let card = chat
+                .read(app)
+                .prompt_card_focus(app)
+                .expect("the card has a focus handle");
+            assert!(card.is_focused(window), "the card took the focus");
+            assert!(
+                chat.read(app).composer().read(app).is_blocked(),
+                "the composer waits for the answer"
+            );
+        });
+
+        // The card has the focus, so typing answers the menu rather than
+        // starting a new message.
+        cx.simulate_keystrokes("2");
+        assert_eq!(
+            seam.calls(),
+            vec![SeamCall::Answer("p1".to_string(), 1)],
+            "the keyboard picked the second option"
+        );
+        assert!(
+            seam.submitted().is_empty(),
+            "the card blocks the conversation"
+        );
+
+        // The answer went out: the card is gone, and the composer takes over.
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, app| {
+            let chat = root.read(app).view.clone();
+            assert!(!chat.read(app).has_prompt_card(), "the card is gone");
+            assert!(
+                !chat.read(app).composer().read(app).is_blocked(),
+                "the composer is live again"
+            );
+            let composer = chat.read(app).composer_focus(app);
+            assert!(
+                composer.is_focused(window),
+                "the composer took the focus back"
+            );
+        });
+
+        // The reader's box is live again: the message goes to the agent.
+        cx.simulate_input("thanks");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            seam.submitted(),
+            vec!["thanks".to_string()],
+            "the composer sends once the card is answered"
+        );
+    }
+
+    #[gpui::test]
+    fn an_answered_card_does_not_come_back(cx: &mut gpui::TestAppContext) {
+        let seam = Arc::new(RecordingPane::new());
+        seam.show_prompt(menu_prompt());
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        attach_agent(cx, &root, seam.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        cx.simulate_keystrokes("1");
+        assert_eq!(
+            seam.calls(),
+            vec![SeamCall::Answer("p1".to_string(), 0)],
+            "the keyboard picked the first option"
+        );
+
+        // The agent's screen still shows the menu for a moment: the card must
+        // not come back and block the composer again.
+        seam.show_prompt(menu_prompt());
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            assert!(
+                !chat.read(app).has_prompt_card(),
+                "the answered card stays gone"
+            );
+            assert!(
+                !chat.read(app).composer().read(app).is_blocked(),
+                "the composer is not blocked by a menu that was answered"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_draft_does_not_cross_panes(cx: &mut gpui::TestAppContext) {
+        let seam = Arc::new(RecordingPane::new());
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        attach_agent(cx, &root, seam.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        cx.simulate_input("for the first agent");
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            assert_eq!(
+                chat.read(app).composer().read(app).model().draft(),
+                "for the first agent"
+            );
+        });
+
+        // Another pane: its own words, not the first agent's.
+        let other = Arc::new(RecordingPane::new());
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            chat.update(app, |view, cx| {
+                let seam: Arc<dyn PaneSeam> = other;
+                view.attach(None, seam, "p2".to_string(), cx);
+            });
+        });
+
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            assert_eq!(
+                chat.read(app).composer().read(app).model().draft(),
+                "",
+                "the draft belonged to the old agent"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_prompt_card_is_answered_with_the_pointer(cx: &mut gpui::TestAppContext) {
+        let seam = Arc::new(RecordingPane::new());
+        seam.show_prompt(menu_prompt());
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        attach_agent(cx, &root, seam.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let bounds = cx
+            .debug_bounds("prompt-option-1")
+            .expect("the second option");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+
+        assert_eq!(
+            seam.calls(),
+            vec![SeamCall::Answer("p1".to_string(), 1)],
+            "the pointer chose the second option"
+        );
     }
 }

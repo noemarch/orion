@@ -14,6 +14,7 @@ use crate::chat::{ChatEvent, ChatView};
 use crate::diff_view::ChangesView;
 use crate::files_view::FileTree;
 use crate::new_workspace::{recent_directory, NewWorkspaceEvent, NewWorkspaceModal};
+use crate::pane_seam::seam_of;
 use crate::settings::{KeyBarExtras, SettingsModal};
 use crate::shell_model::{lens_segment_state, HeaderModel, LensBook, ShellLayout};
 use crate::sidebar::SidebarEvent;
@@ -254,8 +255,9 @@ impl OrionApp {
         });
         // The chat lens shares the same pane: conversation fetches go through
         // the wire seam, prompt answers go straight to the in-process pane.
-        self.chat_view.update(cx, |view, _cx| {
-            view.attach(Arc::clone(&engine), Arc::clone(&pane), pane_id.to_string());
+        self.chat_view.update(cx, |view, cx| {
+            let seam = seam_of(&pane);
+            view.attach(Some(Arc::clone(&engine)), seam, pane_id.to_string(), cx);
         });
         // The Changes lens shares the same pane: the file tree starts at
         // the pane's cwd, the diff runs from the pane's repository.
@@ -298,8 +300,13 @@ impl OrionApp {
         .detach();
     }
 
-    fn set_lens(&mut self, lens: Lens) {
+    fn set_lens(&mut self, lens: Lens, cx: &mut impl gpui::AppContext) {
         self.lens_book.set(self.focused_pane.as_deref(), lens);
+        if lens == Lens::Chat {
+            // The chat is the lens the reader is looking at: their next word
+            // belongs in its box.
+            self.chat_view.update(cx, |view, _cx| view.take_focus());
+        }
     }
 
     /// What the chat asks for: the Terminal Lens has the whole output, and
@@ -308,7 +315,7 @@ impl OrionApp {
     fn handle_chat_event(&mut self, event: &ChatEvent, pane: ChatPane, cx: &mut App) {
         match event {
             ChatEvent::ShowTerminal => match pane {
-                ChatPane::Focused => self.set_lens(Lens::Terminal),
+                ChatPane::Focused => self.set_lens(Lens::Terminal, cx),
                 ChatPane::Split => {
                     if let Some(split_pane) = self.split_attached_pane.clone() {
                         self.lens_book.set(Some(&split_pane), Lens::Terminal);
@@ -317,7 +324,7 @@ impl OrionApp {
             },
             ChatEvent::OpenFile(path) => {
                 match pane {
-                    ChatPane::Focused => self.set_lens(Lens::Changes),
+                    ChatPane::Focused => self.set_lens(Lens::Changes, cx),
                     ChatPane::Split => {
                         if let Some(split_pane) = self.split_attached_pane.clone() {
                             self.lens_book.set(Some(&split_pane), Lens::Changes);
@@ -536,7 +543,7 @@ impl OrionApp {
                     .text_color(theme.text_strong)
                     .child("Chat")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_lens(Lens::Chat);
+                        this.set_lens(Lens::Chat, cx);
                         cx.notify();
                     })),
             )
@@ -554,7 +561,7 @@ impl OrionApp {
                     .text_color(theme.text_strong)
                     .child("Terminal")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_lens(Lens::Terminal);
+                        this.set_lens(Lens::Terminal, cx);
                         cx.notify();
                     })),
             )
@@ -572,7 +579,7 @@ impl OrionApp {
                     .text_color(theme.text_strong)
                     .child("Changes")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_lens(Lens::Changes);
+                        this.set_lens(Lens::Changes, cx);
                         cx.notify();
                     })),
             )
@@ -942,27 +949,12 @@ impl Render for OrionApp {
                 )
         } else {
             let inner = match self.current_lens() {
-                Lens::Chat => {
-                    if let Some(card) = self
-                        .chat_view
-                        .update(cx, |view, cx| view.prompt_card_entity(cx))
-                    {
-                        div()
-                            .id("main-content")
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .child(self.chat_view.clone())
-                            .child(card)
-                    } else {
-                        div()
-                            .id("main-content")
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .child(self.chat_view.clone())
-                    }
-                }
+                Lens::Chat => div()
+                    .id("main-content")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .child(self.chat_view.clone()),
                 Lens::Terminal => div()
                     .id("main-content")
                     .flex()
@@ -995,11 +987,13 @@ impl Render for OrionApp {
                 if self.split_attached_pane.as_deref() != Some(second_id.as_str()) {
                     self.split_attached_pane = Some(second_id.clone());
                     if let Some(second_pane) = self.engine.pane_by_id(&second_id) {
-                        self.split_chat_view.update(cx, |view, _cx| {
+                        self.split_chat_view.update(cx, |view, cx| {
+                            let seam = seam_of(&second_pane);
                             view.attach(
-                                Arc::clone(&self.engine),
-                                Arc::clone(&second_pane),
+                                Some(Arc::clone(&self.engine)),
+                                seam,
                                 second_id.clone(),
+                                cx,
                             );
                         });
                         self.split_terminal_pane
