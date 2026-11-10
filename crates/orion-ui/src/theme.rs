@@ -299,6 +299,36 @@ impl Theme {
         }
     }
 
+    /// Chat prose size in px for the density (comfortable 15, compact 14 —
+    /// `--fs-chat`, DESIGN.md §Scale).
+    pub fn chat_prose_size(self) -> f32 {
+        match self.density {
+            Density::Comfortable => 15.0,
+            Density::Compact => 14.0,
+        }
+    }
+
+    /// Chat code size in px for the density (comfortable 13, compact 12 —
+    /// `--fs-sm`).
+    pub fn chat_code_size(self) -> f32 {
+        match self.density {
+            Density::Comfortable => 13.0,
+            Density::Compact => 12.0,
+        }
+    }
+
+    /// A markdown heading's size in px: h1 is `--fs-xl` (18/17), h2 `--fs-lg`
+    /// (16/15), h3 and below the prose size (`--fs-chat`).
+    pub fn chat_heading_size(self, level: u8) -> f32 {
+        match (level, self.density) {
+            (1, Density::Comfortable) => 18.0,
+            (1, Density::Compact) => 17.0,
+            (2, Density::Comfortable) => 16.0,
+            (2, Density::Compact) => 15.0,
+            _ => self.chat_prose_size(),
+        }
+    }
+
     /// Row height in px for the density (32 comfortable, 28 compact).
     pub fn row_height(self) -> f32 {
         match self.density {
@@ -312,6 +342,11 @@ impl Theme {
         rgba(0)
     }
 }
+
+/// The chat prose's line height (`--lh-prose`, DESIGN.md §Scale).
+pub const CHAT_LINE_HEIGHT: f32 = 1.65;
+/// Inline code is `0.87em` of its line (DESIGN.md §Faces).
+pub const CHAT_INLINE_CODE_RATIO: f32 = 0.87;
 
 static CURRENT: LazyLock<Mutex<Theme>> = LazyLock::new(|| Mutex::new(Theme::dark()));
 
@@ -348,6 +383,31 @@ mod tests {
         assert_eq!(theme.primary_hover, gpui::rgb(0xa3185a));
         assert_eq!(theme.primary_text, gpui::rgb(0xf2eef5));
         assert_eq!(theme.syntax_keyword, gpui::rgb(0xff8fa8));
+    }
+
+    #[test]
+    fn the_chat_reading_scale_follows_the_design_table() {
+        let comfortable = Theme::dark();
+        assert_eq!(comfortable.chat_prose_size(), 15.0, "--fs-chat");
+        assert_eq!(comfortable.chat_code_size(), 13.0, "--fs-sm");
+        assert_eq!(comfortable.chat_heading_size(1), 18.0, "--fs-xl");
+        assert_eq!(comfortable.chat_heading_size(2), 16.0, "--fs-lg");
+        assert_eq!(comfortable.chat_heading_size(3), 15.0, "--fs-chat");
+        assert_eq!(
+            comfortable.chat_heading_size(6),
+            comfortable.chat_prose_size(),
+            "h3 and below read as prose"
+        );
+
+        let compact = Theme {
+            density: Density::Compact,
+            ..Theme::dark()
+        };
+        assert_eq!(compact.chat_prose_size(), 14.0);
+        assert_eq!(compact.chat_code_size(), 12.0);
+        assert_eq!(compact.chat_heading_size(1), 17.0);
+        assert_eq!(compact.chat_heading_size(2), 15.0);
+        assert_eq!(compact.chat_heading_size(3), 14.0);
     }
 
     #[test]
