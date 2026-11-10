@@ -231,6 +231,11 @@ impl SessionState {
                     "layout": tab.layout,
                     "zoomed_pane": tab.zoomed_pane,
                     "focused": tab_focused,
+                    // Ordered pane ids and the tab's remembered pane: the shell
+                    // focuses these when the user clicks a tab, instead of the
+                    // arbitrary order a panes HashMap would give it.
+                    "pane_ids": tab.panes,
+                    "active_pane_id": tab.active_pane,
                     "pane_count": tab.panes.len(),
                     "agent_status": aggregate_status(&session, &tab.panes).as_wire(),
                 }));
@@ -489,5 +494,102 @@ mod tests {
         let (title, kind) = state.pane_push_info("pane-missing");
         assert_eq!(title, "pane-missing");
         assert!(kind.is_none());
+    }
+
+    fn fake_pane(id: &str) -> Arc<Pane> {
+        let on_event: Arc<dyn Fn(crate::engine::pane::PaneEvent) + Send + Sync> = Arc::new(|_| {});
+        Arc::new(
+            Pane::spawn(
+                crate::engine::pane::PaneConfig {
+                    id: id.to_string(),
+                    workspace_id: "ws-1".to_string(),
+                    tab_id: "tab-1".to_string(),
+                    agent: crate::AgentKind::Claude,
+                    label: "Claude".to_string(),
+                    cwd: std::env::temp_dir(),
+                    spec: crate::LaunchSpec {
+                        program: std::env::current_exe().expect("the test binary's path"),
+                        args: vec!["--list".to_string()],
+                    },
+                    args: Vec::new(),
+                    size: crate::TerminalSize {
+                        rows: 32,
+                        cols: 120,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    },
+                },
+                on_event,
+            )
+            .expect("the fake pane starts"),
+        )
+    }
+
+    fn saved_tab(id: &str, pane_id: &str) -> SavedTab {
+        SavedTab {
+            id: id.to_string(),
+            label: id.to_string(),
+            number: 1,
+            pane_ids: vec![pane_id.to_string()],
+            active_pane_id: pane_id.to_string(),
+            layout: TabLayout::Single,
+            zoomed_pane: None,
+            split_ratios: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn restoring_a_saved_session_keeps_the_workspace_tab_and_pane_selection() {
+        let saved = SavedSession {
+            version: 1,
+            workspaces: vec![
+                SavedWorkspace {
+                    id: "ws-1".to_string(),
+                    label: "one".to_string(),
+                    cwd: std::env::temp_dir().to_string_lossy().to_string(),
+                    active_tab_id: "tab-1".to_string(),
+                    tabs: vec![saved_tab("tab-1", "pane-1")],
+                },
+                SavedWorkspace {
+                    id: "ws-2".to_string(),
+                    label: "two".to_string(),
+                    cwd: std::env::temp_dir().to_string_lossy().to_string(),
+                    active_tab_id: "tab-2".to_string(),
+                    tabs: vec![saved_tab("tab-2", "pane-2")],
+                },
+            ],
+            panes: Vec::new(),
+            focused_pane_id: Some("pane-2".to_string()),
+        };
+        let restored = HashMap::from([
+            ("pane-1".to_string(), fake_pane("pane-1")),
+            ("pane-2".to_string(), fake_pane("pane-2")),
+        ]);
+
+        let state = SessionState::new();
+        assert_eq!(state.load_restored(&saved, restored), 2);
+
+        let snapshot = state.snapshot_value("0.0.0-test", 1);
+        assert_eq!(snapshot["focused_pane_id"], "pane-2");
+        assert_eq!(
+            snapshot["focused_workspace_id"], "ws-2",
+            "the saved pane selects its workspace: {snapshot}"
+        );
+        assert_eq!(snapshot["workspaces"][0]["focused"], false);
+        assert_eq!(snapshot["workspaces"][1]["focused"], true);
+        assert_eq!(
+            snapshot["workspaces"][1]["active_tab_id"], "tab-2",
+            "the saved active tab survives the restart: {snapshot}"
+        );
+        assert_eq!(
+            snapshot["tabs"][1]["active_pane_id"], "pane-2",
+            "the tab remembers the pane the user chose: {snapshot}"
+        );
+        assert_eq!(snapshot["tabs"][1]["pane_ids"][0], "pane-2");
+        assert_eq!(
+            state.to_saved().focused_pane_id.as_deref(),
+            Some("pane-2"),
+            "the restored selection is what the next restart saves"
+        );
     }
 }
