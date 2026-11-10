@@ -912,13 +912,7 @@ impl RouteTable {
                     }
                 }
             }
-            if session
-                .focused_pane
-                .as_deref()
-                .is_some_and(|focused| gone.contains(&focused.to_string()))
-            {
-                session.focused_pane = None;
-            }
+            refocus_after_close(&mut session);
         }
         for pane_id in &gone {
             self.transcripts.remove_pane(pane_id);
@@ -995,13 +989,7 @@ impl RouteTable {
                 .map(|workspace| workspace.id.clone())
                 .collect();
             self.watchers.lock().retain(|id, _| live.contains(id));
-            if session
-                .focused_pane
-                .as_deref()
-                .is_some_and(|focused| gone.contains(&focused.to_string()))
-            {
-                session.focused_pane = None;
-            }
+            refocus_after_close(&mut session);
         }
         for pane_id in &gone {
             self.transcripts.remove_pane(pane_id);
@@ -1135,6 +1123,11 @@ impl RouteTable {
             for workspace in &mut session.workspaces {
                 for tab in &mut workspace.tabs {
                     tab.panes.retain(|id| id != pane_id);
+                    // The tab remembers the pane the user last chose; when that
+                    // pane closes, fall back to the first one still open.
+                    if tab.active_pane.as_str() == pane_id {
+                        tab.active_pane = tab.panes.first().cloned().unwrap_or_default();
+                    }
                 }
                 workspace.tabs.retain(|tab| !tab.panes.is_empty());
                 if !workspace
@@ -1150,9 +1143,7 @@ impl RouteTable {
             session
                 .workspaces
                 .retain(|workspace| !workspace.tabs.is_empty());
-            if session.focused_pane.as_deref() == Some(pane_id) {
-                session.focused_pane = None;
-            }
+            refocus_after_close(&mut session);
         }
         self.transcripts.remove_pane(pane_id);
         self.save();
@@ -1169,6 +1160,22 @@ impl RouteTable {
             return Err(api_error(404, "pane_not_found", "That pane is not open."));
         }
         session.focused_pane = Some(pane_id.to_string());
+        // Keep the workspace and tab selection in step with the focused pane so
+        // a restart restores the same Workspace, Tab, and Pane.
+        for workspace in &mut session.workspaces {
+            let mut active_tab = None;
+            for tab in &mut workspace.tabs {
+                if tab.panes.iter().any(|id| id == pane_id) {
+                    tab.active_pane = pane_id.to_string();
+                    active_tab = Some(tab.id.clone());
+                }
+            }
+            if let Some(active) = active_tab {
+                workspace.active_tab = active;
+            }
+        }
+        drop(session);
+        self.save();
         Ok((200, json!({ "ok": true })))
     }
 
@@ -2198,6 +2205,34 @@ impl RouteTable {
 }
 
 // ---- pure helpers (were free functions in engine.rs) ----
+
+/// The first pane still open, in workspace/tab order. Closing the selected
+/// pane or tab moves focus here instead of leaving the shell with none.
+fn first_live_pane(session: &crate::engine::session::Session) -> Option<String> {
+    session
+        .workspaces
+        .iter()
+        .flat_map(|workspace| workspace.tabs.iter())
+        .flat_map(|tab| tab.panes.iter())
+        .find(|pane_id| session.panes.contains_key(*pane_id))
+        .cloned()
+}
+
+/// Every close route ends here: a closed focused pane gives up focus, and an
+/// empty selection falls back to the first live pane. One helper so a new close
+/// path cannot forget half of the rule.
+fn refocus_after_close(session: &mut crate::engine::session::Session) {
+    let focused_is_gone = session
+        .focused_pane
+        .as_deref()
+        .is_some_and(|focused| !session.panes.contains_key(focused));
+    if focused_is_gone {
+        session.focused_pane = None;
+    }
+    if session.focused_pane.is_none() {
+        session.focused_pane = first_live_pane(session);
+    }
+}
 
 pub(crate) fn api_error(status: u16, code: &str, message: &str) -> (u16, Value) {
     (

@@ -266,6 +266,7 @@ impl Engine {
             "/api/tab/close",
             "/api/tab/move",
             "/api/pane/close",
+            "/api/pane/focus",
             "/api/pane/split",
             "/api/pane/zoom",
             "/api/pane/swap",
