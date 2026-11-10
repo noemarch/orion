@@ -170,6 +170,24 @@ pub fn tool_object(summary: &str, name: &str) -> String {
     summary.strip_prefix(&prefix).unwrap_or(summary).to_string()
 }
 
+/// The diff a tool call carries, and whether it was cut at the bound. A tool
+/// that did no edit has no diff.
+pub fn tool_diff_bounded(tool: &ToolPart) -> (Vec<DiffLine>, bool) {
+    let lines = tool_diff(tool);
+    let mut used = 0usize;
+    let mut kept = Vec::new();
+    let mut clipped = false;
+    for line in lines {
+        used += line.text().len() + 1;
+        if used > MAX_TOOL_CHARS {
+            clipped = true;
+            break;
+        }
+        kept.push(line);
+    }
+    (kept, clipped)
+}
+
 /// The diff a tool call carries: the diff its output holds, or the edit its
 /// input describes. A tool that did neither has no diff.
 pub fn tool_diff(tool: &ToolPart) -> Vec<DiffLine> {
@@ -288,12 +306,21 @@ pub fn file_paths(text: &str) -> Vec<String> {
 pub fn file_path_ranges(text: &str) -> Vec<(Range<usize>, String)> {
     let mut found: Vec<(Range<usize>, String)> = Vec::new();
     let mut push = |range: Range<usize>, path: &str| {
+        // The same text found twice (a JSON argument and the token scan) is
+        // one path, and the first one found is the real one.
+        if found
+            .iter()
+            .any(|(seen, _)| seen.start < range.end && range.start < seen.end)
+        {
+            return;
+        }
         if !found.iter().any(|(_, seen)| seen == path) {
             found.push((range, path.to_string()));
         }
     };
 
-    // A JSON argument names its file plainly.
+    // A JSON argument names its file plainly. The text holds the escaped
+    // form, so the range covers that and the path stays the real one.
     if let Ok(value) = serde_json::from_str::<Value>(text) {
         for key in ["file_path", "path", "notebook_path", "filePath"] {
             let Some(path) = value.get(key).and_then(Value::as_str) else {
@@ -302,8 +329,10 @@ pub fn file_path_ranges(text: &str) -> Vec<(Range<usize>, String)> {
             if !is_file_path(path) {
                 continue;
             }
-            if let Some(start) = text.find(path) {
-                push(start..start + path.len(), path);
+            let escaped = serde_json::to_string(path).unwrap_or_default();
+            let escaped = escaped.trim_matches('"');
+            if let Some(start) = text.find(escaped) {
+                push(start..start + escaped.len(), path);
             }
         }
     }
@@ -322,6 +351,8 @@ pub fn file_path_ranges(text: &str) -> Vec<(Range<usize>, String)> {
         let begin = start + offset;
         push(begin..begin + token.len(), token);
     }
+    // The paths come back in the order they appear, whatever found them.
+    found.sort_by_key(|(range, _)| range.start);
     found
 }
 
@@ -533,6 +564,27 @@ mod tests {
             &text[ranges[0].0.clone()],
             "C:/work/src/main.rs",
             "the range covers the path in the text"
+        );
+    }
+
+    #[test]
+    fn the_paths_come_back_in_the_order_they_appear() {
+        let text = "{\"note\":\"a/c.rs\",\"file_path\":\"src/b.rs\"}";
+        let ranges = file_path_ranges(text);
+        let starts: Vec<usize> = ranges.iter().map(|(range, _)| range.start).collect();
+        let mut sorted = starts.clone();
+        sorted.sort_unstable();
+        assert_eq!(starts, sorted, "the ranges are ordered: {ranges:?}");
+    }
+
+    #[test]
+    fn a_json_path_is_the_real_path_not_its_escaped_form() {
+        let text = "{\"file_path\":\"C:\\\\Users\\\\me\\\\main.rs\"}";
+        let paths = file_paths(text);
+        assert_eq!(
+            paths,
+            vec!["C:\\Users\\me\\main.rs".to_string()],
+            "the reader opens the real path"
         );
     }
 

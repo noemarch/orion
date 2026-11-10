@@ -210,6 +210,20 @@ impl ChatView {
 /// the rest is.
 pub use crate::tool_card::MAX_TOOL_CHARS;
 
+/// The diff lines a card shows, and whether the rest is in the Terminal Lens.
+fn bounded_lines(lines: &[DiffLine]) -> (Vec<DiffLine>, bool) {
+    let mut used = 0usize;
+    let mut kept = Vec::new();
+    for line in lines {
+        used += line.text().len() + 1;
+        if used > MAX_TOOL_CHARS {
+            return (kept, true);
+        }
+        kept.push(line.clone());
+    }
+    (kept, false)
+}
+
 /// The text style of one span: the Quiet Slate type scale, plus the span's own
 /// character (inline code, a link, bold, italic).
 fn span_style(base: &TextStyle, span: &TextSpan, theme: Theme, inline_code_size: f32) -> TextStyle {
@@ -708,9 +722,12 @@ impl ChatView {
                 }
                 folded.into_any_element()
             }
-            PartCard::Tool(card) => self.render_tool_row(turn_index, part_index, &card, &[], cx),
+            PartCard::Tool(card) => {
+                self.render_tool_row(turn_index, part_index, &card, &[], false, cx)
+            }
             PartCard::Diff { card, lines } => {
-                self.render_tool_row(turn_index, part_index, &card, &lines, cx)
+                let (lines, clipped) = bounded_lines(&lines);
+                self.render_tool_row(turn_index, part_index, &card, &lines, clipped, cx)
             }
             PartCard::Notice { text, source } => {
                 let source = source.unwrap_or_default();
@@ -787,6 +804,7 @@ impl ChatView {
         part_index: usize,
         card: &ToolCard,
         lines: &[DiffLine],
+        diff_clipped: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::current();
@@ -852,17 +870,37 @@ impl ChatView {
                 .child(
                     div()
                         .text_size(px(11.0 * theme.density_scale()))
-                        .text_color(theme.status_blocked)
-                        .child(if failed { "failed" } else { "" }),
+                        .text_color(if failed {
+                            theme.status_blocked
+                        } else {
+                            theme.text_dim
+                        })
+                        .child(card.status.as_word()),
                 ),
         );
 
         if open {
+            // Under the verb, the tool's own id names the row (DESIGN.md §5).
+            row = row.child(
+                div()
+                    .id(self.next_row_id())
+                    .text_size(px(11.0 * theme.density_scale()))
+                    .font_family("JetBrains Mono")
+                    .text_color(theme.text_dim)
+                    .child(card.name.clone()),
+            );
             if !card.input.is_empty() {
                 let (input, clipped) = clipped_output(&card.input);
                 row = row.child(self.render_tool_text(&input, theme, cx));
                 if clipped {
-                    row = row.child(self.render_terminal_path(cx));
+                    // The Terminal Lens holds the output, not the arguments.
+                    row = row.child(
+                        div()
+                            .id(self.next_row_id())
+                            .text_size(px(11.0 * theme.density_scale()))
+                            .text_color(theme.text_dim)
+                            .child("The arguments are longer than the chat shows."),
+                    );
                 }
             }
             if card.arguments_omitted {
@@ -876,6 +914,9 @@ impl ChatView {
             }
             if !lines.is_empty() {
                 row = row.child(self.render_diff(lines, theme));
+                if diff_clipped {
+                    row = row.child(self.render_terminal_path(cx));
+                }
             } else {
                 let (output, clipped) = clipped_output(&card.output);
                 if !output.is_empty() {
@@ -926,6 +967,7 @@ impl ChatView {
             // Terminal Lens.
             .overflow_x_hidden();
 
+        let mut links = 0usize;
         for line in lines_with_paths(text) {
             let mut row = div()
                 .id(self.next_row_id())
@@ -935,7 +977,9 @@ impl ChatView {
                 // A long line stays inside the panel.
                 .overflow_hidden();
             let mut cursor = 0;
-            for (range, path) in line.paths.iter().take(MAX_FILE_LINKS) {
+            // The link budget is for the whole card, not for one line.
+            let budget = MAX_FILE_LINKS.saturating_sub(links);
+            for (range, path) in line.paths.iter().take(budget) {
                 if range.start > cursor {
                     if let Some(before) = line.text.get(cursor..range.start) {
                         row = row.child(
@@ -959,6 +1003,7 @@ impl ChatView {
                             cx.notify();
                         })),
                 );
+                links += 1;
                 cursor = range.end;
             }
             if let Some(rest) = line.text.get(cursor..) {
@@ -1424,6 +1469,51 @@ let x = 1;
             cx.debug_bounds("chat-tool-output").is_some(),
             "a tool's work starts open"
         );
+    }
+
+    #[gpui::test]
+    fn a_tool_row_names_its_tool_and_its_state(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            chat.update(app, |view, _cx| {
+                view.apply_conversation(response(tool_turn(
+                    "{\"command\":\"ls\"}",
+                    "src\n",
+                    false,
+                )));
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("chat-tool-header").is_some(),
+            "the row has a header"
+        );
+        // The header says how the call ended, and the body names the tool.
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            let card = part_card(&ChatPart::Tool(crate::chat_entities::ToolPart {
+                name: "Bash".to_string(),
+                summary: "Bash: ls".to_string(),
+                input: "{}".to_string(),
+                output: "src\n".to_string(),
+                error: false,
+                arguments_omitted: false,
+                skill: None,
+                output_ref: None,
+                output_size: None,
+                images: Vec::new(),
+            }));
+            let PartCard::Tool(card) = card else {
+                panic!("a tool call is a tool card");
+            };
+            assert_eq!(card.status, ToolStatus::Done);
+            assert_eq!(card.status.as_word(), "Done");
+            assert_eq!(card.name, "Bash", "the body names the tool");
+            let _ = chat;
+        });
     }
 
     #[gpui::test]
