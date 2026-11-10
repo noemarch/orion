@@ -19,4 +19,5 @@ pub mod shell_model;
 pub mod sidebar;
 pub mod terminal;
 pub mod theme;
+pub mod tool_card;
 pub mod workspace;
