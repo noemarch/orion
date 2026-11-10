@@ -115,6 +115,20 @@ impl AgentStatus {
             Self::Error => "error",
         }
     }
+
+    /// The inverse of [`AgentStatus::as_wire`]. `None` is a status this
+    /// engine does not know, so each view decides its own fallback.
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw {
+            "idle" => Some(Self::Idle),
+            "working" => Some(Self::Working),
+            "blocked" => Some(Self::Blocked),
+            "done" => Some(Self::Done),
+            "unknown" => Some(Self::Unknown),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
 }
 
 /// Information about an installed and discovered agent CLI.
@@ -329,4 +343,24 @@ pub struct PushPayload {
     pub title: String,
     pub body: String,
     pub tag: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AgentStatus;
+
+    #[test]
+    fn agent_status_wire_names_round_trip() {
+        for status in [
+            AgentStatus::Idle,
+            AgentStatus::Working,
+            AgentStatus::Blocked,
+            AgentStatus::Done,
+            AgentStatus::Unknown,
+            AgentStatus::Error,
+        ] {
+            assert_eq!(AgentStatus::from_wire(status.as_wire()), Some(status));
+        }
+        assert_eq!(AgentStatus::from_wire("compacting"), None);
+    }
 }

@@ -166,10 +166,21 @@ impl Pane {
             .spawn(move || loop {
                 match watch_session.try_wait() {
                     Ok(Some(code)) => {
+                        let status = status_after_exit(code);
                         {
                             let mut state = watch_state.lock();
                             state.exit = Some(code);
+                            state.status = status;
+                            state.state_change_seq += 1;
+                            if status == AgentStatus::Done {
+                                state.completion_seq += 1;
+                            }
                         }
+                        watch_events(PaneEvent::Status {
+                            pane_id: watch_id.clone(),
+                            status,
+                            completion: status == AgentStatus::Done,
+                        });
                         watch_events(PaneEvent::Exited {
                             pane_id: watch_id.clone(),
                             code: Some(code),
@@ -631,6 +642,16 @@ fn update_status(
     });
 }
 
+/// A pane whose process ended is done when it exited cleanly and in error when
+/// it did not — the only state a PTY can report after its agent is gone.
+fn status_after_exit(code: i32) -> AgentStatus {
+    if code == 0 {
+        AgentStatus::Done
+    } else {
+        AgentStatus::Error
+    }
+}
+
 /// Encodes one logical key chord into the bytes a terminal receives.
 fn encode_key(key: &str) -> String {
     let mut ctrl = false;
@@ -772,6 +793,13 @@ mod tests {
         assert_eq!(encode_key("+"), "+");
         assert_eq!(encode_key("plus"), "+");
         assert_eq!(encode_key("space"), " ");
+    }
+
+    #[test]
+    fn an_exit_reports_done_only_after_a_clean_run() {
+        assert_eq!(status_after_exit(0), AgentStatus::Done);
+        assert_eq!(status_after_exit(1), AgentStatus::Error);
+        assert_eq!(status_after_exit(-1), AgentStatus::Error);
     }
 
     #[test]
