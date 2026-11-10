@@ -77,6 +77,9 @@ impl FileTree {
 
     /// Whether the 2s poll runs (the Changes lens is active).
     pub fn set_visible(&mut self, cx: &mut Context<Self>, visible: bool) {
+        if self.visible == visible {
+            return;
+        }
         self.visible = visible;
         let reader = self.file_reader.clone();
         reader.update(cx, |reader, _cx| reader.set_visible(visible));

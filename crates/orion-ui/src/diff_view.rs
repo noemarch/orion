@@ -160,6 +160,9 @@ impl ChangesView {
 
     /// Whether the 2s poll runs (the Changes lens is active).
     pub fn set_visible(&mut self, visible: bool) {
+        if self.visible == visible {
+            return;
+        }
         self.visible = visible;
         if visible {
             self.refresh();

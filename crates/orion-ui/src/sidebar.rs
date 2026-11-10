@@ -45,7 +45,22 @@ pub struct WorkspaceEntry {
     pub focused: bool,
     /// Pane to focus on click (the workspace's focused pane, else its first).
     pub focus_pane: Option<String>,
+    /// The workspace's first pane cwd, used to seed the New Workspace picker.
+    pub cwd: Option<String>,
 }
+
+/// Lifecycle requests the sidebar raises for the app to run through the
+/// Engine Route Table. Emitted as typed events so the app root re-renders
+/// immediately; the sidebar never owns the modal or a second copy of state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebarEvent {
+    NewWorkspace,
+    CloseWorkspace(String),
+    /// A click focused this pane; the app re-attaches its lens views.
+    PaneFocused(String),
+}
+
+impl gpui::EventEmitter<SidebarEvent> for WorkspaceSidebar {}
 
 /// One tab row (shown under its workspace; also what the app's tab strip
 /// reads from the snapshot).
@@ -53,9 +68,13 @@ pub struct WorkspaceEntry {
 pub struct TabEntry {
     pub id: String,
     pub label: String,
+    pub number: u32,
     pub status: AgentStatus,
     pub focused: bool,
+    /// Pane ids in the engine's tab order (not HashMap order).
     pub pane_ids: Vec<String>,
+    /// The pane the tab last had selected, when it is still open.
+    pub active_pane: Option<String>,
     pub layout: String,
 }
 
@@ -107,12 +126,15 @@ impl WorkspaceSidebar {
         self.snapshot.clone()
     }
 
-    /// Workspaces of the current snapshot, in engine order.
+    /// Workspaces of the current snapshot, in engine order. Each entry points
+    /// at its active tab's remembered pane, so a click restores the selection
+    /// the user left instead of an arbitrary pane.
     pub fn workspaces(&self) -> Vec<WorkspaceEntry> {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return Vec::new();
         };
         let panes = snapshot.get("panes").and_then(Value::as_array);
+        let snapshot_tabs = snapshot.get("tabs").and_then(Value::as_array);
         let focused_pane = snapshot.get("focused_pane_id");
         snapshot
             .get("workspaces")
@@ -126,29 +148,72 @@ impl WorkspaceSidebar {
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_string();
-                        let ws_panes: Vec<&Value> = panes
-                            .map(|p| {
-                                p.iter()
-                                    .filter(|p| {
-                                        p.get("workspace_id").and_then(Value::as_str)
+                        let ws_tabs: Vec<&Value> = snapshot_tabs
+                            .map(|tabs| {
+                                tabs.iter()
+                                    .filter(|tab| {
+                                        tab.get("workspace_id").and_then(Value::as_str)
                                             == Some(id.as_str())
                                     })
                                     .collect()
                             })
                             .unwrap_or_default();
-                        let focus_pane = ws_panes
-                            .iter()
-                            .find(|p| p.get("focused").and_then(Value::as_bool) == Some(true))
-                            .or_else(|| ws_panes.first())
-                            .and_then(|p| {
-                                p.get("pane_id").and_then(Value::as_str).map(str::to_string)
+                        let active_tab = ws
+                            .get("active_tab_id")
+                            .and_then(Value::as_str)
+                            .and_then(|active| {
+                                ws_tabs.iter().copied().find(|tab| {
+                                    tab.get("tab_id").and_then(Value::as_str) == Some(active)
+                                })
+                            })
+                            .or_else(|| ws_tabs.first().copied());
+                        let pane_ids = active_tab
+                            .map(|tab| ordered_pane_ids(tab, panes))
+                            .unwrap_or_default();
+                        let focus_pane = active_tab
+                            .and_then(|tab| {
+                                tab.get("active_pane_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                            })
+                            .filter(|pane_id| pane_ids.iter().any(|id| id == pane_id))
+                            .or_else(|| pane_ids.first().cloned())
+                            .or_else(|| {
+                                // Older snapshots only carried pane rows.
+                                panes.and_then(|panes| {
+                                    panes
+                                        .iter()
+                                        .filter(|pane| {
+                                            pane.get("workspace_id").and_then(Value::as_str)
+                                                == Some(id.as_str())
+                                        })
+                                        .find(|pane| {
+                                            pane.get("focused").and_then(Value::as_bool)
+                                                == Some(true)
+                                        })
+                                        .or_else(|| {
+                                            panes.iter().find(|pane| {
+                                                pane.get("workspace_id").and_then(Value::as_str)
+                                                    == Some(id.as_str())
+                                            })
+                                        })
+                                        .and_then(|pane| {
+                                            pane.get("pane_id")
+                                                .and_then(Value::as_str)
+                                                .map(str::to_string)
+                                        })
+                                })
                             })
                             .or_else(|| focused_pane.and_then(Value::as_str).map(str::to_string));
-                        let agent = ws_panes
-                            .first()
-                            .and_then(|p| p.get("agent").and_then(Value::as_str))
+                        let agent = focus_pane
+                            .as_deref()
+                            .and_then(|pane_id| pane_field(panes, pane_id, "agent"))
                             .unwrap_or("claude")
                             .to_string();
+                        let cwd = focus_pane
+                            .as_deref()
+                            .and_then(|pane_id| pane_field(panes, pane_id, "cwd"))
+                            .map(str::to_string);
                         WorkspaceEntry {
                             focused: ws.get("focused").and_then(Value::as_bool) == Some(true),
                             id,
@@ -159,6 +224,7 @@ impl WorkspaceSidebar {
                                 .to_string(),
                             agent,
                             status: parse_status(ws.get("agent_status").and_then(Value::as_str)),
+                            cwd,
                             focus_pane,
                         }
                     })
@@ -187,19 +253,13 @@ impl WorkspaceSidebar {
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_string();
-                        let pane_ids: Vec<String> = panes
-                            .map(|p| {
-                                p.iter()
-                                    .filter(|p| {
-                                        p.get("tab_id").and_then(Value::as_str)
-                                            == Some(tab_id.as_str())
-                                    })
-                                    .filter_map(|p| {
-                                        p.get("pane_id").and_then(Value::as_str).map(str::to_string)
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
+                        let pane_ids = ordered_pane_ids(tab, panes);
+                        let active_pane = tab
+                            .get("active_pane_id")
+                            .and_then(Value::as_str)
+                            .filter(|pane_id| pane_ids.iter().any(|id| id == pane_id))
+                            .map(str::to_string)
+                            .or_else(|| pane_ids.first().cloned());
                         TabEntry {
                             focused: tab.get("focused").and_then(Value::as_bool) == Some(true),
                             id: tab_id,
@@ -208,8 +268,10 @@ impl WorkspaceSidebar {
                                 .and_then(Value::as_str)
                                 .unwrap_or("Tab")
                                 .to_string(),
+                            number: tab.get("number").and_then(Value::as_u64).unwrap_or(1) as u32,
                             status: parse_status(tab.get("agent_status").and_then(Value::as_str)),
                             pane_ids,
+                            active_pane,
                             layout: tab
                                 .get("layout")
                                 .and_then(Value::as_str)
@@ -222,12 +284,14 @@ impl WorkspaceSidebar {
             .unwrap_or_default()
     }
 
-    /// Focus a pane through the wire seam (`POST /api/pane/focus`).
-    pub fn focus_pane(&self, pane_id: &str) {
+    /// Focus a pane through the wire seam (`POST /api/pane/focus`) and tell the
+    /// app so it re-attaches its lens views before the next poll.
+    pub fn focus_pane(&mut self, pane_id: &str) {
         if let Some(engine) = self.engine.clone() {
             let body = json!({ "pane_id": pane_id });
             let _ = engine.http("POST", "/api/pane/focus", &body);
         }
+        self.refresh();
     }
 
     pub fn refresh(&mut self) {
@@ -309,13 +373,42 @@ impl WorkspaceSidebar {
 }
 
 fn parse_status(raw: Option<&str>) -> AgentStatus {
-    match raw {
-        Some("working") => AgentStatus::Working,
-        Some("blocked") => AgentStatus::Blocked,
-        Some("done") => AgentStatus::Done,
-        Some("error") => AgentStatus::Error,
-        _ => AgentStatus::Idle,
+    raw.and_then(AgentStatus::from_wire)
+        .unwrap_or(AgentStatus::Idle)
+}
+
+/// The tab's pane ids in the engine's order. Snapshots carry `pane_ids`; older
+/// ones only had pane rows, so fall back to filtering those by tab id.
+fn ordered_pane_ids(tab: &Value, panes: Option<&Vec<Value>>) -> Vec<String> {
+    if let Some(ids) = tab.get("pane_ids").and_then(Value::as_array) {
+        return ids
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
     }
+    let tab_id = tab.get("tab_id").and_then(Value::as_str);
+    panes
+        .map(|panes| {
+            panes
+                .iter()
+                .filter(|pane| pane.get("tab_id").and_then(Value::as_str) == tab_id)
+                .filter_map(|pane| {
+                    pane.get("pane_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn pane_field<'a>(panes: Option<&'a Vec<Value>>, pane_id: &str, field: &str) -> Option<&'a str> {
+    panes?
+        .iter()
+        .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))?
+        .get(field)?
+        .as_str()
 }
 
 impl Render for WorkspaceSidebar {
@@ -349,6 +442,7 @@ impl Render for WorkspaceSidebar {
                     .to_ascii_uppercase()
                     .to_string();
                 let pane_id = ws.focus_pane.clone();
+                let ws_id = ws.id.clone();
                 let row = div()
                     .id(self.next_row_id())
                     .flex()
@@ -375,36 +469,65 @@ impl Render for WorkspaceSidebar {
                             .child(mark),
                     )
                     .child(
-                        StyledText::new(if self.rail {
-                            String::new()
-                        } else {
-                            ws.label.clone()
-                        })
-                        .with_default_highlights(
-                            &TextStyle {
-                                color: if is_chosen {
-                                    theme.text_strong.into()
-                                } else {
-                                    theme.text.into()
+                        div().flex_1().min_w(px(0.0)).overflow_hidden().child(
+                            StyledText::new(if self.rail {
+                                String::new()
+                            } else {
+                                ws.label.clone()
+                            })
+                            .with_default_highlights(
+                                &TextStyle {
+                                    color: if is_chosen {
+                                        theme.text_strong.into()
+                                    } else {
+                                        theme.text.into()
+                                    },
+                                    font_size: gpui::rems(0.875).into(),
+                                    ..Default::default()
                                 },
-                                font_size: gpui::rems(0.875).into(),
-                                ..Default::default()
-                            },
-                            [],
+                                [],
+                            ),
                         ),
                     )
                     .child(
-                        div().flex_1().flex().flex_row().justify_end().child(
-                            div()
-                                .size(px(8.0))
-                                .rounded_full()
-                                .bg(Self::status_color(ws.status, &theme, self.pulse_phase))
-                                .id(self.next_row_id()),
-                        ),
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_end()
+                            .gap(px(4.0 * scale))
+                            .child(if self.rail {
+                                div().id(self.next_row_id())
+                            } else {
+                                div()
+                                    .id(self.next_row_id())
+                                    .flex()
+                                    .size(px(20.0 * scale))
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .text_size(px(11.0 * scale))
+                                    .text_color(theme.text_dim)
+                                    .child("×")
+                                    .on_click(cx.listener(move |_this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(SidebarEvent::CloseWorkspace(ws_id.clone()));
+                                        cx.notify();
+                                    }))
+                            })
+                            .child(
+                                div()
+                                    .size(px(8.0))
+                                    .rounded_full()
+                                    .bg(Self::status_color(ws.status, &theme, self.pulse_phase))
+                                    .id(self.next_row_id()),
+                            ),
                     );
                 let row = if let Some(pane_id) = pane_id {
                     row.on_click(cx.listener(move |this, _, _, cx| {
                         this.focus_pane(&pane_id);
+                        cx.emit(SidebarEvent::PaneFocused(pane_id.clone()));
                         cx.notify();
                     }))
                 } else {
@@ -431,7 +554,26 @@ impl Render for WorkspaceSidebar {
                     .py_1()
                     .text_size(px(11.0 * scale))
                     .text_color(theme.text_dim)
-                    .child("WORKSPACES"),
+                    .child("WORKSPACES")
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("new-workspace-button")
+                            .flex()
+                            .size(px(24.0 * scale))
+                            .min_h(px(44.0))
+                            .min_w(px(44.0))
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(theme.surface_elevated)
+                            .text_color(theme.text)
+                            .child("+")
+                            .on_click(cx.listener(|_this, _, _, cx| {
+                                cx.emit(SidebarEvent::NewWorkspace);
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(list)
             .child(
@@ -491,34 +633,52 @@ impl Render for WorkspaceSidebar {
                                 div()
                                     .flex()
                                     .flex_col()
+                                    .flex_1()
+                                    .min_w(px(0.0))
                                     .child(
                                         div()
+                                            .truncate()
                                             .text_size(px(12.0 * scale))
                                             .text_color(theme.text)
                                             .child(agent.title.clone()),
                                     )
                                     .child(
                                         div()
+                                            .truncate()
                                             .text_size(px(11.0 * scale))
                                             .text_color(theme.text_dim)
                                             .child(agent.context.clone()),
                                     ),
                             )
                             .child(
-                                div().flex_1().flex().flex_row().justify_end().child(
-                                    div()
-                                        .size(px(8.0))
-                                        .rounded_full()
-                                        .bg(Self::status_color(
-                                            agent.status,
-                                            &theme,
-                                            self.pulse_phase,
-                                        ))
-                                        .id(self.next_row_id()),
-                                ),
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(6.0 * scale))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(10.0 * scale))
+                                            .text_color(theme.text_dim)
+                                            .child(agent.status_word()),
+                                    )
+                                    .child(
+                                        div()
+                                            .size(px(8.0))
+                                            .rounded_full()
+                                            .bg(Self::status_color(
+                                                agent.status,
+                                                &theme,
+                                                self.pulse_phase,
+                                            ))
+                                            .id(self.next_row_id()),
+                                    ),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.focus_pane(&pane_id);
+                                cx.emit(SidebarEvent::PaneFocused(pane_id.clone()));
                                 cx.notify();
                             }))
                     })),

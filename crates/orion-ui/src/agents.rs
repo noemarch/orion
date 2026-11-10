@@ -26,14 +26,8 @@ impl AgentRow {
 }
 
 fn parse_status(raw: Option<&str>) -> AgentStatus {
-    match raw {
-        Some("working") => AgentStatus::Working,
-        Some("blocked") => AgentStatus::Blocked,
-        Some("done") => AgentStatus::Done,
-        Some("error") => AgentStatus::Error,
-        Some("idle") => AgentStatus::Idle,
-        _ => AgentStatus::Unknown,
-    }
+    raw.and_then(AgentStatus::from_wire)
+        .unwrap_or(AgentStatus::Unknown)
 }
 
 fn str_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
@@ -67,24 +61,11 @@ pub fn agent_rows(snapshot: &Value) -> Vec<AgentRow> {
                 .and_then(|rows| rows.iter().find(|t| str_field(t, "tab_id") == tab_id))
                 .and_then(|t| str_field(t, "label"));
             let status = parse_status(pane.get("agent_status").and_then(Value::as_str));
-            let status_word = match status {
-                AgentStatus::Working => "Working",
-                AgentStatus::Blocked => "Waiting",
-                AgentStatus::Done => "Done",
-                AgentStatus::Error => "Error",
-                AgentStatus::Idle => "Idle",
-                AgentStatus::Unknown => "Unknown",
-            };
-            let context = [
-                workspace_label,
-                tab_label,
-                str_field(pane, "cwd"),
-                Some(status_word),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" · ");
+            let context = [workspace_label, tab_label, str_field(pane, "cwd")]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
             Some(AgentRow {
                 selected: focused_pane_id == Some(pane_id.as_str()),
                 status,
@@ -109,7 +90,10 @@ mod tests {
         });
         let rows = agent_rows(&snapshot);
         assert_eq!(rows[0].status_word(), "Working");
-        assert!(rows[0].context.contains("Working"));
+        assert!(
+            !rows[0].context.contains("Working"),
+            "the status is written by its own label, not repeated in the context"
+        );
     }
 
     #[test]

@@ -109,7 +109,20 @@ impl TerminalPane {
     }
 
     /// Attach the live pane this view drives (set once the engine spawns it).
+    /// Switching panes clears the grid so the replay of the new pane is not
+    /// drawn over the previous pane's scrollback.
     pub fn set_pane(&mut self, pane: Arc<Pane>) {
+        let changed = self
+            .pane
+            .as_ref()
+            .is_none_or(|current| current.id != pane.id);
+        if changed {
+            self.screen = ScreenState::new(self.last_rows, self.last_cols);
+            self.find_matches.clear();
+            self.find_current = None;
+            self.sel_anchor = None;
+            self.sel_cursor = None;
+        }
         self.pane = Some(pane);
     }
     /// Drive the key bar from saved settings (P4: replaces the static bar

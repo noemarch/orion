@@ -2,25 +2,28 @@
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, App, Application, Context, Entity, Render, Size, Window, WindowBounds, WindowOptions,
+    div, px, App, Application, Context, Entity, Render, Size, Subscription, Window, WindowBounds,
+    WindowOptions,
 };
-use orion_core::{AgentKind, Engine, FrameSink, LaunchSpec, PaneConfig, Role, TerminalSize};
+use orion_core::{Engine, FrameSink, Role};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::chat::ChatView;
 use crate::diff_view::ChangesView;
 use crate::files_view::FileTree;
+use crate::new_workspace::{recent_directory, NewWorkspaceEvent, NewWorkspaceModal};
 use crate::settings::{KeyBarExtras, SettingsModal};
-use crate::shell_model::{lens_segment_state, HeaderModel, ShellLayout};
+use crate::shell_model::{lens_segment_state, HeaderModel, LensBook, ShellLayout};
+use crate::sidebar::SidebarEvent;
 use crate::terminal::TerminalPane;
 use crate::theme::Theme;
 use crate::workspace::WorkspaceSidebar;
 
 /// The lenses over the same pane: chat-first by default, terminal one click away,
 /// changes one click away like the terminal.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lens {
     Chat,
     Terminal,
@@ -34,24 +37,37 @@ pub struct OrionApp {
     file_tree: Entity<FileTree>,
     changes_view: Entity<ChangesView>,
     settings: Entity<SettingsModal>,
+    new_workspace: Entity<NewWorkspaceModal>,
     engine: Arc<Engine>,
-    lens: Lens,
+    lens_book: LensBook,
+    /// The pane whose lens is active; the switcher writes here.
+    focused_pane: Option<String>,
+    /// The pane currently attached to the main lens views.
+    attached_pane: Option<String>,
+    /// Increments per attach so an old PTY pump stops feeding a replaced pane.
+    attach_generation: Arc<AtomicU64>,
     editing_tab: Option<(String, String)>,
     split_chat_view: Entity<ChatView>,
     split_terminal_pane: Entity<TerminalPane>,
     split_attached_pane: Option<String>,
     split_file_tree: Entity<FileTree>,
     split_changes_view: Entity<ChangesView>,
+    subscriptions: Vec<Subscription>,
+    /// Keyboard focus for the shell chrome (tab rename).
+    focus_handle: gpui::FocusHandle,
+    /// The last lifecycle command that failed, shown as one plain sentence.
+    notice: Option<String>,
 }
 
 impl OrionApp {
-    pub fn new(cx: &mut App) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         let workspace_sidebar = cx.new(WorkspaceSidebar::new);
         let terminal_pane = cx.new(TerminalPane::new);
         let chat_view = cx.new(ChatView::new);
         let file_tree = cx.new(FileTree::new);
         let changes_view = cx.new(ChangesView::new);
         let settings = cx.new(SettingsModal::new);
+        let new_workspace = cx.new(NewWorkspaceModal::new);
         let split_chat_view = cx.new(ChatView::new);
         let split_terminal_pane = cx.new(TerminalPane::new);
         let split_file_tree = cx.new(FileTree::new);
@@ -65,113 +81,194 @@ impl OrionApp {
             file_tree,
             changes_view,
             settings,
+            new_workspace,
             engine,
-            lens: Lens::Chat,
+            lens_book: LensBook::new(),
+            focused_pane: None,
+            attached_pane: None,
+            attach_generation: Arc::new(AtomicU64::new(0)),
             editing_tab: None,
             split_chat_view,
             split_terminal_pane,
             split_attached_pane: None,
             split_file_tree,
             split_changes_view,
+            subscriptions: Vec::new(),
+            focus_handle: cx.focus_handle(),
+            notice: None,
         };
 
-        app.spawn_initial_pane(cx);
+        // Lifecycle clicks are events, so the shell re-renders at once instead
+        // of waiting for the next sidebar poll.
+        let sidebar_events = app.workspace_sidebar.clone();
+        let modal_events = app.new_workspace.clone();
+        let sidebar_sub = cx.subscribe(&sidebar_events, |this, _, event: &SidebarEvent, cx| {
+            match event {
+                SidebarEvent::NewWorkspace => this.open_new_workspace(cx),
+                SidebarEvent::CloseWorkspace(workspace_id) => {
+                    this.call_route(
+                        "/api/workspace/close",
+                        &json!({ "workspace_id": workspace_id }),
+                    );
+                    this.workspace_sidebar
+                        .update(cx, |view, _cx| view.refresh());
+                }
+                SidebarEvent::PaneFocused(pane_id) => {
+                    this.focused_pane = Some(pane_id.clone());
+                    this.attach_pane(cx, pane_id);
+                }
+            }
+            cx.notify();
+        });
+        let modal_sub = cx.subscribe(&modal_events, |this, _, event: &NewWorkspaceEvent, cx| {
+            let NewWorkspaceEvent::Created(pane_id) = event;
+            this.workspace_sidebar
+                .update(cx, |view, _cx| view.refresh());
+            this.focused_pane = Some(pane_id.clone());
+            this.attach_pane(cx, pane_id);
+            cx.notify();
+        });
+        app.subscriptions = vec![sidebar_sub, modal_sub];
+
+        app.start_session(cx);
         app
     }
 
-    fn spawn_initial_pane(&mut self, cx: &mut App) {
-        let terminal_pane = self.terminal_pane.clone();
-        let chat_view = self.chat_view.clone();
-        let file_tree = self.file_tree.clone();
-        let changes_view = self.changes_view.clone();
-        let workspace_sidebar = self.workspace_sidebar.clone();
-        let settings = self.settings.clone();
+    /// Attach the singletons, restore the saved session, and otherwise open a
+    /// default workspace through the Route Table.
+    fn start_session(&mut self, cx: &mut App) {
+        let engine = Arc::clone(&self.engine);
+        self.workspace_sidebar
+            .update(cx, |view, _cx| view.attach(Arc::clone(&engine)));
+        self.settings
+            .update(cx, |view, _cx| view.attach(Arc::clone(&engine)));
+        self.new_workspace
+            .update(cx, |view, _cx| view.attach(Arc::clone(&engine)));
+
+        // Put the user back where they were before starting a fresh agent.
+        self.engine.restore();
+        self.workspace_sidebar
+            .update(cx, |view, _cx| view.refresh());
+
+        let snapshot = self.engine.snapshot_value();
+        let first_pane = snapshot
+            .get("panes")
+            .and_then(Value::as_array)
+            .and_then(|panes| panes.first())
+            .and_then(|pane| pane.get("pane_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let focused = snapshot
+            .get("focused_pane_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or(first_pane);
+        if let Some(pane_id) = focused {
+            self.attach_pane(cx, &pane_id);
+        } else {
+            self.open_default_workspace(cx);
+        }
+    }
+
+    /// First run: open the current folder with Claude through
+    /// `POST /api/workspace/create`. If the agent is missing the shell stays in
+    /// its empty state and the New Workspace flow is the way in.
+    fn open_default_workspace(&mut self, cx: &mut App) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let body = json!({ "cwd": cwd.to_string_lossy(), "agent": { "kind": "claude" } });
+        let response = self.call_route("/api/workspace/create", &body);
+        self.workspace_sidebar
+            .update(cx, |view, _cx| view.refresh());
+        let Some(response) = response else {
+            return;
+        };
+        if let Some(pane_id) = response
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            self.attach_pane(cx, &pane_id);
+        }
+    }
+
+    /// Point every lens at one pane and start its PTY pump. Re-attaching is
+    /// cheap and keeps workspace/tab switches showing the active pane.
+    fn attach_pane(&mut self, cx: &mut App, pane_id: &str) {
+        if self.attached_pane.as_deref() == Some(pane_id) {
+            return;
+        }
+        let Some(pane) = self.engine.pane_by_id(pane_id) else {
+            return;
+        };
+        // Stop streaming the pane we are leaving; its pump also stops on the
+        // generation check below.
+        if let Some(previous) = self.attached_pane.take() {
+            if let Some(previous_pane) = self.engine.pane_by_id(&previous) {
+                previous_pane.detach("gpu-terminal");
+            }
+        }
         let engine = Arc::clone(&self.engine);
 
-        cx.spawn(async move |cx| {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let spec = LaunchSpec::for_agent(
-                AgentKind::Claude,
-                &[
-                    "--permission-mode".to_string(),
-                    "bypassPermissions".to_string(),
-                ],
-                None,
-                false,
-            )
-            .expect("valid launch spec");
-
-            let config = PaneConfig {
-                id: "pane-1".to_string(),
-                workspace_id: "ws-1".to_string(),
-                tab_id: "tab-1".to_string(),
-                agent: AgentKind::Claude,
-                label: "Claude".to_string(),
-                cwd: cwd.clone(),
-                spec,
-                args: vec![
-                    "--permission-mode".to_string(),
-                    "bypassPermissions".to_string(),
-                ],
-                size: TerminalSize {
-                    rows: 32,
-                    cols: 120,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                },
-            };
-
-            let pane = engine.spawn_pane(config).expect("pane spawn");
-
-            // The attach sink runs on the PTY reader thread, so it can only push into a
-            // channel; the async task below drains that channel, feeds the grid, and
-            // notifies the view so GPUI repaints.
-            let (pty_tx, pty_rx) = flume::unbounded::<String>();
-            let sink: FrameSink = Arc::new(move |frame: Value| {
-                if frame["type"] == "pty-data" {
-                    if let Some(data) = frame["data"].as_str() {
-                        let _ = pty_tx.send(data.to_string());
-                    }
+        // The attach sink runs on the PTY reader thread, so it can only push
+        // into a channel; the async task below drains that channel, feeds the
+        // grid, and notifies the view so GPUI repaints.
+        let (pty_tx, pty_rx) = flume::unbounded::<String>();
+        let sink: FrameSink = Arc::new(move |frame: Value| {
+            if frame["type"] == "pty-data" {
+                if let Some(data) = frame["data"].as_str() {
+                    let _ = pty_tx.send(data.to_string());
                 }
-            });
+            }
+        });
+        if pane
+            .attach("gpu-terminal", sink, Role::Interact, 120, 32, false)
+            .is_err()
+        {
+            return;
+        }
+        self.attached_pane = Some(pane_id.to_string());
 
-            pane.attach("gpu-terminal", sink, Role::Interact, 120, 32, false)
-                .expect("attach");
+        self.terminal_pane.update(cx, |view, cx| {
+            view.set_pane(Arc::clone(&pane));
+            cx.notify();
+        });
+        // The chat lens shares the same pane: conversation fetches go through
+        // the wire seam, prompt answers go straight to the in-process pane.
+        self.chat_view.update(cx, |view, _cx| {
+            view.attach(Arc::clone(&engine), Arc::clone(&pane), pane_id.to_string());
+        });
+        // The Changes lens shares the same pane: the file tree starts at
+        // the pane's cwd, the diff runs from the pane's repository.
+        self.file_tree.update(cx, |view, cx| {
+            view.attach(
+                cx,
+                Arc::clone(&engine),
+                Arc::clone(&pane),
+                pane_id.to_string(),
+            );
+        });
+        self.changes_view.update(cx, |view, _cx| {
+            view.attach(Arc::clone(&engine), Arc::clone(&pane), pane_id.to_string());
+        });
 
-            let pane_id = pane.id.clone();
-            let _ = cx.update(|cx| {
-                terminal_pane.update(cx, |view, cx| {
-                    view.set_pane(Arc::clone(&pane));
-                    cx.notify();
-                });
-                // The chat lens shares the same pane: conversation fetches go through
-                // the wire seam, prompt answers go straight to the in-process pane.
-                chat_view.update(cx, |view, _cx| {
-                    view.attach(Arc::clone(&engine), Arc::clone(&pane), pane_id.clone());
-                });
-                // The Changes lens shares the same pane: the file tree starts at
-                // the pane's cwd, the diff runs from the pane's repository.
-                file_tree.update(cx, |view, cx| {
-                    view.attach(cx, Arc::clone(&engine), Arc::clone(&pane), pane_id.clone());
-                });
-                changes_view.update(cx, |view, _cx| {
-                    view.attach(Arc::clone(&engine), Arc::clone(&pane), pane_id.clone());
-                });
-                workspace_sidebar.update(cx, |view, _cx| {
-                    view.attach(Arc::clone(&engine));
-                });
-                settings.update(cx, |view, _cx| {
-                    view.attach(Arc::clone(&engine));
-                });
-            });
-
+        let generation = Arc::clone(&self.attach_generation);
+        let mine = generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let terminal_pane = self.terminal_pane.clone();
+        cx.spawn(async move |cx| {
             while let Ok(first) = pty_rx.recv_async().await {
-                // If the app is gone, there is nothing to repaint.
+                // A newer attach owns the view now; stop feeding it.
+                if generation.load(Ordering::SeqCst) != mine {
+                    break;
+                }
+                let generation = Arc::clone(&generation);
                 let _ = cx.update(|cx| {
-                    terminal_pane.update(cx, |pane, cx| {
-                        pane.feed(&first);
+                    if generation.load(Ordering::SeqCst) != mine {
+                        return;
+                    }
+                    terminal_pane.update(cx, |view, cx| {
+                        view.feed(&first);
                         while let Ok(more) = pty_rx.try_recv() {
-                            pane.feed(&more);
+                            view.feed(&more);
                         }
                         cx.notify();
                     });
@@ -182,7 +279,104 @@ impl OrionApp {
     }
 
     fn set_lens(&mut self, lens: Lens) {
-        self.lens = lens;
+        self.lens_book.set(self.focused_pane.as_deref(), lens);
+    }
+
+    /// Runs one lifecycle command through the Route Table. A failure becomes
+    /// the shell's one-line notice instead of a silent no-op.
+    fn call_route(&mut self, path: &str, body: &Value) -> Option<Value> {
+        let (status, answer) = self.engine.http("POST", path, body);
+        if status == 200 {
+            self.notice = None;
+            return Some(answer);
+        }
+        self.notice = Some(crate::new_workspace::error_message(
+            &answer,
+            "That action could not be completed.",
+        ));
+        None
+    }
+
+    /// Typing while a tab label is being edited renames it through
+    /// `POST /api/tab/rename`; Escape cancels.
+    fn handle_editing_key(&mut self, ev: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        let Some((tab_id, text)) = self.editing_tab.clone() else {
+            return;
+        };
+        let mut draft = text;
+        let modifiers = &ev.keystroke.modifiers;
+        let command_modifier = modifiers.control || modifiers.alt || modifiers.platform;
+        match crate::shell_model::apply_text_key(
+            &mut draft,
+            &ev.keystroke.key,
+            ev.keystroke.key_char.as_deref(),
+            command_modifier,
+        ) {
+            crate::shell_model::TextEdit::Cancel => {
+                self.editing_tab = None;
+            }
+            crate::shell_model::TextEdit::Commit => {
+                let label = draft.trim().to_string();
+                if !label.is_empty() {
+                    self.call_route(
+                        "/api/tab/rename",
+                        &json!({ "tab_id": tab_id, "label": label }),
+                    );
+                    self.workspace_sidebar
+                        .update(cx, |view, _cx| view.refresh());
+                }
+                self.editing_tab = None;
+            }
+            crate::shell_model::TextEdit::Changed => {
+                self.editing_tab = Some((tab_id, draft));
+            }
+            crate::shell_model::TextEdit::Ignored => return,
+        }
+        cx.notify();
+    }
+
+    fn current_lens(&self) -> Lens {
+        self.lens_book.lens_for(self.focused_pane.as_deref())
+    }
+
+    /// Seed the New Workspace picker from the most recent folder.
+    fn open_new_workspace(&mut self, cx: &mut App) {
+        let (focused_cwd, any_cwd) = self.workspace_sidebar.update(cx, |view, _cx| {
+            let workspaces = view.workspaces();
+            let focused = workspaces
+                .iter()
+                .find(|workspace| workspace.focused)
+                .or_else(|| workspaces.first());
+            (
+                focused.and_then(|workspace| workspace.cwd.clone()),
+                workspaces
+                    .iter()
+                    .find_map(|workspace| workspace.cwd.clone()),
+            )
+        });
+        let (status, body) = self.engine.http("GET", "/api/preferences", &Value::Null);
+        let explicit = if status == 200 {
+            body.get("settings")
+                .and_then(|settings| settings.get("recentDirectory"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        } else {
+            None
+        };
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_default();
+        let start = recent_directory(
+            explicit.as_deref(),
+            focused_cwd.as_deref(),
+            any_cwd.as_deref(),
+            &home,
+        );
+        let start = if start.is_empty() { None } else { Some(start) };
+        self.new_workspace.update(cx, |view, cx| {
+            view.open_at(start);
+            cx.notify();
+        });
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -196,7 +390,7 @@ impl OrionApp {
                 .or_else(|| workspaces.first());
             if let Some(ws) = focused {
                 HeaderModel {
-                    title: "Orbit".to_string(),
+                    title: "Orion".to_string(),
                     workspace: ws.label.clone(),
                     connection: "Live".to_string(),
                 }
@@ -256,8 +450,8 @@ impl OrionApp {
 
     fn render_lens_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
-        let (chat_active, terminal_active, changes_active) = lens_segment_state(self.lens);
-        let engine = self.engine.clone();
+        let (chat_active, terminal_active, changes_active) =
+            lens_segment_state(self.current_lens());
         let focused_pane_id = self.workspace_sidebar.update(cx, |view, _cx| {
             view.snapshot().and_then(|s| {
                 s.get("focused_pane_id")
@@ -265,11 +459,9 @@ impl OrionApp {
                     .map(str::to_string)
             })
         });
-        let engine_zoom = engine.clone();
         let focused_pane_id_zoom = focused_pane_id.clone();
         div()
             .id("lens-toggle")
-            .flex()
             .flex()
             .flex_row()
             .items_center()
@@ -341,10 +533,9 @@ impl OrionApp {
                     .bg(theme.surface_elevated)
                     .text_color(theme.text)
                     .child("Zoom")
-                    .on_click(cx.listener(move |_this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(pane_id) = focused_pane_id_zoom.clone() {
-                            let _ = engine_zoom.http(
-                                "POST",
+                            this.call_route(
                                 "/api/pane/zoom",
                                 &json!({ "pane_id": pane_id, "mode": "toggle" }),
                             );
@@ -361,14 +552,12 @@ impl OrionApp {
                     .bg(theme.surface_elevated)
                     .text_color(theme.text)
                     .child("Close")
-                    .on_click(cx.listener(move |_this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(pane_id) = focused_pane_id.clone() {
-                            let _ = engine.http(
-                                "POST",
-                                "/api/pane/close",
-                                &json!({ "pane_id": pane_id }),
-                            );
+                            this.call_route("/api/pane/close", &json!({ "pane_id": pane_id }));
                         }
+                        this.workspace_sidebar
+                            .update(cx, |view, _cx| view.refresh());
                         cx.notify();
                     })),
             )
@@ -399,22 +588,23 @@ impl OrionApp {
     fn render_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         let sidebar = self.workspace_sidebar.clone();
-        let (tabs, ws_id) = sidebar.update(cx, |view, _cx| {
+        let (tabs, ws_id, ws_agent) = sidebar.update(cx, |view, _cx| {
             let workspaces = view.workspaces();
             let focused = workspaces
                 .iter()
                 .find(|w| w.focused)
                 .or_else(|| workspaces.first());
-            let tabs = focused.map(|ws| view.tabs(&ws.id)).unwrap_or_default();
-            let ws_id = focused.map(|ws| ws.id.clone()).unwrap_or_default();
-            (tabs, ws_id)
+            focused
+                .map(|ws| (view.tabs(&ws.id), ws.id.clone(), ws.agent.clone()))
+                .unwrap_or_default()
         });
         let scale = theme.density_scale();
-        let engine = self.engine.clone();
         let ws_id_for_new = ws_id.clone();
+        let ws_agent_for_new = ws_agent.clone();
+        let next_tab_number = tabs.iter().map(|tab| tab.number).max().unwrap_or(0) + 1;
+        let new_tab_label = format!("Tab {next_tab_number}");
         div()
             .id("tab-strip")
-            .flex()
             .flex()
             .flex_row()
             .items_center()
@@ -424,24 +614,26 @@ impl OrionApp {
             .bg(theme.surface_panel)
             .children(tabs.iter().map(|tab| {
                 let is_active = tab.focused;
-                let pane_id = tab.pane_ids.first().cloned();
+                let pane_id = tab
+                    .active_pane
+                    .clone()
+                    .or_else(|| tab.pane_ids.first().cloned());
                 let pane_id_for_split = pane_id.clone();
-                let engine_split = engine.clone();
                 let tab_id = tab.id.clone();
                 let tab_id_for_edit = tab_id.clone();
                 let tab_label_for_edit = tab.label.clone();
-                let tab_id_for_key = tab_id.clone();
-                let engine_close = engine.clone();
-                let engine_rename = engine.clone();
                 let editing = self
                     .editing_tab
                     .as_ref()
                     .is_some_and(|(id, _)| id == &tab_id);
                 let edit_text = if editing {
-                    self.editing_tab
+                    let draft = self
+                        .editing_tab
                         .as_ref()
                         .map(|(_, text)| text.clone())
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    // A visible caret marks the inline rename mode.
+                    format!("{draft}▏")
                 } else {
                     tab.label.clone()
                 };
@@ -466,39 +658,6 @@ impl OrionApp {
                     })
                     .text_size(px(12.0 * scale))
                     .child(edit_text)
-                    .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, _, cx| {
-                        let Some((editing_id, text)) = this.editing_tab.as_mut() else {
-                            return;
-                        };
-                        if editing_id != &tab_id_for_key {
-                            return;
-                        }
-                        if ev.keystroke.key == "escape" {
-                            this.editing_tab = None;
-                            cx.notify();
-                            return;
-                        }
-                        if ev.keystroke.key == "enter" {
-                            let label = text.clone();
-                            let _ = engine_rename.http(
-                                "POST",
-                                "/api/tab/rename",
-                                &json!({ "tab_id": tab_id_for_key, "label": label }),
-                            );
-                            this.editing_tab = None;
-                            cx.notify();
-                            return;
-                        }
-                        if ev.keystroke.key == "backspace" {
-                            text.pop();
-                            cx.notify();
-                            return;
-                        }
-                        if let Some(ch) = ev.keystroke.key_char.clone() {
-                            text.push_str(&ch);
-                            cx.notify();
-                        }
-                    }))
                     .child(
                         div()
                             .id(self.next_row_id())
@@ -506,9 +665,11 @@ impl OrionApp {
                             .text_size(px(12.0 * scale))
                             .text_color(theme.text_dim)
                             .child("✎")
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
                                 this.editing_tab =
                                     Some((tab_id_for_edit.clone(), tab_label_for_edit.clone()));
+                                this.focus_handle.focus(window);
                                 cx.notify();
                             })),
                     )
@@ -519,16 +680,18 @@ impl OrionApp {
                             .text_size(px(12.0 * scale))
                             .text_color(theme.text_dim)
                             .child("◫")
-                            .on_click(cx.listener(move |_this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
                                 if let Some(pane_id) = pane_id_for_split.clone() {
-                                    let _ = engine_split.http(
-                                        "POST",
+                                    this.call_route(
                                         "/api/pane/split",
                                         &json!({
                                             "pane_id": pane_id,
                                             "direction": "right",
                                         }),
                                     );
+                                    this.workspace_sidebar
+                                        .update(cx, |view, _cx| view.refresh());
                                 }
                                 cx.notify();
                             })),
@@ -540,12 +703,11 @@ impl OrionApp {
                             .text_size(px(12.0 * scale))
                             .text_color(theme.text_dim)
                             .child("×")
-                            .on_click(cx.listener(move |_this, _, _, cx| {
-                                let _ = engine_close.http(
-                                    "POST",
-                                    "/api/tab/close",
-                                    &json!({ "tab_id": tab_id }),
-                                );
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.call_route("/api/tab/close", &json!({ "tab_id": tab_id }));
+                                this.workspace_sidebar
+                                    .update(cx, |view, _cx| view.refresh());
                                 cx.notify();
                             })),
                     );
@@ -569,16 +731,17 @@ impl OrionApp {
                     .text_color(theme.text)
                     .text_size(px(12.0 * scale))
                     .child("+")
-                    .on_click(cx.listener(move |_this, _, _, cx| {
-                        let _ = engine.http(
-                            "POST",
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.call_route(
                             "/api/tab/create",
                             &json!({
                                 "workspace_id": ws_id_for_new,
-                                "agent": { "kind": "claude" },
-                                "label": "Claude",
+                                "agent": { "kind": ws_agent_for_new },
+                                "label": new_tab_label,
                             }),
                         );
+                        this.workspace_sidebar
+                            .update(cx, |view, _cx| view.refresh());
                         cx.notify();
                     })),
             )
@@ -601,9 +764,44 @@ impl Render for OrionApp {
         let sidebar_w = layout.sidebar_width_px;
         self.workspace_sidebar
             .update(cx, |view, _cx| view.set_rail(layout.rail));
+
+        // Follow the pane the session now focuses (workspace/tab switch,
+        // create, close). Lifecycle clicks arrive as events above.
+        let (focused_pane, live_panes) = self.workspace_sidebar.update(cx, |view, _cx| {
+            let snapshot = view.snapshot();
+            let focused = snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .get("focused_pane_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+            let live = snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.get("panes"))
+                .and_then(Value::as_array)
+                .map(|panes| {
+                    panes
+                        .iter()
+                        .filter_map(|pane| {
+                            pane.get("pane_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (focused, live)
+        });
+        // Panes that left the Session do not keep a lens choice alive.
+        self.lens_book.retain_panes(&live_panes);
+        self.focused_pane = focused_pane;
+        if let Some(pane_id) = self.focused_pane.clone() {
+            self.attach_pane(cx, &pane_id);
+        }
+
         // The Changes lens' 2s polls run only while it is active; views are
         // preserved between lens switches (entities stay mounted above).
-        let changes_active = self.lens == Lens::Changes;
+        let changes_active = self.current_lens() == Lens::Changes;
         self.file_tree
             .update(cx, |view, cx| view.set_visible(cx, changes_active));
         self.changes_view
@@ -634,6 +832,27 @@ impl Render for OrionApp {
                 _ => Vec::new(),
             }
         });
+        // The split canvas always shows the pane the main canvas is not:
+        // otherwise focusing the second pane paints it twice.
+        let split_second = if split_panes.len() >= 2 {
+            split_panes
+                .iter()
+                .find(|pane_id| Some(pane_id.as_str()) != self.focused_pane.as_deref())
+                .cloned()
+                .or_else(|| split_panes.get(1).cloned())
+        } else {
+            None
+        };
+        if split_second.is_none() {
+            self.split_attached_pane = None;
+        }
+        let split_changes_active = split_second
+            .as_deref()
+            .is_some_and(|pane_id| self.lens_book.lens_for(Some(pane_id)) == Lens::Changes);
+        self.split_file_tree
+            .update(cx, |view, cx| view.set_visible(cx, split_changes_active));
+        self.split_changes_view
+            .update(cx, |view, _cx| view.set_visible(split_changes_active));
         let lens_body = if !has_workspaces {
             div()
                 .id("main-content")
@@ -655,8 +874,22 @@ impl Render for OrionApp {
                         .text_color(Theme::current().text_dim)
                         .child("Open a workspace to begin."),
                 )
+                .child(
+                    div()
+                        .id("empty-new-workspace")
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .bg(Theme::current().primary)
+                        .text_color(Theme::current().primary_text)
+                        .child("New Workspace")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_new_workspace(cx);
+                            cx.notify();
+                        })),
+                )
         } else {
-            let inner = match self.lens {
+            let inner = match self.current_lens() {
                 Lens::Chat => {
                     if let Some(card) = self
                         .chat_view
@@ -706,10 +939,7 @@ impl Render for OrionApp {
                             .child(self.changes_view.clone()),
                     ),
             };
-            if split_panes.is_empty() {
-                inner
-            } else {
-                let second_id = split_panes[1].clone();
+            if let Some(second_id) = split_second.clone() {
                 if self.split_attached_pane.as_deref() != Some(second_id.as_str()) {
                     self.split_attached_pane = Some(second_id.clone());
                     if let Some(second_pane) = self.engine.pane_by_id(&second_id) {
@@ -729,7 +959,6 @@ impl Render for OrionApp {
                                 Arc::clone(&second_pane),
                                 second_id.clone(),
                             );
-                            view.set_visible(cx, true);
                         });
                         self.split_changes_view.update(cx, |view, _cx| {
                             view.attach(
@@ -737,11 +966,10 @@ impl Render for OrionApp {
                                 Arc::clone(&second_pane),
                                 second_id.clone(),
                             );
-                            view.set_visible(true);
                         });
                     }
                 }
-                let second_body = match self.lens {
+                let second_body = match self.lens_book.lens_for(Some(second_id.as_str())) {
                     Lens::Chat => div()
                         .id("pane-split-second-chat")
                         .flex()
@@ -783,18 +1011,23 @@ impl Render for OrionApp {
                     .flex_1()
                     .child(inner)
                     .child(second_body)
+            } else {
+                inner
             }
         };
+        let notice = self.notice.clone();
         div()
             .id("app")
             .flex()
-            .flex()
             .flex_row()
             .size_full()
+            .track_focus(&self.focus_handle)
+            .on_key_down(
+                cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| this.handle_editing_key(ev, cx)),
+            )
             .child(
                 div()
                     .id("sidebar")
-                    .flex()
                     .flex()
                     .flex_col()
                     .w(px(sidebar_w))
@@ -804,13 +1037,26 @@ impl Render for OrionApp {
                 div()
                     .id("main-column")
                     .flex()
-                    .flex()
                     .flex_col()
                     .flex_1()
                     .min_w(px(0.0))
                     .child(self.render_header(cx))
-                    .child(self.render_lens_toggle(cx))
-                    .child(self.render_tab_strip(cx))
+                    // The tab strip and lens switcher act on a selected pane;
+                    // with no workspace they would be dead chrome.
+                    .children(
+                        has_workspaces.then(|| self.render_lens_toggle(cx).into_any_element()),
+                    )
+                    .children(has_workspaces.then(|| self.render_tab_strip(cx).into_any_element()))
+                    .children(notice.map(|message| {
+                        div()
+                            .id("command-notice")
+                            .px_3()
+                            .py_1()
+                            .text_size(px(11.0))
+                            .text_color(Theme::current().indicator_blocked)
+                            .child(message)
+                            .into_any_element()
+                    }))
                     .child(lens_body),
             )
             .child(if self.settings.update(cx, |view, _cx| view.is_open()) {
@@ -822,6 +1068,17 @@ impl Render for OrionApp {
             } else {
                 div().id("no-modal")
             })
+            .child(
+                if self.new_workspace.update(cx, |view, _cx| view.is_open()) {
+                    div()
+                        .id("new-workspace-host")
+                        .absolute()
+                        .inset_0()
+                        .child(self.new_workspace.clone())
+                } else {
+                    div().id("no-new-workspace-modal")
+                },
+            )
     }
 }
 
@@ -833,7 +1090,7 @@ pub fn run() {
                 window_bounds: Some(WindowBounds::centered(Size::new(px(1280.0), px(800.0)), cx)),
                 ..Default::default()
             },
-            |_window, cx| cx.new(|cx| OrionApp::new(cx)),
+            |_window, cx| cx.new(OrionApp::new),
         )
         .unwrap();
     });
