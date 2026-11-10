@@ -95,6 +95,29 @@ impl ScreenState {
         })
     }
 
+    /// The rows the pane shows when its viewport sits `offset_from_bottom` rows above the live
+    /// bottom: the scrollback just above the live screen, then the live screen itself. Cheap
+    /// enough for a per-frame draw: it offsets the parser for the read, then restores the live
+    /// bottom, so no screen is cloned and the ring is not walked.
+    pub fn viewport_rows(&mut self, offset_from_bottom: usize) -> Vec<String> {
+        let (_, cols) = self.size();
+        let offset = offset_from_bottom.min(self.scrollback_len());
+        self.parser.screen_mut().set_scrollback(offset);
+        let rows = self
+            .parser
+            .screen()
+            .rows(0, cols)
+            .map(|row| row.trim_end().to_string())
+            .collect();
+        self.parser.screen_mut().set_scrollback(0);
+        rows
+    }
+
+    /// The live screen's cursor cell as `(row, col)`, for the terminal lens's cursor.
+    pub fn cursor_position(&self) -> (u16, u16) {
+        self.parser.screen().cursor_position()
+    }
+
     /// The whole visible screen as plain text, one trimmed line per row. Prompt detection reads
     /// this: it is what the agent's TUI draws, not what the transcript says.
     pub fn visible_text(&self) -> String {
@@ -335,5 +358,30 @@ mod tests {
         screen.process("abcdefgh");
         let text = screen.selection(0, 2, 1, 2);
         assert_eq!(text, "cdefgh");
+    }
+
+    #[test]
+    fn the_viewport_reads_the_history_above_the_live_screen() {
+        let mut screen = ScreenState::new(3, 20);
+        screen.process("one\r\ntwo\r\nthree\r\nfour\r\n");
+        assert_eq!(screen.viewport_rows(0), vec!["three", "four", ""]);
+        assert_eq!(screen.viewport_rows(1), vec!["two", "three", "four"]);
+        assert_eq!(screen.viewport_rows(2), vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn the_cursor_sits_after_the_last_written_cell() {
+        let mut screen = ScreenState::new(3, 20);
+        screen.process("hello");
+        assert_eq!(screen.cursor_position(), (0, 5));
+    }
+
+    #[test]
+    fn the_viewport_offset_is_clamped_to_the_history() {
+        let mut screen = ScreenState::new(3, 20);
+        screen.process("one\r\ntwo\r\nthree\r\nfour\r\n");
+        let clamped = screen.viewport_rows(usize::MAX);
+        assert_eq!(clamped, screen.viewport_rows(screen.scrollback_len()));
+        assert_eq!(clamped.first().map(String::as_str), Some("one"));
     }
 }

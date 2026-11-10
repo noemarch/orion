@@ -79,6 +79,11 @@ pub struct Preferences {
     pub theme: ThemeMode,
     pub density: Density,
     pub key_bar_extras: Vec<String>,
+    /// The terminal's font family: a comma-separated list in fallback order.
+    /// Empty means the built-in stack (see `crate::terminal_font`).
+    pub terminal_font: String,
+    /// The terminal's font size in pixels. 13 is the default (Orbit's default).
+    pub terminal_font_size: u32,
     pub alerts_on: bool,
     pub alert_input: bool,
     pub alert_done: String,
@@ -92,6 +97,8 @@ impl Default for Preferences {
             theme: ThemeMode::Dark,
             density: Density::Comfortable,
             key_bar_extras: vec!["alt".to_string()],
+            terminal_font: String::new(),
+            terminal_font_size: 13,
             alerts_on: true,
             alert_input: true,
             alert_done: "long".to_string(),
@@ -118,6 +125,8 @@ impl Preferences {
             "theme": self.theme.as_wire(),
             "density": self.density.as_wire(),
             "keyBarExtras": self.key_bar_extras,
+            "terminalFont": self.terminal_font,
+            "terminalFontSize": self.terminal_font_size,
             "alertsOn": self.alerts_on,
             "alertInput": self.alert_input,
             "alertDone": self.alert_done,
@@ -160,10 +169,22 @@ impl Preferences {
             "off" | "long" | "always" => get_str("alertDone").to_string(),
             _ => defaults.alert_done.clone(),
         };
+        let terminal_font = settings
+            .get("terminalFont")
+            .and_then(Value::as_str)
+            .map(crate::terminal_font::sanitize_font_family)
+            .unwrap_or_default();
+        let terminal_font_size = settings
+            .get("terminalFontSize")
+            .and_then(Value::as_u64)
+            .map(|value| value.clamp(10, 22) as u32)
+            .unwrap_or(13);
         Self {
             theme,
             density,
             key_bar_extras: extras,
+            terminal_font,
+            terminal_font_size,
             alerts_on,
             alert_input,
             alert_done,

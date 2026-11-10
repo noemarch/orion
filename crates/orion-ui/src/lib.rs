@@ -20,6 +20,7 @@ pub mod settings;
 pub mod shell_model;
 pub mod sidebar;
 pub mod terminal;
+pub mod terminal_font;
 pub mod theme;
 pub mod tool_card;
 pub mod workspace;

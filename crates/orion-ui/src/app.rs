@@ -302,10 +302,18 @@ impl OrionApp {
 
     fn set_lens(&mut self, lens: Lens, cx: &mut impl gpui::AppContext) {
         self.lens_book.set(self.focused_pane.as_deref(), lens);
-        if lens == Lens::Chat {
+        match lens {
             // The chat is the lens the reader is looking at: their next word
             // belongs in its box.
-            self.chat_view.update(cx, |view, _cx| view.take_focus());
+            Lens::Chat => {
+                self.chat_view.update(cx, |view, _cx| view.take_focus());
+            }
+            // The terminal takes the keyboard too: the reader's keystrokes go
+            // to the agent without a click first.
+            Lens::Terminal => {
+                self.terminal_pane.update(cx, |view, _cx| view.take_focus());
+            }
+            Lens::Changes => {}
         }
     }
 
@@ -870,6 +878,14 @@ impl Render for OrionApp {
         let extras = KeyBarExtras::from_preferences(&prefs);
         self.terminal_pane
             .update(cx, |view, _cx| view.set_key_bar_extras(extras));
+        // The terminal's font: the family the reader configured, measured by
+        // the terminal itself.
+        let terminal_font = prefs.terminal_font.clone();
+        let terminal_font_size = prefs.terminal_font_size;
+        self.terminal_pane.update(cx, |view, _cx| {
+            view.set_font_family(&terminal_font);
+            view.set_font_size(terminal_font_size);
+        });
         let has_workspaces = self
             .workspace_sidebar
             .update(cx, |view, _cx| !view.workspaces().is_empty());
