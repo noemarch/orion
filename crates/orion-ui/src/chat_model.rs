@@ -1,0 +1,474 @@
+//! Pure model for the Chat Lens: what the transcript column shows, without a
+//! window.
+//!
+//! The Chat view reads the Engine's Transcript through
+//! `GET /api/pane/conversation`; this module holds what that answer means for
+//! the surface: which phase the column is in (loading, turns, empty, failed),
+//! which thinking rows are open, and whether new turns still follow the
+//! bottom. Keeping it here means the rules are testable without a window and
+//! the view only draws.
+
+use crate::chat_entities::{ChatTurn, ConversationResponse};
+
+/// What the chat column shows right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatPhase {
+    /// The first fetch has not answered yet.
+    Loading,
+    /// Turns are on screen.
+    Ready,
+    /// The transcript was read and holds no turns.
+    Empty,
+    /// The last fetch failed; the message is plain language, never a status code.
+    Failed(String),
+}
+
+impl ChatPhase {
+    /// Whether the column is showing the failed state.
+    pub fn is_failed(&self) -> bool {
+        matches!(self, ChatPhase::Failed(_))
+    }
+}
+
+/// The chat column's state: the phase, the turns, and the two rules that make
+/// the surface behave (thinking rows, follow-the-bottom).
+#[derive(Debug, Clone)]
+pub struct ChatModel {
+    phase: ChatPhase,
+    source: String,
+    turns: Vec<ChatTurn>,
+    thinking: ThinkingRows,
+    follow: FollowBottom,
+}
+
+impl Default for ChatModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChatModel {
+    /// A model that has not fetched anything yet.
+    pub fn new() -> Self {
+        Self {
+            phase: ChatPhase::Loading,
+            source: String::new(),
+            turns: Vec::new(),
+            thinking: ThinkingRows::default(),
+            follow: FollowBottom::default(),
+        }
+    }
+
+    /// What the column shows right now.
+    pub fn phase(&self) -> &ChatPhase {
+        &self.phase
+    }
+
+    /// The transcript's source (`claude-transcript`, `scrollback`, …).
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// The turns on screen, oldest first.
+    pub fn turns(&self) -> &[ChatTurn] {
+        &self.turns
+    }
+
+    /// A new pane: the column starts empty, with nothing open and following
+    /// the bottom again.
+    pub fn reset(&mut self) {
+        *self = ChatModel::new();
+    }
+
+    /// The transcript was read: turns, or the empty state when it holds none.
+    pub fn apply(&mut self, response: ConversationResponse) {
+        self.source = response.source;
+        self.turns = response.turns;
+        self.phase = if self.turns.is_empty() {
+            ChatPhase::Empty
+        } else {
+            ChatPhase::Ready
+        };
+        // Turns only ever grow, so the open thinking rows stay open.
+        self.thinking.retain(self.turns.len());
+    }
+
+    /// The fetch failed: the message is plain language and a Retry is offered.
+    pub fn fail(&mut self, message: String) {
+        self.phase = ChatPhase::Failed(message);
+    }
+
+    /// The reader asked for the transcript again.
+    pub fn retry(&mut self) {
+        self.phase = ChatPhase::Loading;
+    }
+
+    /// Whether the column shows the loading state: a read is in flight and
+    /// there is nothing to show yet.
+    pub fn is_loading(&self) -> bool {
+        matches!(self.phase, ChatPhase::Loading) && self.turns.is_empty()
+    }
+
+    /// Whether the column shows the empty state.
+    pub fn is_empty(&self) -> bool {
+        matches!(self.phase, ChatPhase::Empty) && self.turns.is_empty()
+    }
+
+    /// The failure message, when the last fetch failed.
+    pub fn failure(&self) -> Option<&str> {
+        match &self.phase {
+            ChatPhase::Failed(message) => Some(message),
+            _ => None,
+        }
+    }
+
+    /// Whether a thinking row is open.
+    pub fn is_thinking_open(&self, turn: usize, part: usize) -> bool {
+        self.thinking.is_open(turn, part)
+    }
+
+    /// Open or close one thinking row.
+    pub fn toggle_thinking(&mut self, turn: usize, part: usize) {
+        self.thinking.toggle(turn, part);
+    }
+
+    /// Whether new turns follow the bottom.
+    pub fn follows_bottom(&self) -> bool {
+        self.follow.at_bottom()
+    }
+
+    /// The reader scrolled: up pins the view, scrolling while at the bottom
+    /// keeps following.
+    pub fn on_scroll(&mut self, delta_y: f32, at_bottom_now: bool) {
+        self.follow.on_wheel(delta_y, at_bottom_now);
+    }
+
+    /// The scroll position says where the reader is.
+    pub fn sync_scroll(&mut self, offset_y: f32, max_offset_y: f32) {
+        self.follow.sync(offset_y, max_offset_y);
+    }
+}
+
+/// Which thinking rows are open, per turn and part.
+#[derive(Debug, Clone, Default)]
+pub struct ThinkingRows {
+    open: Vec<(usize, usize)>,
+}
+
+impl ThinkingRows {
+    /// Whether one thinking row is open.
+    pub fn is_open(&self, turn: usize, part: usize) -> bool {
+        self.open.contains(&(turn, part))
+    }
+
+    /// Open a closed row, close an open one.
+    pub fn toggle(&mut self, turn: usize, part: usize) {
+        if let Some(index) = self.open.iter().position(|entry| *entry == (turn, part)) {
+            self.open.remove(index);
+        } else {
+            self.open.push((turn, part));
+        }
+    }
+
+    /// Drop rows of turns that are gone.
+    pub fn retain(&mut self, turns: usize) {
+        self.open.retain(|(turn, _)| *turn < turns);
+    }
+}
+
+/// Whether the chat follows the bottom of the transcript.
+#[derive(Debug, Clone, Copy)]
+pub struct FollowBottom {
+    at_bottom: bool,
+}
+
+/// How close to the bottom still counts as the bottom, in pixels.
+pub const BOTTOM_EPSILON: f32 = 2.0;
+
+/// Whether a scroll position is at the bottom of the column. The scroll offset
+/// counts *down* as the reader goes down, so the bottom is the most negative
+/// offset; one convention, so the view and the model cannot disagree.
+pub fn at_bottom(offset_y: f32, max_offset_y: f32) -> bool {
+    if max_offset_y <= 0.0 {
+        // Nothing to scroll: the whole transcript fits.
+        return true;
+    }
+    -offset_y >= max_offset_y - BOTTOM_EPSILON
+}
+
+impl Default for FollowBottom {
+    fn default() -> Self {
+        Self { at_bottom: true }
+    }
+}
+
+impl FollowBottom {
+    /// Whether new turns follow the bottom.
+    pub fn at_bottom(&self) -> bool {
+        self.at_bottom
+    }
+
+    /// The reader scrolled by `delta_y` and is now at `at_bottom_now`.
+    ///
+    /// A wheel delta is positive when the reader scrolls *up* (GPUI counts the
+    /// wheel the way the platform reports it), so a positive delta pins the
+    /// view: the transcript must not jump away.
+    pub fn on_wheel(&mut self, delta_y: f32, at_bottom_now: bool) {
+        if delta_y > 0.0 {
+            // Scrolling up pins the view.
+            self.at_bottom = false;
+        } else if at_bottom_now {
+            // Scrolling down at the bottom keeps following.
+            self.at_bottom = true;
+        }
+    }
+
+    /// The scroll position says where the reader is. A reader who scrolled
+    /// away from the bottom (by wheel, by scrollbar or by keyboard) pins the
+    /// view; only the bottom itself follows the new turns.
+    pub fn sync(&mut self, offset_y: f32, max_offset_y: f32) {
+        self.at_bottom = at_bottom(offset_y, max_offset_y);
+    }
+}
+
+/// The wire's RFC 3339 stamp as a short local time (`10 Nov 03:25`). A stamp
+/// the shell cannot read is shown as it came; a missing stamp reads as no stamp.
+pub fn format_timestamp(raw: Option<&str>) -> String {
+    let Some(raw) = raw.map(str::trim).filter(|stamp| !stamp.is_empty()) else {
+        return String::new();
+    };
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) else {
+        return raw.to_string();
+    };
+    parsed
+        .with_timezone(&chrono::Local)
+        .format("%d %b %H:%M")
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat_entities::ChatRole;
+    use serde_json::json;
+
+    fn turn(role: &str, parts: serde_json::Value) -> serde_json::Value {
+        json!({ "role": role, "ts": "2026-01-01T00:00:00Z", "parts": parts })
+    }
+
+    fn response(turns: Vec<serde_json::Value>) -> ConversationResponse {
+        ConversationResponse::parse(&json!({
+            "source": "claude-transcript",
+            "turns": turns,
+        }))
+        .expect("the wire shape parses")
+    }
+
+    #[test]
+    fn a_chat_that_has_not_fetched_yet_is_loading() {
+        let model = ChatModel::new();
+        assert_eq!(model.phase(), &ChatPhase::Loading);
+        assert!(model.is_loading());
+        assert!(!model.is_empty());
+    }
+
+    #[test]
+    fn a_transcript_with_turns_is_ready() {
+        let mut model = ChatModel::new();
+        model.apply(response(vec![turn(
+            "user",
+            json!([{ "kind": "text", "text": "hello" }]),
+        )]));
+        assert_eq!(model.phase(), &ChatPhase::Ready);
+        assert_eq!(model.turns().len(), 1);
+        assert_eq!(model.source(), "claude-transcript");
+        assert!(!model.is_loading());
+        assert!(!model.is_empty());
+    }
+
+    #[test]
+    fn a_transcript_without_turns_is_empty() {
+        let mut model = ChatModel::new();
+        model.apply(response(Vec::new()));
+        assert_eq!(model.phase(), &ChatPhase::Empty);
+        assert!(model.is_empty());
+        assert!(!model.is_loading());
+    }
+
+    #[test]
+    fn a_failed_fetch_says_so_in_plain_language() {
+        let mut model = ChatModel::new();
+        model.fail("Couldn't load the conversation. Try again.".to_string());
+        assert_eq!(
+            model.failure(),
+            Some("Couldn't load the conversation. Try again.")
+        );
+        assert!(model.phase().is_failed());
+        assert!(!model.is_empty(), "a failure is not an empty transcript");
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_last_turns() {
+        let mut model = ChatModel::new();
+        model.apply(response(vec![turn(
+            "user",
+            json!([{ "kind": "text", "text": "hello" }]),
+        )]));
+        model.fail("Couldn't load the conversation.".to_string());
+        assert_eq!(
+            model.turns().len(),
+            1,
+            "the reader keeps the transcript they were reading"
+        );
+        assert!(model.phase().is_failed());
+    }
+
+    #[test]
+    fn a_retry_goes_back_to_loading_and_recovers() {
+        let mut model = ChatModel::new();
+        model.fail("Couldn't load the conversation. Try again.".to_string());
+        model.retry();
+        assert_eq!(model.phase(), &ChatPhase::Loading);
+        assert_eq!(model.failure(), None);
+
+        model.apply(response(vec![turn(
+            "assistant",
+            json!([{ "kind": "text", "text": "hi" }]),
+        )]));
+        assert_eq!(model.phase(), &ChatPhase::Ready);
+        assert_eq!(model.failure(), None);
+    }
+
+    #[test]
+    fn thinking_rows_open_and_close_on_their_own() {
+        let mut model = ChatModel::new();
+        assert!(!model.is_thinking_open(0, 0));
+        model.toggle_thinking(0, 0);
+        assert!(model.is_thinking_open(0, 0));
+        assert!(
+            !model.is_thinking_open(0, 1),
+            "another part of the same turn keeps its own state"
+        );
+        model.toggle_thinking(0, 0);
+        assert!(!model.is_thinking_open(0, 0));
+    }
+
+    #[test]
+    fn an_open_thinking_row_stays_open_when_the_transcript_grows() {
+        let mut model = ChatModel::new();
+        model.apply(response(vec![turn(
+            "assistant",
+            json!([{ "kind": "thinking", "text": "hmm" }]),
+        )]));
+        model.toggle_thinking(0, 0);
+        model.apply(response(vec![
+            turn("assistant", json!([{ "kind": "thinking", "text": "hmm" }])),
+            turn("user", json!([{ "kind": "text", "text": "more" }])),
+        ]));
+        assert!(
+            model.is_thinking_open(0, 0),
+            "the reader's open row survives the next poll"
+        );
+    }
+
+    #[test]
+    fn scrolling_up_pins_the_view_and_scrolling_back_resumes_following() {
+        let mut model = ChatModel::new();
+        assert!(model.follows_bottom());
+
+        // A positive wheel delta scrolls up.
+        model.on_scroll(120.0, false);
+        assert!(!model.follows_bottom(), "scrolling up pins the view");
+
+        model.on_scroll(-120.0, true);
+        assert!(
+            model.follows_bottom(),
+            "scrolling back to the bottom resumes following"
+        );
+    }
+
+    #[test]
+    fn the_scroll_position_repins_at_the_bottom() {
+        let mut model = ChatModel::new();
+        model.on_scroll(120.0, false);
+        assert!(!model.follows_bottom());
+
+        // The offset counts down as the reader goes down: 20px short of the
+        // bottom still pins the view.
+        model.sync_scroll(-980.0, 1000.0);
+        assert!(
+            !model.follows_bottom(),
+            "still 20px above the bottom: the view stays pinned"
+        );
+
+        model.sync_scroll(-1000.0, 1000.0);
+        assert!(model.follows_bottom());
+    }
+
+    #[test]
+    fn a_scroll_away_from_the_bottom_pins_the_view() {
+        let mut model = ChatModel::new();
+        // A scrollbar drag or a keyboard scroll: the position says the reader
+        // is not at the bottom, so the transcript must not jump.
+        model.sync_scroll(-400.0, 1000.0);
+        assert!(
+            !model.follows_bottom(),
+            "a reader away from the bottom pins the view"
+        );
+    }
+
+    #[test]
+    fn a_transcript_that_fits_does_not_pin_the_view() {
+        let mut model = ChatModel::new();
+        model.on_scroll(120.0, false);
+        model.sync_scroll(0.0, 0.0);
+        assert!(model.follows_bottom());
+    }
+
+    #[test]
+    fn a_new_pane_starts_with_nothing_open() {
+        let mut model = ChatModel::new();
+        model.apply(response(vec![turn(
+            "assistant",
+            json!([{ "kind": "thinking", "text": "hmm" }]),
+        )]));
+        model.toggle_thinking(0, 0);
+        model.reset();
+        assert!(
+            !model.is_thinking_open(0, 0),
+            "the old pane's rows are gone"
+        );
+        assert_eq!(model.turns().len(), 0);
+        assert!(model.follows_bottom());
+    }
+
+    #[test]
+    fn timestamps_read_as_a_short_local_time() {
+        assert_eq!(
+            format_timestamp(Some("2026-01-01T00:01:00Z")),
+            chrono::DateTime::parse_from_rfc3339("2026-01-01T00:01:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .format("%d %b %H:%M")
+                .to_string()
+        );
+        assert!(format_timestamp(Some("2026-01-01T00:01:00Z")).contains("Jan"));
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_stamp_says_nothing_or_shows_itself() {
+        assert_eq!(format_timestamp(None), "");
+        assert_eq!(format_timestamp(Some("   ")), "");
+        assert_eq!(
+            format_timestamp(Some("yesterday")),
+            "yesterday",
+            "a stamp the shell cannot read is shown as it came"
+        );
+    }
+
+    #[test]
+    fn a_role_is_read_from_the_wire() {
+        let parsed = response(vec![turn("user", json!([]))]);
+        assert_eq!(parsed.turns[0].role, ChatRole::User);
+    }
+}

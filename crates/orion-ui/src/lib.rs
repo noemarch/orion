@@ -4,6 +4,7 @@ pub mod agents;
 pub mod app;
 pub mod chat;
 pub mod chat_entities;
+pub mod chat_model;
 pub mod components;
 pub mod diff_view;
 pub mod elements;
