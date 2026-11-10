@@ -86,11 +86,18 @@ Before submitting any code change:
    cargo clippy -p orion-core -- -D warnings
    cargo fmt --check
    ```
+   A change in `crates/orion-ui` (the native GPUI shell) runs the same gates for that crate:
+   ```bash
+   cargo check -p orion-ui
+   cargo test -p orion-ui
+   cargo clippy -p orion-ui -- -D warnings
+   ```
 2. **Frontend Quality:**
    ```bash
    bun run typecheck
    bun run build
    ```
+   The React frontend is gone; `crates/orion-ui` replaces it, and its gates are the `cargo` ones above.
 3. **Smoke Proof:** Any change touching agent launching or PTY streaming must verify that the spawned process is an identified AI agent CLI and that stdin/stdout/resize function properly.
 
 ---
