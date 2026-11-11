@@ -2,8 +2,9 @@
 //!
 //! PTY output arrives from the engine via `feed()`; each feed mutates the grid
 //! and the caller notifies the view so GPUI repaints. Keyboard input flows back
-//! to the pane through `Pane::write` (literal text) and `Pane::keys` (logical
-//! chords — the same names `encode_key` in `engine::pane` accepts).
+//! to the pane through `PaneHandle::write` (literal text) and
+//! `PaneHandle::keys` (logical chords — the same names `encode_key` in
+//! `engine::pane` accepts).
 //!
 //! Surfaces ported from the web client (P1 — terminal truth):
 //! - keyboard input on the focused grid (the soft-keyboard-free desktop path)
@@ -23,7 +24,7 @@ use gpui::{
     MouseUpEvent, Pixels, Render, Rgba, ScrollWheelEvent, StyledText, TextStyle, TextSystem,
     UnderlineStyle, WhiteSpace, Window,
 };
-use orion_core::engine::pane::Pane;
+use orion_core::runtime::PaneHandle;
 use orion_core::screen::{ScreenState, TermCell, TermColor};
 use std::cell::Cell;
 use std::ops::Range;
@@ -369,7 +370,7 @@ fn cell_runs(
 pub struct TerminalPane {
     screen: ScreenState,
     focus_handle: FocusHandle,
-    pane: Option<Arc<Pane>>,
+    pane: Option<Arc<dyn PaneHandle>>,
     // Sticky modifiers (web key-bar semantics: consumed by the next key press).
     sticky_ctrl: bool,
     sticky_alt: bool,
@@ -452,11 +453,11 @@ impl TerminalPane {
     /// Attach the live pane this view drives (set once the engine spawns it).
     /// Switching panes clears the grid so the replay of the new pane is not
     /// drawn over the previous pane's scrollback.
-    pub fn set_pane(&mut self, pane: Arc<Pane>) {
+    pub fn set_pane(&mut self, pane: Arc<dyn PaneHandle>) {
         let changed = self
             .pane
             .as_ref()
-            .is_none_or(|current| current.id != pane.id);
+            .is_none_or(|current| current.id() != pane.id());
         if changed {
             self.screen = ScreenState::new(self.last_rows, self.last_cols);
             self.find_matches.clear();
@@ -1374,7 +1375,7 @@ impl Render for TerminalPane {
             .child(status_bar)
     }
 }
-/// GPUI keystroke → logical chord name for `Pane::keys` (the same names the
+/// GPUI keystroke → logical chord name for `PaneHandle::keys` (the same names the
 /// web client's `terminalChord` produces).
 #[cfg(test)]
 mod tests {

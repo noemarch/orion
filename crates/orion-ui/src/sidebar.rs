@@ -26,7 +26,7 @@ use crate::theme::Theme;
 use gpui::prelude::*;
 use gpui::{div, px, Context, FocusHandle, Render, Styled, StyledText, TextStyle, Window};
 use orion_core::protocol::AgentStatus;
-use orion_core::Engine;
+use orion_core::runtime::Runtime;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,7 +81,7 @@ pub struct TabEntry {
 /// The sidebar view. State is the last session snapshot; `refresh()` swaps
 /// it in when the wire body changes (stale rows are swept with it).
 pub struct WorkspaceSidebar {
-    engine: Option<Arc<Engine>>,
+    engine: Option<Arc<dyn Runtime>>,
     snapshot: Option<Value>,
     last_body: Option<String>,
     focus_handle: FocusHandle,
@@ -112,7 +112,7 @@ impl WorkspaceSidebar {
         id
     }
 
-    pub fn attach(&mut self, engine: Arc<Engine>) {
+    pub fn attach(&mut self, engine: Arc<dyn Runtime>) {
         self.engine = Some(engine);
         self.refresh();
     }

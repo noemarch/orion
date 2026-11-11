@@ -1,6 +1,6 @@
-//! Chat lens view: the Engine's Transcript as a conversation.
+//! Chat lens view: the runtime's Transcript as a conversation.
 //!
-//! `ChatView` polls `Engine::http("GET", "/api/pane/conversation?pane_id=…")`
+//! `ChatView` polls `Runtime::http("GET", "/api/pane/conversation?pane_id=…")`
 //! on a 2s timer (the wire seam — `engine.rs` untouched) and rerenders when the
 //! body changes. What the transcript means for the surface — which phase the
 //! column is in, which thinking rows are open, whether new turns still follow
@@ -42,7 +42,7 @@ use gpui::{
     div, px, App, Context, Entity, FocusHandle, FontStyle, FontWeight, IntoElement, Render,
     ScrollHandle, ScrollWheelEvent, StyledText, Subscription, TextStyle, Window,
 };
-use orion_core::Engine;
+use orion_core::runtime::Runtime;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -91,10 +91,13 @@ enum FocusWanted {
 }
 
 pub struct ChatView {
-    engine: Option<Arc<Engine>>,
+    engine: Option<Arc<dyn Runtime>>,
     /// The agent this lens talks to.
     seam: Option<Arc<dyn PaneSeam>>,
     pane_id: String,
+    /// The agent's name for the role label. The pane handle does not name its
+    /// agent; the runtime's session snapshot does.
+    agent_name: Option<String>,
     /// What the transcript column shows: phase, turns, thinking rows, follow.
     model: ChatModel,
     last_body: Option<String>,
@@ -154,6 +157,7 @@ impl ChatView {
             engine: None,
             seam: None,
             pane_id: "pane-1".to_string(),
+            agent_name: None,
             model: ChatModel::new(),
             last_body: None,
             composer,
@@ -177,13 +181,13 @@ impl ChatView {
         id
     }
 
-    /// Wire the engine + the agent once they exist (called from `app.rs` after spawn).
+    /// Wire the runtime + the agent once they exist (called from `app.rs` after spawn).
     ///
-    /// The engine is what reads the transcript; the seam is what talks to the
-    /// agent. A pane without an engine has no transcript to show.
+    /// The runtime is what reads the transcript; the seam is what talks to the
+    /// agent. A pane without a runtime has no transcript to show.
     pub fn attach(
         &mut self,
-        engine: Option<Arc<Engine>>,
+        engine: Option<Arc<dyn Runtime>>,
         seam: Arc<dyn PaneSeam>,
         pane_id: String,
         cx: &mut Context<Self>,
@@ -191,6 +195,8 @@ impl ChatView {
         self.engine = engine;
         self.seam = Some(seam);
         self.pane_id = pane_id;
+        // The new pane is a new agent: its name belongs to the new transcript.
+        self.agent_name = None;
         // A new pane is a new transcript: neither the old answer nor the old
         // thinking rows may linger.
         self.last_body = None;
@@ -270,13 +276,17 @@ impl ChatView {
         self.refresh(cx);
     }
 
-    /// Fetch the conversation through the wire seam (`Engine::http`); the prompt
+    /// Fetch the conversation through the wire seam (`Runtime::http`); the prompt
     /// card re-syncs from `pane.prompt()` so its DetectPrompt id is always fresh.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         // The stop control is live while the agent works.
         let Some(engine) = self.engine.clone() else {
             return;
         };
+        // The pane's name comes from the runtime, and it is asked for once.
+        if self.agent_name.is_none() {
+            self.read_agent_name(&engine);
+        }
         let path = format!("/api/pane/conversation?pane_id={}", self.pane_id);
         self.reads += 1;
         let (status, body) = engine.http("GET", &path, &Value::Null);
@@ -355,10 +365,40 @@ impl ChatView {
 
     /// The agent whose transcript this is, for the role label.
     fn agent_label(&self) -> String {
-        self.seam
-            .as_ref()
-            .map(|seam| seam.agent_label())
+        self.agent_name
+            .clone()
+            .or_else(|| self.seam.as_ref().map(|seam| seam.agent_label()))
             .unwrap_or_else(|| "Agent".to_string())
+    }
+
+    /// The agent's name for the role label, from the runtime's session
+    /// snapshot: the pane handle names no agent, but the snapshot names every
+    /// pane the runtime holds.
+    fn read_agent_name(&mut self, engine: &Arc<dyn Runtime>) {
+        let (status, body) = engine.http("GET", "/api/session", &Value::Null);
+        if status != 200 {
+            return;
+        }
+        let Some(panes) = body
+            .get("snapshot")
+            .and_then(|snapshot| snapshot.get("panes"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        let Some(name) = panes
+            .iter()
+            .find(|pane| {
+                pane.get("pane_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == self.pane_id)
+            })
+            .and_then(|pane| pane.get("display_agent"))
+            .and_then(Value::as_str)
+        else {
+            return;
+        };
+        self.agent_name = Some(name.to_string());
     }
 
     /// The agent's menu, if it is showing one.
@@ -1395,6 +1435,7 @@ mod tests {
     use crate::pane_seam::test_doubles::{menu_prompt, RecordingPane, SeamCall};
     use gpui::Window;
     use orion_core::engine::store::Store;
+    use orion_core::Engine;
     use serde_json::json;
 
     /// The window's root view: the chat the test drives.
@@ -1440,7 +1481,7 @@ mod tests {
         use std::sync::Arc;
         use std::time::Duration;
 
-        let engine = Arc::new(Engine::with_store(Store::at(
+        let engine: Arc<dyn Runtime> = Arc::new(Engine::with_store(Store::at(
             std::env::temp_dir().join(format!("orion-chat-poll-{}", std::process::id())),
         )));
         let view = cx.update(|app| app.new(ChatView::new));

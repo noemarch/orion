@@ -3,7 +3,7 @@
 //!
 //! Each expanded folder's listing comes from
 //! `GET /api/workspace/directories?path=<ABSOLUTE>&files=1` through
-//! `Engine::http` — in-process, no HTTP hop. The route takes the path as
+//! `Runtime::http` — in-process, no HTTP hop. The route takes the path as
 //! given (only `~` is expanded; it does not resolve against a pane), so the
 //! tree always sends an absolute path and stores every path with forward
 //! slashes: the core echoes back the path it was given and accepts `/` on
@@ -32,8 +32,7 @@ use gpui::{
     div, px, white, Context, Div, Entity, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Render, ScrollHandle, Stateful, Window,
 };
-use orion_core::engine::pane::Pane;
-use orion_core::Engine;
+use orion_core::runtime::{PaneHandle, Runtime};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -65,7 +64,7 @@ fn is_absolute_path(path: &str) -> bool {
 }
 
 pub struct FileTree {
-    engine: Option<Arc<Engine>>,
+    engine: Option<Arc<dyn Runtime>>,
     /// The pane's cwd, absolute, forward slashes: the tree's root.
     root_path: Option<String>,
     /// Absolute folder paths that are open (the root always is).
@@ -127,12 +126,12 @@ impl FileTree {
     pub fn attach(
         &mut self,
         cx: &mut Context<Self>,
-        engine: Arc<Engine>,
-        pane: Arc<Pane>,
+        engine: Arc<dyn Runtime>,
+        pane: Arc<dyn PaneHandle>,
         pane_id: String,
     ) {
         self.engine = Some(engine.clone());
-        let root = normalize_path(&pane.cwd.to_string_lossy());
+        let root = normalize_path(&pane.cwd().to_string_lossy());
         self.root_path = Some(root.clone());
         self.expanded.clear();
         self.expanded.insert(root);
@@ -160,7 +159,7 @@ impl FileTree {
     }
 
     /// Fetch a listing for EVERY expanded folder through the wire seam
-    /// (`Engine::http`). A folder whose fetch fails — it vanished, or it is
+    /// (`Runtime::http`). A folder whose fetch fails — it vanished, or it is
     /// not a directory — is dropped from the tree and the failure is recorded
     /// as the tree's error; the root itself stays expanded (it is the pane's
     /// cwd) so the tree keeps its anchor. When every fetch succeeds, the

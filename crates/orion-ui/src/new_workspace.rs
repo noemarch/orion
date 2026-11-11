@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::theme::Theme;
 use gpui::prelude::*;
 use gpui::{div, px, Context, FocusHandle, Render, Styled, Window};
-use orion_core::Engine;
+use orion_core::runtime::Runtime;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -102,7 +102,7 @@ impl gpui::EventEmitter<NewWorkspaceEvent> for NewWorkspaceModal {}
 /// touches the sidebar directly; the Engine snapshot is the only source of
 /// truth.
 pub struct NewWorkspaceModal {
-    engine: Option<Arc<Engine>>,
+    engine: Option<Arc<dyn Runtime>>,
     open: bool,
     cwd: String,
     parent: Option<String>,
@@ -130,7 +130,7 @@ impl NewWorkspaceModal {
         }
     }
 
-    pub fn attach(&mut self, engine: Arc<Engine>) {
+    pub fn attach(&mut self, engine: Arc<dyn Runtime>) {
         self.engine = Some(engine);
     }
 
@@ -570,6 +570,7 @@ impl Render for NewWorkspaceModal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orion_core::Engine;
     use serde_json::json;
 
     #[test]

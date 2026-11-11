@@ -2,19 +2,20 @@
 //!
 //! The lens never touches a PTY. It asks a [`PaneSeam`] to deliver a message,
 //! to stop the agent, and to answer the menu the agent is showing, and it asks
-//! the same seam what the agent is doing. A live [`Pane`] answers those calls
-//! for real; a test answers them with a [`RecordingPane`], so the composer's
-//! and the prompt card's behaviour can be observed without an agent process.
+//! the same seam what the agent is doing. A live pane answers those calls for
+//! real; a test answers them with a [`RecordingPane`], so the composer's and
+//! the prompt card's behaviour can be observed without an agent process.
 //!
+//! The seam speaks to a [`PaneHandle`], not to a process: the pane may run in
+//! this process or in the daemon, and the lens has one code path either way.
 //! A message sent here reaches the agent the same way it reaches it from the
-//! web client: the Engine's own submit (`frame_dispatch::FrameDispatch::submit`)
-//! writes the words and a carriage return, then marks the turn as started.
-//! The pane's status is updated locally; the Engine tells the other clients
-//! when the agent's own output confirms it.
+//! web client: the words and a carriage return go down the pane's stdin.
+//! The pane's own status is updated when the agent's output confirms the turn.
 
 use orion_core::engine::pane::Pane;
 use orion_core::prompt::DetectedPrompt;
 use orion_core::protocol::AgentStatus;
+use orion_core::runtime::PaneHandle;
 use std::sync::Arc;
 
 /// The agent is not there any more: its process is gone.
@@ -22,6 +23,10 @@ pub const AGENT_GONE: &str = "agent_gone";
 
 /// The agent's menu moved on: an answer would go to the wrong question.
 pub const PROMPT_CHANGED: &str = "prompt_changed";
+
+/// The agent's name is not on the pane handle: the runtime's session snapshot
+/// names every pane, so the Chat Lens asks the runtime for it.
+pub const AGENT_UNKNOWN: &str = "Agent";
 
 /// What the Chat Lens may ask an agent to do.
 pub trait PaneSeam: Send + Sync {
@@ -45,26 +50,19 @@ pub trait PaneSeam: Send + Sync {
 
 impl PaneSeam for Pane {
     fn submit(&self, message: &str) -> Result<(), String> {
-        let mut typed = message.to_string();
-        typed.push('\r');
-        // A PTY write fails when the agent's process is gone.
-        self.write(&typed).map_err(|_| AGENT_GONE.to_string())?;
-        // The turn has started: the pane's status says so, and any menu the
-        // agent was showing is over.
-        self.note_submit();
-        Ok(())
+        submit_over(self, message)
     }
 
     fn stop(&self) -> Result<(), String> {
-        Pane::interrupt(self).map_err(|_| AGENT_GONE.to_string())
+        stop_over(self)
     }
 
     fn answer(&self, prompt_id: &str, option_index: usize) -> Result<(), String> {
-        Pane::answer_prompt(self, prompt_id, option_index)
+        answer_over(self, prompt_id, option_index, None)
     }
 
     fn answer_typed(&self, prompt_id: &str, text: &str) -> Result<(), String> {
-        Pane::answer_prompt_custom(self, prompt_id, text)
+        answer_over(self, prompt_id, 0, Some(text))
     }
 
     fn prompt(&self) -> Option<DetectedPrompt> {
@@ -84,10 +82,94 @@ impl PaneSeam for Pane {
     }
 }
 
+/// The seam over a pane that answers the runtime's questions.
+///
+/// The pane is a handle: it may live in this process or in the daemon, and the
+/// lens drives it the same way either way.
+struct PaneSeamOver {
+    pane: Arc<dyn PaneHandle>,
+}
+
+impl PaneSeam for PaneSeamOver {
+    fn submit(&self, message: &str) -> Result<(), String> {
+        submit_over(&*self.pane, message)
+    }
+
+    fn stop(&self) -> Result<(), String> {
+        stop_over(&*self.pane)
+    }
+
+    fn answer(&self, prompt_id: &str, option_index: usize) -> Result<(), String> {
+        answer_over(&*self.pane, prompt_id, option_index, None)
+    }
+
+    fn answer_typed(&self, prompt_id: &str, text: &str) -> Result<(), String> {
+        answer_over(&*self.pane, prompt_id, 0, Some(text))
+    }
+
+    fn prompt(&self) -> Option<DetectedPrompt> {
+        self.pane.prompt()
+    }
+
+    fn is_working(&self) -> bool {
+        self.pane.status() == AgentStatus::Working
+    }
+
+    fn status(&self) -> AgentStatus {
+        self.pane.status()
+    }
+
+    fn agent_label(&self) -> String {
+        // A pane handle does not name its agent: the runtime's session
+        // snapshot does, and the Chat Lens asks the runtime for it.
+        AGENT_UNKNOWN.to_string()
+    }
+}
+
+/// Delivers a message to the agent, the way the agent's own submit does: the
+/// words and a carriage return go down the pane's stdin.
+fn submit_over(pane: &dyn PaneHandle, message: &str) -> Result<(), String> {
+    let mut typed = message.to_string();
+    typed.push('\r');
+    // A PTY write fails when the agent's process is gone.
+    pane.write(&typed).map_err(|_| AGENT_GONE.to_string())
+}
+
+/// Interrupts the agent's current turn.
+fn stop_over(pane: &dyn PaneHandle) -> Result<(), String> {
+    pane.interrupt().map_err(|_| AGENT_GONE.to_string())
+}
+
+/// Answers the menu the agent is showing.
+///
+/// The answer is validated against the menu the pane shows right now: a card
+/// that names a menu the pane no longer shows is refused as `prompt_changed`
+/// rather than typing a choice into whatever came next.
+fn answer_over(
+    pane: &dyn PaneHandle,
+    prompt_id: &str,
+    option_index: usize,
+    custom: Option<&str>,
+) -> Result<(), String> {
+    let Some(current) = pane.prompt() else {
+        return Err(PROMPT_CHANGED.to_string());
+    };
+    if current.id != prompt_id {
+        return Err(PROMPT_CHANGED.to_string());
+    }
+    let keys = match custom {
+        Some(text) => current.answer_custom_keys(text),
+        None => current.answer_keys(option_index),
+    }
+    .ok_or_else(|| "invalid_option".to_string())?;
+    pane.write(&keys).map_err(|_| AGENT_GONE.to_string())
+}
+
 /// The seam a live pane answers through.
-pub fn seam_of(pane: &Arc<Pane>) -> Arc<dyn PaneSeam> {
-    let pane: Arc<Pane> = Arc::clone(pane);
-    let seam: Arc<dyn PaneSeam> = pane;
+pub fn seam_of(pane: &Arc<dyn PaneHandle>) -> Arc<dyn PaneSeam> {
+    let seam: Arc<dyn PaneSeam> = Arc::new(PaneSeamOver {
+        pane: Arc::clone(pane),
+    });
     seam
 }
 

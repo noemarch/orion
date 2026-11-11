@@ -1,6 +1,6 @@
 //! File reader view (P3): one file's text, plainly (mono, no syntax highlight).
 //!
-//! Text comes from `Engine::http("GET", "/api/fs/file?pane_id=…&path=…")`,
+//! Text comes from `Runtime::http("GET", "/api/fs/file?pane_id=…&path=…")`,
 //! whose in-process body is `{ "__raw_text__": <text> }` (the HTTP server
 //! unwraps it to the raw file bytes; the view reads the `Value` directly).
 //! Kind/size/modified come from `GET /api/fs/stat` for the header row.
@@ -24,7 +24,7 @@ use crate::terminal_font::terminal_font_families;
 use crate::theme::Theme;
 use gpui::prelude::*;
 use gpui::{div, px, white, Context, Render, ScrollHandle, TextAlign, TextSystem, Window};
-use orion_core::Engine;
+use orion_core::runtime::Runtime;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,7 +37,7 @@ pub const MAX_FILE_CHARS: usize = 200_000;
 pub const FILE_ERROR_MESSAGE: &str = "Couldn't read this file. Try again.";
 
 pub struct FileReader {
-    engine: Option<Arc<Engine>>,
+    engine: Option<Arc<dyn Runtime>>,
     pane_id: String,
     path: Option<String>,
     info: Option<FileInfo>,
@@ -116,7 +116,7 @@ impl FileReader {
     }
 
     /// Wire the engine once it exists (called from `app.rs` after spawn).
-    pub fn attach(&mut self, engine: Arc<Engine>, pane_id: String) {
+    pub fn attach(&mut self, engine: Arc<dyn Runtime>, pane_id: String) {
         self.engine = Some(engine);
         self.pane_id = pane_id;
         self.refresh();
@@ -144,7 +144,7 @@ impl FileReader {
         self.refresh();
     }
 
-    /// Fetch stat then text through the wire seam (`Engine::http`).
+    /// Fetch stat then text through the wire seam (`Runtime::http`).
     pub fn refresh(&mut self) {
         let Some(engine) = self.engine.clone() else {
             return;

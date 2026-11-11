@@ -5,6 +5,7 @@ use gpui::{
     div, px, App, Application, Context, Entity, Render, Size, Subscription, Window, WindowBounds,
     WindowOptions,
 };
+use orion_core::runtime::Runtime;
 use orion_core::{Engine, FrameSink, Role};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,7 +50,9 @@ pub struct OrionApp {
     changes_view: Entity<ChangesView>,
     settings: Entity<SettingsModal>,
     new_workspace: Entity<NewWorkspaceModal>,
-    engine: Arc<Engine>,
+    /// The runtime the shell talks to: the engine in this process, or one in
+    /// the daemon. The shell holds the runtime, not the terminals.
+    engine: Arc<dyn Runtime>,
     lens_book: LensBook,
     /// The pane whose lens is active; the switcher writes here.
     focused_pane: Option<String>,
@@ -83,7 +86,7 @@ impl OrionApp {
         let split_terminal_pane = cx.new(TerminalPane::new);
         let split_file_tree = cx.new(FileTree::new);
         let split_changes_view = cx.new(ChangesView::new);
-        let engine = Arc::new(Engine::new());
+        let engine: Arc<dyn Runtime> = Arc::new(Engine::new());
 
         let mut app = Self {
             workspace_sidebar,

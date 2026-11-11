@@ -4,7 +4,7 @@
 //! Persisted via `PUT /api/preferences` with the web client's wire names
 //! (`theme`, `density`, `keyBarExtras` — see `src/lib/settings.ts`
 //! `DEFAULT_SETTINGS` and `src/lib/keys.ts` `KeyBarExtra`/`KEY_BAR_EXTRAS`)
-//! through the in-process `Engine::http` seam. Escape closes the modal.
+//! through the in-process `Runtime::http` seam. Escape closes the modal.
 //!
 //! Deliberately NOT ported yet (follow-up): palettes beyond Quiet Slate,
 //! terminal/chat fonts, alerts, quick replies, language, etc. Those live in
@@ -17,7 +17,7 @@ use gpui::{
     div, px, Context, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, Render, Styled,
     Window,
 };
-use orion_core::Engine;
+use orion_core::runtime::Runtime;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -267,7 +267,7 @@ impl KeyBarExtras {
 }
 
 pub struct SettingsModal {
-    engine: Option<Arc<Engine>>,
+    engine: Option<Arc<dyn Runtime>>,
     prefs: Preferences,
     last_body: Option<String>,
     focus_handle: FocusHandle,
@@ -287,7 +287,7 @@ impl SettingsModal {
         }
     }
 
-    pub fn attach(&mut self, engine: Arc<Engine>) {
+    pub fn attach(&mut self, engine: Arc<dyn Runtime>) {
         self.engine = Some(engine);
         self.refresh();
     }

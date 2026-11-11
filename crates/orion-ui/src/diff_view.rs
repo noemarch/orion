@@ -34,8 +34,7 @@ use gpui::{
     div, px, white, Context, FontWeight, HighlightStyle, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Render, ScrollHandle, StyledText, TextAlign, TextStyle, Window,
 };
-use orion_core::engine::pane::Pane;
-use orion_core::Engine;
+use orion_core::runtime::{PaneHandle, Runtime};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
@@ -261,7 +260,7 @@ fn patch_highlight(kind: PatchKind) -> HighlightStyle {
 }
 
 pub struct ChangesView {
-    engine: Option<Arc<Engine>>,
+    engine: Option<Arc<dyn Runtime>>,
     pane_id: String,
     scope: RepoDiffScope,
     base: String,
@@ -329,7 +328,7 @@ impl ChangesView {
     }
 
     /// Wire the engine + pane once they exist (called from `app.rs` after spawn).
-    pub fn attach(&mut self, engine: Arc<Engine>, pane: Arc<Pane>, pane_id: String) {
+    pub fn attach(&mut self, engine: Arc<dyn Runtime>, pane: Arc<dyn PaneHandle>, pane_id: String) {
         self.engine = Some(engine);
         self.pane_id = pane_id;
         let _ = pane;
@@ -370,7 +369,7 @@ impl ChangesView {
         query
     }
 
-    /// Fetch the file list through the wire seam (`Engine::http`).
+    /// Fetch the file list through the wire seam (`Runtime::http`).
     pub fn refresh(&mut self) {
         let Some(engine) = self.engine.clone() else {
             return;
