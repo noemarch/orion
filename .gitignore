@@ -23,3 +23,5 @@ Thumbs.db
 # Orion local state
 .orion/
 devices.json
+
+.omo/
