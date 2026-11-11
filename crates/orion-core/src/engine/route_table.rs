@@ -361,6 +361,33 @@ impl RouteTable {
 
     fn create_workspace(&self, body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
         let cwd = resolve_cwd(body.get("cwd").and_then(Value::as_str))?;
+        // One workspace per folder. Asking again for a folder that is already
+        // open hands back the pane that is there, so the reader lands on the
+        // running agent instead of a second one started on the same files.
+        {
+            let session = self.session.read();
+            if let Some(existing) = session
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.cwd == cwd)
+            {
+                let workspace_id = existing.id.clone();
+                let pane_id = existing
+                    .tabs
+                    .first()
+                    .and_then(|tab| tab.panes.first())
+                    .cloned();
+                drop(session);
+                return Ok((
+                    200,
+                    json!({
+                        "workspace_id": workspace_id,
+                        "pane_id": pane_id,
+                        "agent_started": true,
+                    }),
+                ));
+            }
+        }
         let label = body
             .get("label")
             .and_then(Value::as_str)
