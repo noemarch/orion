@@ -14,6 +14,65 @@ use serde_json::{json, Value};
 /// keeps the recent ones and drops the oldest without touching the visible screen.
 pub const SCROLLBACK_ROWS: usize = 10_000;
 
+/// A terminal cell's colour, as the program asked for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TermColor {
+    /// The terminal's own default foreground or background.
+    Default,
+    /// One of the 256 indexed colours.
+    Indexed(u8),
+    /// A 24-bit colour.
+    Rgb(u8, u8, u8),
+}
+
+impl From<vt100::Color> for TermColor {
+    fn from(color: vt100::Color) -> Self {
+        match color {
+            vt100::Color::Default => Self::Default,
+            vt100::Color::Idx(index) => Self::Indexed(index),
+            vt100::Color::Rgb(red, green, blue) => Self::Rgb(red, green, blue),
+        }
+    }
+}
+
+/// One cell of the grid, with the styling the program asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermCell {
+    /// The text in the cell. Empty for the second half of a wide character.
+    pub text: String,
+    /// The foreground colour.
+    pub fg: TermColor,
+    /// The background colour.
+    pub bg: TermColor,
+    pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub underline: bool,
+    /// The program asked for the foreground and background to be swapped.
+    pub inverse: bool,
+    /// The cell holds the first half of a double-width character.
+    pub wide: bool,
+    /// The cell is the empty second half of a double-width character.
+    pub wide_continuation: bool,
+}
+
+impl TermCell {
+    fn from_vt100(cell: &vt100::Cell) -> Self {
+        Self {
+            text: cell.contents().to_string(),
+            fg: cell.fgcolor().into(),
+            bg: cell.bgcolor().into(),
+            bold: cell.bold(),
+            dim: cell.dim(),
+            italic: cell.italic(),
+            underline: cell.underline(),
+            inverse: cell.inverse(),
+            wide: cell.is_wide(),
+            wide_continuation: cell.is_wide_continuation(),
+        }
+    }
+}
+
 /// One terminal's parsed state. Every mutation bumps `revision`, so a client can tell a still
 /// screen from a redrawn one without diffing text.
 pub struct ScreenState {
@@ -111,6 +170,33 @@ impl ScreenState {
             .collect();
         self.parser.screen_mut().set_scrollback(0);
         rows
+    }
+
+    /// The rows the pane shows when its viewport sits `offset_from_bottom` rows above the live
+    /// bottom, with every cell's styling. Same rows as `viewport_rows`, so the terminal lens can
+    /// paint colour without a second source of truth for what is on screen.
+    pub fn viewport_cells(&mut self, offset_from_bottom: usize) -> Vec<Vec<TermCell>> {
+        let (rows, cols) = self.size();
+        let offset = offset_from_bottom.min(self.scrollback_len());
+        self.parser.screen_mut().set_scrollback(offset);
+        let cells = {
+            let screen = self.parser.screen();
+            (0..rows)
+                .map(|row| {
+                    (0..cols)
+                        .map(|col| {
+                            TermCell::from_vt100(
+                                screen
+                                    .cell(row, col)
+                                    .expect("row and col come from the grid's own size"),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        self.parser.screen_mut().set_scrollback(0);
+        cells
     }
 
     /// The live screen's cursor cell as `(row, col)`, for the terminal lens's cursor.
@@ -383,5 +469,92 @@ mod tests {
         let clamped = screen.viewport_rows(usize::MAX);
         assert_eq!(clamped, screen.viewport_rows(screen.scrollback_len()));
         assert_eq!(clamped.first().map(String::as_str), Some("one"));
+    }
+
+    #[test]
+    fn a_plain_cell_has_the_default_colours() {
+        let mut screen = ScreenState::new(6, 40);
+        screen.process("hi");
+        let cells = screen.viewport_cells(0);
+        let cell = &cells[0][0];
+        assert_eq!(cell.text, "h");
+        assert_eq!(cell.fg, TermColor::Default);
+        assert_eq!(cell.bg, TermColor::Default);
+        assert!(!cell.bold);
+        assert!(!cell.dim);
+        assert!(!cell.italic);
+        assert!(!cell.underline);
+        assert!(!cell.inverse);
+        assert!(!cell.wide);
+        assert!(!cell.wide_continuation);
+        assert_eq!(cells[0][1].text, "i");
+    }
+
+    #[test]
+    fn a_cell_carries_the_colour_the_program_asked_for() {
+        let mut screen = ScreenState::new(6, 40);
+        screen.process("\x1b[31mred\x1b[0m");
+        screen.process("\x1b[38;2;10;20;30mtrue\x1b[0m");
+        let cells = screen.viewport_cells(0);
+        assert_eq!(cells[0][0].text, "r");
+        assert_eq!(cells[0][0].fg, TermColor::Indexed(1));
+        assert_eq!(cells[0][3].text, "t");
+        assert_eq!(cells[0][3].fg, TermColor::Rgb(10, 20, 30));
+    }
+
+    #[test]
+    fn a_bold_cell_says_so() {
+        let mut screen = ScreenState::new(6, 40);
+        screen.process("\x1b[1mbold\x1b[0m");
+        let cells = screen.viewport_cells(0);
+        assert!(cells[0][0].bold);
+        assert_eq!(cells[0][0].text, "b");
+    }
+
+    #[test]
+    fn an_inverse_cell_says_so() {
+        let mut screen = ScreenState::new(6, 40);
+        screen.process("\x1b[7mrev\x1b[0m");
+        let cells = screen.viewport_cells(0);
+        assert!(cells[0][0].inverse);
+    }
+
+    #[test]
+    fn a_wide_character_occupies_two_cells() {
+        let mut screen = ScreenState::new(6, 40);
+        screen.process("漢");
+        let cells = screen.viewport_cells(0);
+        assert_eq!(cells[0][0].text, "漢");
+        assert!(cells[0][0].wide);
+        assert_eq!(cells[0][1].text, "");
+        assert!(cells[0][1].wide_continuation);
+    }
+
+    #[test]
+    fn a_cell_carries_the_background_the_program_asked_for() {
+        let mut screen = ScreenState::new(6, 40);
+        screen.process("\x1b[44mbg\x1b[0m");
+        let cells = screen.viewport_cells(0);
+        assert_eq!(cells[0][0].text, "b");
+        assert_eq!(cells[0][0].bg, TermColor::Indexed(4));
+    }
+
+    #[test]
+    fn the_cells_agree_with_the_plain_rows() {
+        let mut screen = ScreenState::new(4, 20);
+        screen.process("hello\r\nworld\r\nthird\r\nfourth\r\n");
+        for offset in 0..=2 {
+            let rows = screen.viewport_rows(offset);
+            let cells = screen.viewport_cells(offset);
+            assert_eq!(cells.len(), rows.len(), "offset {offset}");
+            for (cells_row, plain) in cells.iter().zip(&rows) {
+                let text: String = cells_row
+                    .iter()
+                    .filter(|cell| !cell.wide_continuation)
+                    .map(|cell| cell.text.as_str())
+                    .collect();
+                assert_eq!(text.trim_end(), plain, "offset {offset}");
+            }
+        }
     }
 }

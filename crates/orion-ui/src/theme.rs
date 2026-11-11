@@ -355,6 +355,82 @@ pub fn hsla(color: Rgba) -> Hsla {
     color.into()
 }
 
+/// The standard xterm 256-colour palette, as red, green, blue triples.
+///
+/// Index 0-15 are the sixteen ANSI colours, 16-231 are the 6x6x6 colour cube and
+/// 232-255 are the greyscale ramp.
+pub const XTERM_256: [(u8, u8, u8); 256] = build_xterm_256();
+
+/// The sixteen ANSI colours, ordered as terminals number them (xterm defaults).
+const ANSI_16: [(u8, u8, u8); 16] = [
+    (0, 0, 0),
+    (205, 0, 0),
+    (0, 205, 0),
+    (205, 205, 0),
+    (0, 0, 238),
+    (205, 0, 205),
+    (0, 205, 205),
+    (229, 229, 229),
+    (127, 127, 127),
+    (255, 0, 0),
+    (0, 255, 0),
+    (255, 255, 0),
+    (92, 92, 255),
+    (255, 0, 255),
+    (0, 255, 255),
+    (255, 255, 255),
+];
+
+/// One axis of the 6x6x6 cube: level 0 is off, levels 1-5 are 95, 135, ... 255.
+const fn cube_level(level: usize) -> u8 {
+    if level == 0 {
+        0
+    } else {
+        55 + 40 * (level as u8)
+    }
+}
+
+/// Fill the palette at compile time: fixed ANSI block, computed cube, computed
+/// greyscale ramp. A computed table cannot drift from the documented formula.
+const fn build_xterm_256() -> [(u8, u8, u8); 256] {
+    let mut table = [(0, 0, 0); 256];
+    let mut i = 0;
+    while i < 16 {
+        table[i] = ANSI_16[i];
+        i += 1;
+    }
+    while i < 232 {
+        let n = i - 16;
+        table[i] = (
+            cube_level(n / 36),
+            cube_level((n % 36) / 6),
+            cube_level(n % 6),
+        );
+        i += 1;
+    }
+    while i < 256 {
+        let grey = 8 + 10 * (i - 232) as u8;
+        table[i] = (grey, grey, grey);
+        i += 1;
+    }
+    table
+}
+
+/// The colour at `index` in the xterm palette.
+///
+/// Every `u8` is in the palette. A caller that must tell "the terminal's default
+/// colour" apart from a palette colour matches its own colour type first and
+/// calls this only for palette indices.
+pub fn xterm_256(index: u8) -> Rgba {
+    let (r, g, b) = XTERM_256[usize::from(index)];
+    rgb_color(r, g, b)
+}
+
+/// A 24-bit colour, as a program asked for it.
+pub fn rgb_color(r: u8, g: u8, b: u8) -> Rgba {
+    rgb(u32::from_be_bytes([0, r, g, b]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +503,39 @@ mod tests {
         Theme::set_current(Theme::light());
         assert_eq!(Theme::current().mode, ThemeMode::Light);
         Theme::set_current(Theme::dark());
+    }
+
+    #[test]
+    fn the_palette_starts_with_the_ansi_colours() {
+        assert_eq!(xterm_256(0), rgb(0x000000), "index 0 is black");
+        assert_eq!(xterm_256(1), rgb(0xcd0000), "index 1 is maroon");
+        assert_eq!(xterm_256(4), rgb(0x0000ee), "index 4 is navy");
+        assert_eq!(xterm_256(7), rgb(0xe5e5e5), "index 7 is silver");
+        assert_eq!(xterm_256(15), rgb(0xffffff), "index 15 is bright white");
+    }
+
+    #[test]
+    fn the_cube_starts_at_sixteen() {
+        assert_eq!(xterm_256(16), rgb(0x000000), "cube origin is off-black");
+        // index 21 is n=5: r=0, g=0, b=5 -> level 5 -> 55 + 40*5 = 255.
+        assert_eq!(xterm_256(21), rgb(0x0000ff));
+        assert_eq!(xterm_256(196), rgb(0xff0000), "cube pure red");
+        assert_eq!(xterm_256(231), rgb(0xffffff), "cube far corner is white");
+    }
+
+    /// xterm's ramp is `8 + 10 * (i - 232)`, so the lightest step is 238, not
+    /// pure white -- index 15 is the white ANSI colour.
+    #[test]
+    fn the_greyscale_ramp_ends_at_white() {
+        assert_eq!(xterm_256(232), rgb(0x080808));
+        assert_eq!(xterm_256(243), rgb(0x767676));
+        assert_eq!(xterm_256(255), rgb(0xeeeeee), "ramp ends at 238");
+    }
+
+    #[test]
+    fn a_truecolor_value_is_the_colour_it_names() {
+        assert_eq!(rgb_color(10, 20, 30), rgb(0x0a141e));
+        assert_eq!(rgb_color(0, 0, 0), rgb(0x000000));
+        assert_eq!(rgb_color(255, 255, 255), rgb(0xffffff));
     }
 }
