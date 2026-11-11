@@ -17,7 +17,7 @@ use crate::new_workspace::{recent_directory, NewWorkspaceEvent, NewWorkspaceModa
 use crate::pane_seam::seam_of;
 use crate::settings::{KeyBarExtras, SettingsModal};
 use crate::shell_model::{
-    changes_files_panel_width, lens_segment_state, HeaderModel, LensBook, ShellLayout,
+    lens_segment_state, HeaderModel, LensBook, ShellLayout, FILES_SURFACE_WIDTH_WIDE,
 };
 use crate::sidebar::SidebarEvent;
 use crate::terminal::TerminalPane;
@@ -341,12 +341,14 @@ impl OrionApp {
                         }
                     }
                 }
+                // The tree does the revealing, not the reader alone: it expands
+                // the file's ancestor folders, selects the row and opens the
+                // file, so the tree and the reader agree on what is shown.
                 let tree = match pane {
                     ChatPane::Focused => self.file_tree.clone(),
                     ChatPane::Split => self.split_file_tree.clone(),
                 };
-                let reader = tree.read(cx).file_reader().clone();
-                reader.update(cx, |reader, _cx| reader.open(path.clone()));
+                tree.update(cx, |tree, cx| tree.reveal(cx, path.clone()));
             }
         }
     }
@@ -981,43 +983,60 @@ impl Render for OrionApp {
                     .flex_1()
                     .child(self.terminal_pane.clone()),
                 Lens::Changes => {
-                    // The tree and the reader are a fixed column, not a second
-                    // flex half: the diff keeps readable width at 1280px (issue
-                    // #13). The width the changes view actually receives is
-                    // pushed in so its splitter clamps against real room.
-                    let panel_w = changes_files_panel_width(layout.rail);
+                    // This lens is two surfaces: Files (tree, splitter, reader)
+                    // and Changes (list, splitter, diff). Wide they sit side by
+                    // side with a fixed Files column so the diff keeps readable
+                    // width; narrow they stack, so neither surface is hidden
+                    // and each keeps its own inner split. Each view is told the
+                    // width its surface really receives so its splitter clamps
+                    // against real room.
                     let mut main_room = window_w - sidebar_w;
                     if split_second.is_some() {
                         // The split canvas shows a second pane beside this one;
                         // each half gets half the main column.
                         main_room /= 2.0;
                     }
-                    let changes_room = main_room - panel_w;
+                    let files_room = if layout.rail {
+                        main_room
+                    } else {
+                        FILES_SURFACE_WIDTH_WIDE
+                    };
+                    let changes_room = if layout.rail {
+                        main_room
+                    } else {
+                        main_room - FILES_SURFACE_WIDTH_WIDE
+                    };
+                    self.file_tree
+                        .update(cx, |view, _cx| view.set_available_width(files_room));
                     self.changes_view
                         .update(cx, |view, _cx| view.set_available_width(changes_room));
-                    div()
-                        .id("main-content")
+                    let files_surface = div()
+                        .id("changes-left")
                         .flex()
-                        .flex_row()
-                        .flex_1()
-                        .child(
-                            div()
-                                .id("changes-left")
-                                .flex()
-                                .flex_col()
-                                .w(px(panel_w))
-                                .flex_shrink_0()
-                                .child(self.file_tree.clone()),
-                        )
-                        .child(
-                            div()
-                                .id("changes-right")
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .child(self.changes_view.clone()),
-                        )
+                        .flex_col()
+                        .child(self.file_tree.clone());
+                    let changes_surface = div()
+                        .id("changes-right")
+                        .flex()
+                        .flex_col()
+                        .min_w(px(0.0))
+                        .child(self.changes_view.clone());
+                    let canvas = div().id("main-content").flex().flex_1();
+                    if layout.rail {
+                        canvas
+                            .flex_col()
+                            .child(files_surface.flex_1().min_h(px(0.0)))
+                            .child(changes_surface.flex_1().min_h(px(0.0)))
+                    } else {
+                        canvas
+                            .flex_row()
+                            .child(
+                                files_surface
+                                    .w(px(FILES_SURFACE_WIDTH_WIDE))
+                                    .flex_shrink_0(),
+                            )
+                            .child(changes_surface.flex_1())
+                    }
                 }
             };
             if let Some(second_id) = split_second.clone() {
@@ -1066,35 +1085,51 @@ impl Render for OrionApp {
                         .flex_1()
                         .child(self.split_terminal_pane.clone()),
                     Lens::Changes => {
-                        // Same fixed-panel arithmetic as the main canvas, inside
-                        // this half of the split.
-                        let panel_w = changes_files_panel_width(layout.rail);
-                        let split_room = (window_w - sidebar_w) / 2.0 - panel_w;
+                        // Same two-surface layout as the main canvas, inside
+                        // this half of the split, with the half's width pushed
+                        // to both views.
+                        let split_room = (window_w - sidebar_w) / 2.0;
+                        let files_room = if layout.rail {
+                            split_room
+                        } else {
+                            FILES_SURFACE_WIDTH_WIDE
+                        };
+                        let changes_room = if layout.rail {
+                            split_room
+                        } else {
+                            split_room - FILES_SURFACE_WIDTH_WIDE
+                        };
+                        self.split_file_tree
+                            .update(cx, |view, _cx| view.set_available_width(files_room));
                         self.split_changes_view
-                            .update(cx, |view, _cx| view.set_available_width(split_room));
-                        div()
-                            .id("pane-split-second-changes")
+                            .update(cx, |view, _cx| view.set_available_width(changes_room));
+                        let files_surface = div()
+                            .id("split-changes-left")
                             .flex()
-                            .flex_row()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .id("split-changes-left")
-                                    .flex()
-                                    .flex_col()
-                                    .w(px(panel_w))
-                                    .flex_shrink_0()
-                                    .child(self.split_file_tree.clone()),
-                            )
-                            .child(
-                                div()
-                                    .id("split-changes-right")
-                                    .flex()
-                                    .flex_col()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .child(self.split_changes_view.clone()),
-                            )
+                            .flex_col()
+                            .child(self.split_file_tree.clone());
+                        let changes_surface = div()
+                            .id("split-changes-right")
+                            .flex()
+                            .flex_col()
+                            .min_w(px(0.0))
+                            .child(self.split_changes_view.clone());
+                        let canvas = div().id("pane-split-second-changes").flex().flex_1();
+                        if layout.rail {
+                            canvas
+                                .flex_col()
+                                .child(files_surface.flex_1().min_h(px(0.0)))
+                                .child(changes_surface.flex_1().min_h(px(0.0)))
+                        } else {
+                            canvas
+                                .flex_row()
+                                .child(
+                                    files_surface
+                                        .w(px(FILES_SURFACE_WIDTH_WIDE))
+                                        .flex_shrink_0(),
+                                )
+                                .child(changes_surface.flex_1())
+                        }
                     }
                 };
                 div()
