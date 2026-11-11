@@ -53,12 +53,39 @@ struct TerminalFont {
     cell: CellSize,
 }
 
-/// The first family in the stack that is installed and measures monospace.
+/// Whether a face can carry a terminal grid.
+///
+/// Its letters must share one advance, and the box-drawing and block glyphs an
+/// agent draws its frames with must sit on that same advance. A CJK face
+/// satisfies the first rule — its ASCII is half width — but draws those glyphs
+/// FULL width, so the agent's art would come out twice as wide as the grid and
+/// every border would look doubled.
+pub fn face_carries_a_grid(
+    ascii_advance: f32,
+    wide_advance: f32,
+    glyph_advances: &[Option<f32>],
+) -> bool {
+    if (ascii_advance - wide_advance).abs() > 0.01 {
+        return false;
+    }
+    glyph_advances.iter().all(|advance| match advance {
+        Some(advance) => (advance - ascii_advance).abs() <= 0.01,
+        // A glyph the face cannot even be measured for is drawn by a
+        // fallback, which is exactly what this rule exists to refuse.
+        None => false,
+    })
+}
+
+/// The glyphs an agent draws its frames with: a box edge, a filled block and a
+/// half block.
+const GRID_GLYPHS: [char; 3] = ['\u{2500}', '\u{2588}', '\u{2580}'];
+
+/// Measure the terminal's font: the family the reader configured, or the first
+/// one that is installed AND can carry a grid.
 ///
 /// gpui resolves a family that is not installed to the system UI font, which is
 /// proportional: a grid drawn with it goes ragged, and the agent's menu stops
-/// lining up. So a family is only used when it is installed AND every glyph
-/// sits on the same advance.
+/// lining up.
 fn measure_terminal_font(
     text_system: &TextSystem,
     families: &[String],
@@ -79,17 +106,26 @@ fn measure_terminal_font(
         let Ok(wide) = text_system.advance(id, font_size, 'W') else {
             continue;
         };
-        if (f32::from(narrow.width) - f32::from(wide.width)).abs() > 0.01 {
+        // A cell is one ASCII character wide. A wide character takes two of
+        // them, which is the grid's business, not the font's.
+        let cell_width = f32::from(narrow.width);
+        let glyph_advances: Vec<Option<f32>> = GRID_GLYPHS
+            .iter()
+            .map(|glyph| {
+                text_system
+                    .advance(id, font_size, *glyph)
+                    .ok()
+                    .map(|advance| f32::from(advance.width))
+            })
+            .collect();
+        if !face_carries_a_grid(cell_width, f32::from(wide.width), &glyph_advances) {
             continue;
         }
-        let Ok(width) = text_system.ch_advance(id, font_size) else {
-            continue;
-        };
         let height = text_system.ascent(id, font_size) + text_system.descent(id, font_size);
         return Some(TerminalFont {
             family: family.clone(),
             cell: CellSize {
-                width: f32::from(width),
+                width: cell_width,
                 height: f32::from(height).max(1.0),
             },
         });
@@ -1354,6 +1390,33 @@ mod tests {
                 "the grid has a height of its own: {bounds:?}"
             );
         });
+    }
+
+    #[test]
+    fn a_face_that_draws_its_box_glyphs_full_width_cannot_carry_a_grid() {
+        // A Latin monospace face: every glyph on the same advance.
+        assert!(face_carries_a_grid(
+            7.2,
+            7.2,
+            &[Some(7.2), Some(7.2), Some(7.2)]
+        ));
+        // A proportional face: the letters do not share an advance.
+        assert!(!face_carries_a_grid(
+            2.9,
+            11.2,
+            &[Some(2.9), Some(11.2), Some(11.2)]
+        ));
+        // A CJK monospace face: its ASCII is half width, but the box-drawing
+        // and block glyphs it draws are FULL width, so the agent's art would
+        // come out twice as wide as the grid.
+        assert!(!face_carries_a_grid(
+            7.2,
+            7.2,
+            &[Some(7.2), Some(14.4), Some(14.4)]
+        ));
+        // A face that cannot even be measured for those glyphs carries no
+        // grid either: the agent's frames would be drawn by a fallback.
+        assert!(!face_carries_a_grid(7.2, 7.2, &[None]));
     }
 
     #[gpui::test]
