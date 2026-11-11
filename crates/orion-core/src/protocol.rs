@@ -131,6 +131,46 @@ impl AgentStatus {
     }
 }
 
+/// What a running program says about itself.
+///
+/// A program reports its own state; Orion never guesses it from the screen. A
+/// terminal that has not reported has no status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReportedStatus {
+    /// The program is working.
+    Working,
+    /// The program finished its work.
+    Done,
+    /// The program cannot go on without help.
+    Blocked,
+    /// The program failed.
+    Error,
+}
+
+impl ReportedStatus {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Done => "done",
+            Self::Blocked => "blocked",
+            Self::Error => "error",
+        }
+    }
+
+    /// The inverse of [`ReportedStatus::as_wire`]. `None` is a status this
+    /// engine does not know, so the caller decides its own fallback.
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw {
+            "working" => Some(Self::Working),
+            "done" => Some(Self::Done),
+            "blocked" => Some(Self::Blocked),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+}
+
 /// Information about an installed and discovered agent CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveredAgent {
@@ -347,7 +387,7 @@ pub struct PushPayload {
 
 #[cfg(test)]
 mod tests {
-    use super::AgentStatus;
+    use super::{AgentStatus, ReportedStatus};
 
     #[test]
     fn agent_status_wire_names_round_trip() {
@@ -362,5 +402,18 @@ mod tests {
             assert_eq!(AgentStatus::from_wire(status.as_wire()), Some(status));
         }
         assert_eq!(AgentStatus::from_wire("compacting"), None);
+    }
+
+    #[test]
+    fn reported_status_wire_names_round_trip() {
+        for status in [
+            ReportedStatus::Working,
+            ReportedStatus::Done,
+            ReportedStatus::Blocked,
+            ReportedStatus::Error,
+        ] {
+            assert_eq!(ReportedStatus::from_wire(status.as_wire()), Some(status));
+        }
+        assert_eq!(ReportedStatus::from_wire("compacting"), None);
     }
 }
