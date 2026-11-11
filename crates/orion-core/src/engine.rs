@@ -48,6 +48,7 @@ use self::session::SessionState;
 use self::store::Store;
 use self::transcript_manager::TranscriptManager;
 use self::watcher::Watcher;
+use crate::runtime::{PaneHandle, Runtime};
 
 pub use self::pane::FrameSink;
 pub use self::pane::PaneConfig;
@@ -363,6 +364,51 @@ pub(crate) fn on_pane_event(
             };
             push.broadcast(&payload, AgentStatus::Done, agent_kind.as_deref());
         }
+    }
+}
+
+/// The engine answers the shell's [`Runtime`] questions by doing exactly what its inherent
+/// methods do: these are delegations, so holding the engine in another process later changes
+/// where the answers come from, never what they are.
+impl Runtime for Engine {
+    fn identity(&self) -> Value {
+        Engine::identity(self)
+    }
+
+    fn http(&self, method: &str, path: &str, body: &Value) -> (u16, Value) {
+        Engine::http(self, method, path, body)
+    }
+
+    fn pane_by_id(&self, pane_id: &str) -> Option<Arc<dyn PaneHandle>> {
+        Engine::pane_by_id(self, pane_id).map(|pane| pane as Arc<dyn PaneHandle>)
+    }
+
+    fn connect(&self, sink: FrameSink) -> String {
+        Engine::connect(self, sink)
+    }
+
+    fn send_to(&self, connection: &str, frame: Value) {
+        Engine::send_to(self, connection, frame)
+    }
+
+    fn disconnect(&self, connection: &str) {
+        Engine::disconnect(self, connection)
+    }
+
+    fn dispatch_from(
+        &self,
+        connection: Option<&str>,
+        request: &Value,
+    ) -> crate::error::Result<Option<Value>, String> {
+        Engine::dispatch_from(self, connection, request)
+    }
+
+    fn snapshot_value(&self) -> Value {
+        Engine::snapshot_value(self)
+    }
+
+    fn restore(&self) {
+        Engine::restore(self)
     }
 }
 
@@ -1099,5 +1145,30 @@ mod tests {
 
         let (status, _) = engine.http("DELETE", "/api/devices/:id?id=nonexistent", &Value::Null);
         assert_eq!(status, 204);
+    }
+
+    #[test]
+    fn the_runtime_trait_object_is_the_engine_itself() {
+        let engine = engine();
+        let runtime: Arc<dyn Runtime> = Arc::new(engine.clone());
+
+        let (status, body) = runtime.http("GET", "/api/health", &Value::Null);
+        assert_eq!(status, 200);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["orion"]["protocol"], PROTOCOL_VERSION);
+
+        // The trait object reports what the engine reports: same identity, same session.
+        assert_eq!(runtime.identity(), engine.identity());
+        let snapshot = runtime.snapshot_value();
+        assert_eq!(snapshot, engine.snapshot_value());
+        for key in ["agents", "layouts", "panes", "tabs", "workspaces"] {
+            assert!(
+                snapshot[key].as_array().is_some(),
+                "{key} is an array through the trait object"
+            );
+        }
+
+        // The pane lookup is the engine's own: an unknown id stays unknown.
+        assert!(runtime.pane_by_id("missing").is_none());
     }
 }

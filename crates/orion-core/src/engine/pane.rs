@@ -22,6 +22,7 @@ use crate::error::{OrionError, Result};
 use crate::prompt::{self, DetectedPrompt};
 use crate::protocol::{AgentKind, AgentStatus, TerminalSize};
 use crate::pty::PtySession;
+use crate::runtime::PaneHandle;
 use crate::screen::ScreenState;
 
 /// A frame sink: one connected client's delivery function. Cheap to clone and safe to call from
@@ -762,6 +763,67 @@ fn encode_key(key: &str) -> String {
 /// The path a pane was started in, for a caller that kept only the pane id.
 pub fn cwd_of(pane: &Pane) -> &Path {
     &pane.cwd
+}
+
+/// The pane answers the shell's [`PaneHandle`] questions by doing exactly what its inherent
+/// methods do: a pane in another process can answer them the same way later, so the terminal
+/// lens keeps one code path.
+impl PaneHandle for Pane {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    fn write(&self, data: &str) -> Result<()> {
+        Pane::write(self, data)
+    }
+
+    fn keys(&self, keys: &[String]) -> Result<()> {
+        Pane::keys(self, keys)
+    }
+
+    fn interrupt(&self) -> Result<()> {
+        Pane::interrupt(self)
+    }
+
+    fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        Pane::resize(self, cols, rows)
+    }
+
+    fn clear(&self) {
+        Pane::clear(self)
+    }
+
+    fn status(&self) -> AgentStatus {
+        Pane::status(self)
+    }
+
+    fn prompt(&self) -> Option<DetectedPrompt> {
+        Pane::prompt(self)
+    }
+
+    fn attach(
+        &self,
+        connection: &str,
+        sink: FrameSink,
+        role: Role,
+        cols: u16,
+        rows: u16,
+        keep_size: bool,
+    ) -> Result<()> {
+        Pane::attach(self, connection, sink, role, cols, rows, keep_size)
+    }
+
+    fn detach(&self, connection: &str) {
+        Pane::detach(self, connection)
+    }
+
+    fn detach_all(&self, connection: &str) {
+        Pane::detach_all(self, connection)
+    }
 }
 
 #[cfg(test)]
