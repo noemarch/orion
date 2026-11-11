@@ -27,6 +27,7 @@
 use crate::files_entities::{
     url_encode, RepoDiffFile, RepoDiffFileList, RepoDiffFilePatch, RepoDiffScope, RepoDiffStatus,
 };
+use crate::shell_model::SPLITTER_WIDTH_PX;
 use crate::theme::Theme;
 use gpui::prelude::*;
 use gpui::{
@@ -217,8 +218,6 @@ pub const LIST_WIDTH_MIN: f32 = 160.0;
 pub const DIFF_WIDTH_MIN: f32 = 280.0;
 /// File-list width before the reader drags the splitter (px).
 pub const LIST_WIDTH_DEFAULT: f32 = 320.0;
-/// The splitter's own column width (px).
-pub const SPLITTER_WIDTH_PX: f32 = 8.0;
 
 /// Clamp a requested list width so the diff column keeps
 /// [`DIFF_WIDTH_MIN`] px of whatever room the view actually received. The

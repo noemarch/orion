@@ -11,11 +11,19 @@
 //! engine already owns `notify` watchers for session-changed, and GPUI views
 //! poll rather than adding a second watcher to `orion-ui`. The poll only
 //! runs while the reader is visible (the Changes lens is active).
+//!
+//! Failures speak plain language ([`FILE_ERROR_MESSAGE`]) and offer a Retry,
+//! the chat lens's voice; the raw status or error body belongs in a log, not
+//! on screen. The body draws with line numbers in a monospace face resolved
+//! the way `terminal.rs` resolves its grid font: a family is only used when it
+//! is installed AND really measures monospace, because gpui quietly resolves
+//! the CSS generic `monospace` to a proportional system font on Windows.
 
 use crate::files_entities::{url_encode, FileInfo, FileKind};
+use crate::terminal_font::terminal_font_families;
 use crate::theme::Theme;
 use gpui::prelude::*;
-use gpui::{div, px, white, Context, Render, ScrollHandle, Window};
+use gpui::{div, px, white, Context, Render, ScrollHandle, TextAlign, TextSystem, Window};
 use orion_core::Engine;
 use serde_json::Value;
 use std::sync::Arc;
@@ -23,6 +31,10 @@ use std::time::Duration;
 
 /// Byte cap for the text body: the viewer is a preview, not an editor.
 pub const MAX_FILE_CHARS: usize = 200_000;
+
+/// Plain-language copy for every failure path. The raw status, error body, or
+/// path never reaches the reader; the detail belongs in a log, not on screen.
+pub const FILE_ERROR_MESSAGE: &str = "Couldn't read this file. Try again.";
 
 pub struct FileReader {
     engine: Option<Arc<Engine>>,
@@ -35,6 +47,46 @@ pub struct FileReader {
     scroll_handle: ScrollHandle,
     row_seq: usize,
     last_body: Option<String>,
+    /// The resolved monospace family for the body, cached after the first
+    /// render so the font lookup runs once.
+    font_family: Option<gpui::SharedString>,
+    /// Whether the family lookup already ran (a miss is cached too).
+    font_family_resolved: bool,
+}
+
+/// The first family in the terminal's fallback stack that is installed and
+/// really measures monospace, the way `terminal.rs` picks its grid font: gpui
+/// resolves a family that is not installed to the system UI font, which is
+/// proportional, so a face is only used when `i` and `W` advance the same.
+fn resolve_mono_family(text_system: &TextSystem) -> Option<gpui::SharedString> {
+    let installed = text_system.all_font_names();
+    let font_size = px(12.0);
+    for family in terminal_font_families("") {
+        if !installed
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&family))
+        {
+            continue;
+        }
+        let id = text_system.resolve_font(&gpui::font(family.clone()));
+        let Ok(narrow) = text_system.advance(id, font_size, 'i') else {
+            continue;
+        };
+        let Ok(wide) = text_system.advance(id, font_size, 'W') else {
+            continue;
+        };
+        if (f32::from(narrow.width) - f32::from(wide.width)).abs() > 0.01 {
+            continue;
+        }
+        return Some(family.into());
+    }
+    None
+}
+
+/// A gutter label for a 1-based line number, right-aligned to four columns so
+/// the digits line up under each other.
+pub fn line_number_label(number: usize) -> String {
+    format!("{number:>4}")
 }
 
 impl FileReader {
@@ -50,6 +102,8 @@ impl FileReader {
             scroll_handle: ScrollHandle::new(),
             row_seq: 0,
             last_body: None,
+            font_family: None,
+            font_family_resolved: false,
         };
         view.start_poll(cx);
         view
@@ -105,15 +159,15 @@ impl FileReader {
         );
         let (status, body) = engine.http("GET", &stat_path, &Value::Null);
         if status != 200 {
-            self.error = Some(format!("file stat failed ({status}): {path}"));
+            self.error = Some(FILE_ERROR_MESSAGE.to_string());
             self.info = None;
             self.text = None;
             return;
         }
         let info = match FileInfo::parse(&body) {
             Ok(info) => info,
-            Err(error) => {
-                self.error = Some(format!("file stat parse failed: {error}"));
+            Err(_) => {
+                self.error = Some(FILE_ERROR_MESSAGE.to_string());
                 return;
             }
         };
@@ -136,7 +190,7 @@ impl FileReader {
         );
         let (status, body) = engine.http("GET", &file_path, &Value::Null);
         if status != 200 {
-            self.error = Some(format!("file read failed ({status}): {path}"));
+            self.error = Some(FILE_ERROR_MESSAGE.to_string());
             self.text = None;
             return;
         }
@@ -153,7 +207,7 @@ impl FileReader {
                     text.to_string()
                 });
             }
-            None => self.error = Some(format!("file body had no text: {path}")),
+            None => self.error = Some(FILE_ERROR_MESSAGE.to_string()),
         }
     }
 
@@ -171,13 +225,54 @@ impl FileReader {
         })
         .detach();
     }
+
+    /// The current failure, if any (plain language; tests read this).
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// The open file's path, if one is open.
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
+    /// A file fetch answered (test seam mirroring `apply_list`).
+    pub fn apply_file(&mut self, path: String, info: FileInfo, text: String) {
+        self.path = Some(path);
+        self.info = Some(info);
+        self.text = Some(text);
+        self.last_body = None;
+        self.error = None;
+    }
+
+    /// A file fetch failed (test seam). The raw message is dropped: the view
+    /// owns the plain-language copy the reader sees.
+    pub fn fail_file(&mut self, _raw: String) {
+        self.error = Some(FILE_ERROR_MESSAGE.to_string());
+        self.text = None;
+    }
+
+    /// The reader asked for the file again: forget the cached body so the
+    /// next answer is re-parsed even when identical, then re-issue the fetch.
+    pub fn retry(&mut self) {
+        self.error = None;
+        self.last_body = None;
+        self.refresh();
+    }
 }
 
 impl Render for FileReader {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.row_seq = 0;
+        // The monospace face is resolved once, on the first render that has a
+        // window to ask; a miss is cached too so the lookup does not re-run.
+        if !self.font_family_resolved {
+            self.font_family_resolved = true;
+            self.font_family = resolve_mono_family(window.text_system());
+        }
         let mut root = div()
             .id("file-reader")
+            .debug_selector(|| "file-reader".to_string())
             .flex()
             .flex_col()
             .size_full()
@@ -229,15 +324,47 @@ impl Render for FileReader {
             );
         }
 
-        if let Some(error) = self.error.clone() {
+        // A failed fetch speaks plain language and offers a Retry (the chat
+        // lens's voice); the raw status or error body never reaches the reader.
+        if let Some(message) = self.error.clone() {
+            let theme = Theme::current();
             root = root.child(
                 div()
-                    .id(self.next_row_id())
+                    .id("file-reader-error")
+                    .debug_selector(|| "file-reader-error".to_string())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
                     .px_3()
-                    .py_1()
-                    .text_size(px(12.0 * Theme::current().density_scale()))
-                    .text_color(Theme::current().danger_text)
-                    .child(error.clone()),
+                    .py_2()
+                    .bg(theme.danger_tint)
+                    .child(
+                        div()
+                            .text_size(px(12.0 * theme.density_scale()))
+                            .text_color(theme.danger_text)
+                            .child(message),
+                    )
+                    .child(
+                        div()
+                            .id("file-reader-retry")
+                            .debug_selector(|| "file-reader-retry".to_string())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .min_h(px(44.0))
+                            .px_3()
+                            .rounded_md()
+                            .bg(theme.primary)
+                            .text_color(theme.primary_text)
+                            .text_size(px(12.0 * theme.density_scale()))
+                            .child("Retry")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.retry();
+                                cx.notify();
+                            })),
+                    ),
             );
         }
 
@@ -276,19 +403,46 @@ impl Render for FileReader {
                 );
             }
             Some(_) => {
-                let mut body = div().id(self.next_row_id()).flex().flex_col().px_3().py_2();
+                // One row per line: a right-aligned gutter with the 1-based
+                // number, then the line's text. An empty line keeps its
+                // number and its row (a single space holds the row open).
+                let theme = Theme::current();
+                let mut body = div()
+                    .id("file-reader-lines")
+                    .debug_selector(|| "file-reader-lines".to_string())
+                    .flex()
+                    .flex_col()
+                    .px_3()
+                    .py_2()
+                    .font_family(self.font_family.clone().unwrap_or_default());
                 if let Some(text) = self.text.clone() {
-                    for line in text.lines() {
+                    for (offset, line) in text.lines().enumerate() {
+                        let number = line_number_label(offset + 1);
                         body = body.child(
                             div()
                                 .id(self.next_row_id())
-                                .text_size(px(12.0 * Theme::current().density_scale()))
-                                .text_color(Theme::current().text)
-                                .child(if line.is_empty() {
-                                    " ".to_string()
-                                } else {
-                                    line.to_string()
-                                }),
+                                .debug_selector(|| "file-reader-line".to_string())
+                                .flex()
+                                .flex_row()
+                                .child(
+                                    div()
+                                        .w(px(44.0))
+                                        .flex_shrink_0()
+                                        .text_align(TextAlign::Right)
+                                        .text_size(px(11.0 * theme.density_scale()))
+                                        .text_color(theme.text_dim)
+                                        .child(number),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0 * theme.density_scale()))
+                                        .text_color(theme.text)
+                                        .child(if line.is_empty() {
+                                            " ".to_string()
+                                        } else {
+                                            line.to_string()
+                                        }),
+                                ),
                         );
                     }
                 } else if self.error.is_none() {
@@ -322,7 +476,121 @@ impl Render for FileReader {
             }
         }
 
-        let _ = cx;
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::files_entities::FileKind;
+    use gpui::{point, size, Entity};
+
+    fn text_info() -> FileInfo {
+        FileInfo {
+            path: "/tmp/a.txt".to_string(),
+            name: "a.txt".to_string(),
+            size: 8,
+            modified: "2026-01-01T00:00:00Z".to_string(),
+            mime: "text/plain".to_string(),
+            kind: FileKind::Text,
+        }
+    }
+
+    #[test]
+    fn line_number_labels_are_right_aligned_to_four_columns() {
+        assert_eq!(line_number_label(1), "   1");
+        assert_eq!(line_number_label(12), "  12");
+    }
+
+    #[gpui::test]
+    fn the_reader_shows_line_numbers_for_its_text(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let view = cx.update(|_window, app| app.new(FileReader::new));
+        cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, cx| {
+            view.update(cx, |v, _cx| {
+                v.apply_file(
+                    "/tmp/a.txt".to_string(),
+                    text_info(),
+                    "one\n\ntwo".to_string(),
+                );
+            });
+            view.clone()
+        });
+        assert!(
+            cx.debug_bounds("file-reader").is_some(),
+            "the reader surface is on screen"
+        );
+        assert!(
+            cx.debug_bounds("file-reader-lines").is_some(),
+            "the body is on screen"
+        );
+        assert!(
+            cx.debug_bounds("file-reader-line").is_some(),
+            "the line rows are on screen"
+        );
+        // The gutter labels come from the pure helper the rows render: the
+        // text "one\n\ntwo" has three lines, numbered 1 through 3.
+        assert_eq!(line_number_label(1), "   1");
+        assert_eq!(line_number_label(3), "   3");
+    }
+
+    struct FileReaderRoot {
+        view: Entity<FileReader>,
+    }
+
+    impl Render for FileReaderRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.view.clone()
+        }
+    }
+
+    #[gpui::test]
+    fn a_file_that_cannot_be_read_shows_an_error_with_a_retry(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| FileReaderRoot {
+            view: cx.new(FileReader::new),
+        });
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |v, _cx| {
+                v.apply_file("/tmp/a.txt".to_string(), text_info(), "one".to_string());
+                v.fail_file("boom".to_string());
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("file-reader-error").is_some(),
+            "the failure is on screen"
+        );
+        let retry = cx
+            .debug_bounds("file-reader-retry")
+            .expect("a Retry is offered");
+        cx.simulate_click(retry.center(), gpui::Modifiers::none());
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            assert_eq!(
+                view.read(app).error(),
+                None,
+                "the Retry cleared the failure"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn an_open_file_is_kept_across_a_visibility_change(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let view = cx.update(|_window, app| app.new(FileReader::new));
+        cx.update(|_window, app| {
+            view.update(app, |v, _cx| {
+                v.apply_file("/tmp/a.txt".to_string(), text_info(), "one".to_string());
+                v.set_visible(false);
+                v.set_visible(true);
+            });
+            assert_eq!(
+                view.read(app).path(),
+                Some("/tmp/a.txt"),
+                "the open file survives the lens toggling"
+            );
+        });
     }
 }

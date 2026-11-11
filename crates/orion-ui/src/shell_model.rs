@@ -30,37 +30,23 @@ impl ShellLayout {
     }
 }
 
-/// Fixed width of the file tree beside the Changes lens (issue #13): a fixed
-/// column instead of a second `flex_1()` half, so the diff keeps readable
-/// width at 1280px instead of splitting the space in two.
-pub const CHANGES_TREE_WIDTH_WIDE: f32 = 220.0;
-/// The same column at the narrow (rail) breakpoint.
-pub const CHANGES_TREE_WIDTH_NARROW: f32 = 140.0;
-/// The room the file reader gets beside the tree, in px. A narrow layout
-/// gives it none: the tree and the diff cannot both be read on a phone.
-pub const CHANGES_READER_WIDTH_WIDE: f32 = 140.0;
-/// The same allowance at the narrow (rail) breakpoint.
-pub const CHANGES_READER_WIDTH_NARROW: f32 = 0.0;
+/// The Files surface's width in the Changes lens (px): the tree and the reader.
+pub const FILES_SURFACE_WIDTH_WIDE: f32 = 460.0;
+/// Narrowest the tree may get (px).
+pub const TREE_WIDTH_MIN: f32 = 140.0;
+/// Narrowest the reader may get (px) — below this the code is not readable.
+pub const READER_WIDTH_MIN: f32 = 240.0;
+/// The tree's width before the reader drags the splitter (px).
+pub const TREE_WIDTH_DEFAULT: f32 = 212.0;
+/// The splitter's own column width (px). One definition for every split view,
+/// so a drag on one lens costs the same as a drag on another.
+pub const SPLITTER_WIDTH_PX: f32 = 8.0;
 
-/// The Changes lens' file-tree width for the shell's breakpoint.
-pub fn changes_tree_width(narrow: bool) -> f32 {
-    if narrow {
-        CHANGES_TREE_WIDTH_NARROW
-    } else {
-        CHANGES_TREE_WIDTH_WIDE
-    }
-}
-
-/// The whole tree-and-reader column of the Changes lens, in px. The tree takes
-/// its own width and the reader takes what is left of the column, so the
-/// reader keeps a body to show a file in.
-pub fn changes_files_panel_width(narrow: bool) -> f32 {
-    changes_tree_width(narrow)
-        + if narrow {
-            CHANGES_READER_WIDTH_NARROW
-        } else {
-            CHANGES_READER_WIDTH_WIDE
-        }
+/// Clamp a requested tree width so the reader keeps [`READER_WIDTH_MIN`] of
+/// whatever room the view received, with the splitter's column taken off too.
+pub fn clamp_tree_width(requested: f32, available: f32) -> f32 {
+    let max = (available - READER_WIDTH_MIN - SPLITTER_WIDTH_PX).max(TREE_WIDTH_MIN);
+    requested.clamp(TREE_WIDTH_MIN, max)
 }
 
 pub struct HeaderModel {
@@ -185,16 +171,6 @@ mod tests {
     }
 
     #[test]
-    fn changes_tree_width_follows_the_breakpoint() {
-        assert_eq!(changes_tree_width(false), CHANGES_TREE_WIDTH_WIDE);
-        assert_eq!(changes_tree_width(true), CHANGES_TREE_WIDTH_NARROW);
-        let layout = ShellLayout::for_width(800.0);
-        assert_eq!(changes_tree_width(layout.rail), 140.0);
-        let layout = ShellLayout::for_width(1280.0);
-        assert_eq!(changes_tree_width(layout.rail), 220.0);
-    }
-
-    #[test]
     fn empty_session_renders_inviting_empty_state() {
         let model = HeaderModel::empty();
         assert_eq!(model.title, "Orion");
@@ -289,6 +265,31 @@ mod tests {
             );
         }
         assert_eq!(text, "tab", "a chord leaves the draft alone");
+    }
+
+    #[test]
+    fn clamp_tree_width_keeps_the_reader_usable() {
+        // Plenty of room: the default passes through.
+        assert_eq!(
+            clamp_tree_width(TREE_WIDTH_DEFAULT, FILES_SURFACE_WIDTH_WIDE),
+            TREE_WIDTH_DEFAULT
+        );
+        // No room measured yet: the reader's floor never makes the cap
+        // negative, so the tree keeps its own minimum.
+        assert_eq!(clamp_tree_width(TREE_WIDTH_DEFAULT, 0.0), TREE_WIDTH_MIN);
+        // Too small a request: the tree keeps its own minimum.
+        assert_eq!(
+            clamp_tree_width(10.0, FILES_SURFACE_WIDTH_WIDE),
+            TREE_WIDTH_MIN
+        );
+        // Too large a request: capped at what the reader can spare, with the
+        // splitter's own column taken off the top.
+        assert_eq!(
+            clamp_tree_width(10_000.0, FILES_SURFACE_WIDTH_WIDE),
+            FILES_SURFACE_WIDTH_WIDE - READER_WIDTH_MIN - SPLITTER_WIDTH_PX
+        );
+        // Narrow room still leaves the reader its floor.
+        assert_eq!(clamp_tree_width(TREE_WIDTH_DEFAULT, 300.0), TREE_WIDTH_MIN);
     }
 
     #[test]
