@@ -16,7 +16,9 @@ use crate::files_view::FileTree;
 use crate::new_workspace::{recent_directory, NewWorkspaceEvent, NewWorkspaceModal};
 use crate::pane_seam::seam_of;
 use crate::settings::{KeyBarExtras, SettingsModal};
-use crate::shell_model::{lens_segment_state, HeaderModel, LensBook, ShellLayout};
+use crate::shell_model::{
+    changes_files_panel_width, lens_segment_state, HeaderModel, LensBook, ShellLayout,
+};
 use crate::sidebar::SidebarEvent;
 use crate::terminal::TerminalPane;
 use crate::theme::Theme;
@@ -827,7 +829,8 @@ impl OrionApp {
 
 impl Render for OrionApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let layout = ShellLayout::for_width(window.bounds().size.width.into());
+        let window_w = f32::from(window.bounds().size.width);
+        let layout = ShellLayout::for_width(window_w);
         let sidebar_w = layout.sidebar_width_px;
         self.workspace_sidebar
             .update(cx, |view, _cx| view.set_rail(layout.rail));
@@ -977,27 +980,45 @@ impl Render for OrionApp {
                     .flex_col()
                     .flex_1()
                     .child(self.terminal_pane.clone()),
-                Lens::Changes => div()
-                    .id("main-content")
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .child(
-                        div()
-                            .id("changes-left")
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .child(self.file_tree.clone()),
-                    )
-                    .child(
-                        div()
-                            .id("changes-right")
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .child(self.changes_view.clone()),
-                    ),
+                Lens::Changes => {
+                    // The tree and the reader are a fixed column, not a second
+                    // flex half: the diff keeps readable width at 1280px (issue
+                    // #13). The width the changes view actually receives is
+                    // pushed in so its splitter clamps against real room.
+                    let panel_w = changes_files_panel_width(layout.rail);
+                    let mut main_room = window_w - sidebar_w;
+                    if split_second.is_some() {
+                        // The split canvas shows a second pane beside this one;
+                        // each half gets half the main column.
+                        main_room /= 2.0;
+                    }
+                    let changes_room = main_room - panel_w;
+                    self.changes_view
+                        .update(cx, |view, _cx| view.set_available_width(changes_room));
+                    div()
+                        .id("main-content")
+                        .flex()
+                        .flex_row()
+                        .flex_1()
+                        .child(
+                            div()
+                                .id("changes-left")
+                                .flex()
+                                .flex_col()
+                                .w(px(panel_w))
+                                .flex_shrink_0()
+                                .child(self.file_tree.clone()),
+                        )
+                        .child(
+                            div()
+                                .id("changes-right")
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .child(self.changes_view.clone()),
+                        )
+                }
             };
             if let Some(second_id) = split_second.clone() {
                 if self.split_attached_pane.as_deref() != Some(second_id.as_str()) {
@@ -1044,27 +1065,37 @@ impl Render for OrionApp {
                         .flex_col()
                         .flex_1()
                         .child(self.split_terminal_pane.clone()),
-                    Lens::Changes => div()
-                        .id("pane-split-second-changes")
-                        .flex()
-                        .flex_row()
-                        .flex_1()
-                        .child(
-                            div()
-                                .id("split-changes-left")
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .child(self.split_file_tree.clone()),
-                        )
-                        .child(
-                            div()
-                                .id("split-changes-right")
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .child(self.split_changes_view.clone()),
-                        ),
+                    Lens::Changes => {
+                        // Same fixed-panel arithmetic as the main canvas, inside
+                        // this half of the split.
+                        let panel_w = changes_files_panel_width(layout.rail);
+                        let split_room = (window_w - sidebar_w) / 2.0 - panel_w;
+                        self.split_changes_view
+                            .update(cx, |view, _cx| view.set_available_width(split_room));
+                        div()
+                            .id("pane-split-second-changes")
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .id("split-changes-left")
+                                    .flex()
+                                    .flex_col()
+                                    .w(px(panel_w))
+                                    .flex_shrink_0()
+                                    .child(self.split_file_tree.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id("split-changes-right")
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .child(self.split_changes_view.clone()),
+                            )
+                    }
                 };
                 div()
                     .id("pane-split-canvas")

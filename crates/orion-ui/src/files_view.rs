@@ -11,6 +11,7 @@
 
 use crate::file_reader::FileReader;
 use crate::files_entities::{join_path, url_encode, DirectoryListing};
+use crate::shell_model::{changes_tree_width, NARROW_BREAKPOINT_PX};
 use crate::theme::Theme;
 use gpui::prelude::*;
 use gpui::{div, px, white, Context, Entity, Render, ScrollHandle, Window};
@@ -154,8 +155,11 @@ impl FileTree {
 }
 
 impl Render for FileTree {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.row_seq = 0;
+        // The tree's column follows the shell's own breakpoint, the same one
+        // the Changes lens lays its columns out with.
+        let narrow = f32::from(window.bounds().size.width) < NARROW_BREAKPOINT_PX;
         let mut tree = div()
             .id("file-tree")
             .flex()
@@ -316,18 +320,57 @@ impl Render for FileTree {
             .child(
                 div()
                     .id("files-left")
+                    .debug_selector(|| "files-left".to_string())
                     .flex()
                     .flex_col()
-                    .w(px(320.0))
+                    // The tree takes the width the Changes lens gives it, so the
+                    // reader beside it keeps a body instead of being squeezed
+                    // to nothing (issue #13).
+                    .w(px(changes_tree_width(narrow)))
+                    .flex_shrink_0()
                     .child(tree),
             )
             .child(
                 div()
                     .id("files-right")
+                    .debug_selector(|| "files-right".to_string())
                     .flex()
                     .flex_col()
                     .flex_1()
+                    .min_w(px(0.0))
                     .child(self.file_reader.clone()),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{point, size};
+
+    #[gpui::test]
+    fn the_reader_keeps_a_body_beside_the_tree(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let view = cx.update(|_window, app| app.new(FileTree::new));
+
+        // The Changes lens gives the tree and the reader a fixed 360px column.
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(1280.), px(800.)),
+            |_, _cx| div().w(px(360.0)).h_full().child(view.clone()),
+        );
+
+        let tree = cx.debug_bounds("files-left").expect("the tree column");
+        assert_eq!(
+            tree.size.width,
+            px(changes_tree_width(false)),
+            "the tree takes its own column"
+        );
+        let reader = cx.debug_bounds("files-right").expect("the reader column");
+        assert!(
+            reader.size.width > px(0.0),
+            "the reader keeps a body to show a file in (got {})",
+            reader.size.width
+        );
     }
 }

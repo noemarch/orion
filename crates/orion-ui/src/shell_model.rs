@@ -8,9 +8,13 @@ pub struct ShellLayout {
     pub touch_target_px: f32,
 }
 
+/// The window width below which the shell switches to its narrow (rail)
+/// layout. One definition, so every view reads the same breakpoint.
+pub const NARROW_BREAKPOINT_PX: f32 = 900.0;
+
 impl ShellLayout {
     pub fn for_width(width: f32) -> Self {
-        if width < 900.0 {
+        if width < NARROW_BREAKPOINT_PX {
             Self {
                 sidebar_width_px: 64.0,
                 rail: true,
@@ -24,6 +28,39 @@ impl ShellLayout {
             }
         }
     }
+}
+
+/// Fixed width of the file tree beside the Changes lens (issue #13): a fixed
+/// column instead of a second `flex_1()` half, so the diff keeps readable
+/// width at 1280px instead of splitting the space in two.
+pub const CHANGES_TREE_WIDTH_WIDE: f32 = 220.0;
+/// The same column at the narrow (rail) breakpoint.
+pub const CHANGES_TREE_WIDTH_NARROW: f32 = 140.0;
+/// The room the file reader gets beside the tree, in px. A narrow layout
+/// gives it none: the tree and the diff cannot both be read on a phone.
+pub const CHANGES_READER_WIDTH_WIDE: f32 = 140.0;
+/// The same allowance at the narrow (rail) breakpoint.
+pub const CHANGES_READER_WIDTH_NARROW: f32 = 0.0;
+
+/// The Changes lens' file-tree width for the shell's breakpoint.
+pub fn changes_tree_width(narrow: bool) -> f32 {
+    if narrow {
+        CHANGES_TREE_WIDTH_NARROW
+    } else {
+        CHANGES_TREE_WIDTH_WIDE
+    }
+}
+
+/// The whole tree-and-reader column of the Changes lens, in px. The tree takes
+/// its own width and the reader takes what is left of the column, so the
+/// reader keeps a body to show a file in.
+pub fn changes_files_panel_width(narrow: bool) -> f32 {
+    changes_tree_width(narrow)
+        + if narrow {
+            CHANGES_READER_WIDTH_NARROW
+        } else {
+            CHANGES_READER_WIDTH_WIDE
+        }
 }
 
 pub struct HeaderModel {
@@ -145,6 +182,16 @@ mod tests {
         let layout = ShellLayout::for_width(1280.0);
         assert!(!layout.rail);
         assert_eq!(layout.sidebar_width_px, 280.0);
+    }
+
+    #[test]
+    fn changes_tree_width_follows_the_breakpoint() {
+        assert_eq!(changes_tree_width(false), CHANGES_TREE_WIDTH_WIDE);
+        assert_eq!(changes_tree_width(true), CHANGES_TREE_WIDTH_NARROW);
+        let layout = ShellLayout::for_width(800.0);
+        assert_eq!(changes_tree_width(layout.rail), 140.0);
+        let layout = ShellLayout::for_width(1280.0);
+        assert_eq!(changes_tree_width(layout.rail), 220.0);
     }
 
     #[test]
