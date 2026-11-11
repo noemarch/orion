@@ -878,6 +878,11 @@ impl Render for OrionApp {
             .update(cx, |view, cx| view.set_visible(cx, changes_active));
         self.changes_view
             .update(cx, |view, _cx| view.set_visible(changes_active));
+        // The Chat lens reads the agent's whole transcript on its poll, so it
+        // only reads it while it is the lens on screen.
+        let chat_active = self.current_lens() == Lens::Chat;
+        self.chat_view
+            .update(cx, |view, cx| view.set_visible(cx, chat_active));
         let prefs = self.settings.update(cx, |view, _cx| view.prefs().clone());
         Theme::set_current(Theme::for_mode(prefs.theme, prefs.density));
         let extras = KeyBarExtras::from_preferences(&prefs);
@@ -933,6 +938,11 @@ impl Render for OrionApp {
             .update(cx, |view, cx| view.set_visible(cx, split_changes_active));
         self.split_changes_view
             .update(cx, |view, _cx| view.set_visible(split_changes_active));
+        let split_chat_active = split_second
+            .as_deref()
+            .is_some_and(|pane_id| self.lens_book.lens_for(Some(pane_id)) == Lens::Chat);
+        self.split_chat_view
+            .update(cx, |view, cx| view.set_visible(cx, split_chat_active));
         let lens_body = if !has_workspaces {
             div()
                 .id("main-content")

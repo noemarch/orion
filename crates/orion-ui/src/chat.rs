@@ -109,6 +109,14 @@ pub struct ChatView {
     answered_prompt: Option<(String, Instant)>,
     /// What takes the focus on the next draw.
     focus_wanted: FocusWanted,
+    /// Whether this lens is the one on screen. A hidden transcript is not
+    /// re-read: the route reads the agent's whole transcript from disk, and
+    /// doing that on the UI thread every two seconds stalls the frames of
+    /// whatever lens the reader is actually looking at.
+    visible: bool,
+    /// How many times this view has read the transcript. The poll is what
+    /// costs the UI thread, so the count is worth having.
+    reads: u64,
     scroll_handle: ScrollHandle,
     focus_handle: gpui::FocusHandle,
     row_seq: usize,
@@ -153,6 +161,8 @@ impl ChatView {
             prompt_subscriptions: Vec::new(),
             answered_prompt: None,
             focus_wanted: FocusWanted::None,
+            visible: true,
+            reads: 0,
             scroll_handle,
             focus_handle: cx.focus_handle(),
             row_seq: 0,
@@ -268,6 +278,7 @@ impl ChatView {
             return;
         };
         let path = format!("/api/pane/conversation?pane_id={}", self.pane_id);
+        self.reads += 1;
         let (status, body) = engine.http("GET", &path, &Value::Null);
         if status != 200 {
             // Forget the last good answer: the next good answer must show again
@@ -294,12 +305,36 @@ impl ChatView {
         let _ = self;
         cx.spawn(async move |view, cx| loop {
             cx.background_executor().timer(Duration::from_secs(2)).await;
-            let _ = view.update(cx, |view, cx| view.refresh(cx));
+            let _ = view.update(cx, |view, cx| {
+                // Only a lens on screen is re-read: the conversation route
+                // reads the agent's whole transcript from disk, and that read
+                // lands on the UI thread.
+                if view.visible {
+                    view.refresh(cx);
+                }
+            });
             if view.upgrade().is_none() {
                 break;
             }
         })
         .detach();
+    }
+
+    /// How many times this view has read the transcript from the engine.
+    pub fn reads(&self) -> u64 {
+        self.reads
+    }
+
+    /// Whether this lens is the one on screen. A lens that comes back reads
+    /// its transcript at once, so it never shows a stale turn.
+    pub fn set_visible(&mut self, cx: &mut Context<Self>, visible: bool) {
+        if self.visible == visible {
+            return;
+        }
+        self.visible = visible;
+        if visible {
+            self.refresh(cx);
+        }
     }
 
     /// Whether the agent owes the reader an answer: it says it is working, or
@@ -1359,6 +1394,7 @@ mod tests {
     use crate::chat_model::ChatPhase;
     use crate::pane_seam::test_doubles::{menu_prompt, RecordingPane, SeamCall};
     use gpui::Window;
+    use orion_core::engine::store::Store;
     use serde_json::json;
 
     /// The window's root view: the chat the test drives.
@@ -1396,6 +1432,50 @@ mod tests {
             conversation_error_message(404),
             "This pane is no longer open.",
             "a retry will not bring a closed pane back"
+        );
+    }
+
+    #[gpui::test]
+    fn a_hidden_chat_does_not_reread_the_transcript(cx: &mut gpui::TestAppContext) {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let engine = Arc::new(Engine::with_store(Store::at(
+            std::env::temp_dir().join(format!("orion-chat-poll-{}", std::process::id())),
+        )));
+        let view = cx.update(|app| app.new(ChatView::new));
+        let seam: Arc<dyn PaneSeam> = Arc::new(RecordingPane::new());
+
+        cx.update(|app| {
+            view.update(app, |view, cx| {
+                view.attach(Some(Arc::clone(&engine)), seam, "p1".to_string(), cx);
+            });
+        });
+        let after_attach = cx.read(|app| view.read(app).reads());
+        assert!(after_attach > 0, "attaching reads the transcript once");
+
+        // The lens is not the one on screen. Its poll must leave the agent's
+        // transcript alone: the route reads it from disk, and that read lands
+        // on the UI thread.
+        cx.update(|app| {
+            view.update(app, |view, cx| view.set_visible(cx, false));
+        });
+        cx.executor().advance_clock(Duration::from_secs(3));
+        cx.executor().run_until_parked();
+        assert_eq!(
+            cx.read(|app| view.read(app).reads()),
+            after_attach,
+            "a hidden lens does not read the transcript"
+        );
+
+        // A lens that comes back reads it at once: it never shows a stale turn.
+        cx.update(|app| {
+            view.update(app, |view, cx| view.set_visible(cx, true));
+        });
+        assert_eq!(
+            cx.read(|app| view.read(app).reads()),
+            after_attach + 1,
+            "a lens that comes back reads the transcript"
         );
     }
 
