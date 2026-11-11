@@ -178,6 +178,38 @@ fn pane_read_and_prompt_keep_their_client_fields() {
         "repo diff repository",
     );
 
+    let patch = get(
+        &engine,
+        &format!("/api/workspace/diff/file?pane_id={pane_id}&scope=workspace&path=README.md"),
+    );
+    assert_fields(
+        &patch,
+        &[
+            "repository",
+            "scope",
+            "base",
+            "head",
+            "file",
+            "patch",
+            "unavailable",
+            "truncated",
+            "limits",
+        ],
+        "repo diff file",
+    );
+    assert_fields(
+        &patch["file"],
+        &[
+            "path",
+            "old_path",
+            "status",
+            "additions",
+            "deletions",
+            "binary",
+        ],
+        "repo diff file entry",
+    );
+
     let (status, _) = engine.http("POST", "/api/pane/close", &json!({ "pane_id": pane_id }));
     assert_eq!(status, 200);
 }
