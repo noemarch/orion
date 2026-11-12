@@ -377,7 +377,7 @@ fn handle_request(
                 parent_id,
                 name,
                 outlive_parent,
-                Some(&session),
+                Some(session),
                 runtime_cli,
             ) {
                 Ok(info) => Some(json!({
