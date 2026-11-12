@@ -14,6 +14,7 @@ use futures::{SinkExt, StreamExt};
 use orion_core::engine::auth;
 use orion_core::engine::store::Store;
 use orion_core::engine::Engine;
+use orion_core::runtime::{current_session, serve};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tower_http::cors::CorsLayer;
@@ -33,6 +34,17 @@ struct ServeArgs {
     dist: PathBuf,
 }
 
+/// The runtime daemon's arguments.
+struct DaemonArgs {
+    state_dir: Option<PathBuf>,
+}
+
+/// What this process was asked to run.
+enum Command {
+    Serve(ServeArgs),
+    Daemon(DaemonArgs),
+}
+
 struct ConnectionGuard {
     engine: Engine,
     id: String,
@@ -48,7 +60,17 @@ impl Drop for ConnectionGuard {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let args = parse_args()?;
+    let args = match parse_args()? {
+        Command::Daemon(args) => {
+            // The daemon resolves its store and its socket from this variable.
+            if let Some(dir) = args.state_dir {
+                std::env::set_var("ORION_DATA_DIR", dir);
+            }
+            serve(&current_session()).await?;
+            return Ok(());
+        }
+        Command::Serve(args) => args,
+    };
     let store = match args.state_dir {
         Some(dir) => Store::at(dir),
         None => Store::default(),
@@ -98,16 +120,24 @@ fn format_socket_addr(addr: SocketAddr) -> String {
     }
 }
 
-fn parse_args() -> Result<ServeArgs, Box<dyn std::error::Error>> {
+fn parse_args() -> Result<Command, Box<dyn std::error::Error>> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("serve") {
+    let command = args.first().cloned();
+    if matches!(command.as_deref(), Some("serve" | "daemon")) {
         args.remove(0);
     }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        eprintln!(
-            "Usage: orion serve [--host 127.0.0.1] [--port 0] [--state-dir DIR] [--dist dist]"
-        );
+        if command.as_deref() == Some("daemon") {
+            eprintln!("Usage: orion daemon [--state-dir DIR]");
+        } else {
+            eprintln!(
+                "Usage: orion serve [--host 127.0.0.1] [--port 0] [--state-dir DIR] [--dist dist]"
+            );
+        }
         std::process::exit(0);
+    }
+    if command.as_deref() == Some("daemon") {
+        return Ok(Command::Daemon(parse_daemon_args(&args)?));
     }
 
     let mut parsed = ServeArgs {
@@ -144,6 +174,28 @@ fn parse_args() -> Result<ServeArgs, Box<dyn std::error::Error>> {
             other => {
                 eprintln!("Unknown argument: {other}");
                 eprintln!("Usage: orion serve [--host 127.0.0.1] [--port 0] [--state-dir DIR] [--dist dist]");
+                std::process::exit(2);
+            }
+        }
+        index += 1;
+    }
+    Ok(Command::Serve(parsed))
+}
+
+fn parse_daemon_args(args: &[String]) -> Result<DaemonArgs, Box<dyn std::error::Error>> {
+    let mut parsed = DaemonArgs { state_dir: None };
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--state-dir" => {
+                index += 1;
+                parsed.state_dir = Some(PathBuf::from(
+                    args.get(index).ok_or("--state-dir needs a value")?,
+                ));
+            }
+            other => {
+                eprintln!("Unknown argument: {other}");
+                eprintln!("Usage: orion daemon [--state-dir DIR]");
                 std::process::exit(2);
             }
         }

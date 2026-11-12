@@ -38,5 +38,9 @@ vt100 = "0.18.1"
 name = "orion"
 path = "src/bin/orion.rs"
 
+[[bin]]
+name = "orion-rt"
+path = "src/bin/orion_rt.rs"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
