@@ -660,7 +660,7 @@ mod tests {
         let terminal = Terminal::spawn("env1".into(), &env_printer(), None, &env, size())
             .expect("a terminal starts");
         assert!(
-            wait_until(|| terminal.snapshot().contains("term-42")),
+            wait_until(|| terminal.snapshot().contains("orion-rt.exe")),
             "screen was {:?}",
             terminal.snapshot()
         );

@@ -99,21 +99,27 @@ mod imp {
     use parking_lot::Mutex;
     use serde_json::Value;
     use windows_sys::Win32::Foundation::{
-        LocalFree, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
-        ERROR_PIPE_NOT_CONNECTED, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+        CloseHandle, DuplicateHandle, LocalFree, ERROR_BROKEN_PIPE, ERROR_IO_PENDING,
+        ERROR_NO_DATA, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, GENERIC_READ, GENERIC_WRITE,
+        INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING,
-        PIPE_ACCESS_DUPLEX,
+        CreateFileW, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
+        OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
     };
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
         PIPE_UNLIMITED_INSTANCES,
     };
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, GetCurrentProcess, GetCurrentThread, ResetEvent, WaitForSingleObject,
+        INFINITE,
+    };
+    use windows_sys::Win32::System::IO::{CancelSynchronousIo, GetOverlappedResult, OVERLAPPED};
 
     use crate::error::Result;
     use crate::runtime::client::FrameConnection;
@@ -133,6 +139,11 @@ mod imp {
     /// A listener that hands out connections to the runtime socket.
     pub struct RuntimeListener {
         name: String,
+        /// The thread waiting for a client, so that the wait can be cancelled.
+        ///
+        /// `ConnectNamedPipe` blocks a thread until a client arrives, and a
+        /// blocked thread keeps the runtime alive: the daemon would never stop.
+        waiting: Arc<Mutex<Option<OwnedHandle>>>,
         /// A duplicate handle on the first instance, kept open for the life of
         /// the listener so the pipe's name stays in the namespace.
         _holder: Pipe,
@@ -154,8 +165,21 @@ mod imp {
             Ok(Self {
                 name,
                 _holder: holder,
+                waiting: Arc::new(Mutex::new(None)),
                 pending: tokio::sync::Mutex::new(Some(first)),
             })
+        }
+
+        /// Stops a wait for the next client.
+        ///
+        /// The wait is a blocking `ConnectNamedPipe` on another thread; this
+        /// interrupts it, so the daemon can stop.
+        pub fn cancel(&self) {
+            let thread = self.waiting.lock().take();
+            if let Some(thread) = thread {
+                // SAFETY: the handle is a live thread handle this process owns.
+                unsafe { CancelSynchronousIo(thread.as_raw_handle()) };
+            }
         }
 
         /// Waits for the next connection.
@@ -168,15 +192,44 @@ mod imp {
             // run on an async worker thread. Exactly one instance is listening
             // while this waits, so the client that arrives connects to THIS
             // instance and not to the next one.
-            let connected = tokio::task::spawn_blocking(move || connect_instance(server))
-                .await
-                .map_err(io::Error::other)??;
+            // Exactly one instance listens while this waits, so the client
+            // that arrives connects to THIS instance and not to the next one.
+            let waiting = Arc::clone(&self.waiting);
+            // The handle travels as an integer: a raw pointer is not `Send`.
+            let handle = server.handle.as_raw_handle() as usize;
+            let connected = tokio::task::spawn_blocking(move || -> io::Result<bool> {
+                // Publish this thread so the wait can be interrupted.
+                *waiting.lock() = Some(current_thread_handle()?);
+                // SAFETY: the handle is a live pipe instance, and a null
+                // `OVERLAPPED` asks for a synchronous connection.
+                let ok = unsafe {
+                    ConnectNamedPipe(
+                        handle as windows_sys::Win32::Foundation::HANDLE,
+                        ptr::null_mut(),
+                    )
+                };
+                if ok != 0 {
+                    return Ok(true);
+                }
+                let error = io::Error::last_os_error();
+                // The client can finish connecting between the instance being
+                // created and this call.
+                Ok(error.raw_os_error() == Some(ERROR_PIPE_CONNECTED as i32))
+            })
+            .await
+            .map_err(io::Error::other)??;
+            if !connected {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "the runtime socket was closed",
+                ));
+            }
             // The next instance exists before the connected one is handed out,
             // so the pipe is never without an instance: a client that arrives
             // mid hand-off still finds a listening pipe, and the name stays in
             // the namespace.
             *pending = Some(create_instance(&self.name, false)?);
-            Ok(RuntimeStream::from_pipe(connected))
+            Ok(RuntimeStream::from_pipe(server))
         }
     }
 
@@ -185,9 +238,6 @@ mod imp {
     /// The duplicate refers to the same instance, so keeping it open keeps the
     /// instance — and the pipe's name — alive.
     fn duplicate_handle(pipe: &Pipe) -> io::Result<Pipe> {
-        use windows_sys::Win32::Foundation::DuplicateHandle;
-        use windows_sys::Win32::System::Threading::GetCurrentProcess;
-
         const DUPLICATE_SAME_ACCESS: u32 = 2;
         let mut duplicate: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
         // SAFETY: the process handle is the one this thread runs in, and the
@@ -206,11 +256,10 @@ mod imp {
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Pipe {
-            // SAFETY: `DuplicateHandle` wrote a fresh handle here and nobody
-            // else owns it.
-            handle: unsafe { OwnedHandle::from_raw_handle(duplicate) },
-        })
+        // SAFETY: `DuplicateHandle` wrote a fresh handle here and nobody
+        // else owns it.
+        let handle = unsafe { OwnedHandle::from_raw_handle(duplicate) };
+        Pipe::with_events(handle)
     }
 
     fn wide(path: &str) -> Vec<u16> {
@@ -225,10 +274,16 @@ mod imp {
     fn create_instance(name: &str, first: bool) -> io::Result<Pipe> {
         let security = SecurityDescriptor::new()?;
         let path = wide(name);
+        // OVERLAPPED is not an optimisation here, it is what makes a duplex pipe
+        // usable: on a SYNCHRONOUS handle a pending read serialises against a
+        // write on the same handle, so the writer waits for a reader that is
+        // itself waiting for the writer, and the connection deadlocks. With
+        // overlapped handles a pending read and a pending write may both be in
+        // flight, which is what a frame protocol needs.
         let open_mode = if first {
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED
         } else {
-            PIPE_ACCESS_DUPLEX
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED
         };
         // SAFETY: `path` is NUL-terminated UTF-16, `security.attributes` points
         // at a descriptor that lives through the call, and the pipe copies it
@@ -248,20 +303,26 @@ mod imp {
         owned(handle)
     }
 
-    /// Blocks until a client connects to `pipe`, then returns the connection.
-    fn connect_instance(pipe: Pipe) -> io::Result<Pipe> {
-        // SAFETY: `pipe` owns a live server handle and a null `OVERLAPPED` asks
-        // for synchronous completion.
-        let connected = unsafe { ConnectNamedPipe(pipe.handle.as_raw_handle(), ptr::null_mut()) };
-        if connected != 0 {
-            return Ok(pipe);
-        }
-        let error = io::Error::last_os_error();
-        // The client can finish connecting between creation and this call.
-        if error.raw_os_error() == Some(ERROR_PIPE_CONNECTED as i32) {
-            Ok(pipe)
-        } else {
-            Err(error)
+    /// A real handle for the calling thread, so that another thread can
+    /// interrupt the I/O it is blocked in.
+    fn current_thread_handle() -> io::Result<OwnedHandle> {
+        // SAFETY: the pseudo handle for the calling thread is valid in this
+        // thread, and duplicating it into this process gives a real handle.
+        unsafe {
+            let mut duplicate: windows_sys::Win32::Foundation::HANDLE = ptr::null_mut();
+            if DuplicateHandle(
+                GetCurrentProcess(),
+                GetCurrentThread(),
+                GetCurrentProcess(),
+                &mut duplicate,
+                0,
+                0,
+                2,
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(OwnedHandle::from_raw_handle(duplicate))
         }
     }
 
@@ -269,11 +330,10 @@ mod imp {
         if handle == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
-        Ok(Pipe {
-            // SAFETY: `handle` was returned by this module and has not been
-            // adopted elsewhere, so `Pipe` is its sole owner.
-            handle: unsafe { OwnedHandle::from_raw_handle(handle) },
-        })
+        // SAFETY: `handle` was returned by this module and has not been
+        // adopted elsewhere, so `Pipe` is its sole owner.
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+        Pipe::with_events(handle)
     }
 
     /// A security descriptor built from SDDL, released with `LocalFree`.
@@ -320,8 +380,42 @@ mod imp {
     }
 
     /// The blocking half of a connected pipe.
+    ///
+    /// Each direction has its own event. An overlapped operation is waited on
+    /// through its own event and not through the file handle: the handle may
+    /// have another operation in flight, and waiting on it would wake for that
+    /// one instead.
     struct Pipe {
         handle: OwnedHandle,
+        read_event: OwnedHandle,
+        write_event: OwnedHandle,
+    }
+
+    impl Pipe {
+        /// A pipe handle with an event for each direction.
+        fn with_events(handle: OwnedHandle) -> io::Result<Self> {
+            // SAFETY: a null name and null attributes ask for an unnamed event
+            // with default security.
+            let read = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };
+            if read.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: as above, for the write direction.
+            let write = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };
+            if write.is_null() {
+                let error = io::Error::last_os_error();
+                // SAFETY: `read` is a live handle this function owns.
+                unsafe { CloseHandle(read) };
+                return Err(error);
+            }
+            Ok(Self {
+                handle,
+                // SAFETY: both handles are fresh and owned here.
+                read_event: unsafe { OwnedHandle::from_raw_handle(read) },
+                // SAFETY: as above.
+                write_event: unsafe { OwnedHandle::from_raw_handle(write) },
+            })
+        }
     }
 
     impl Pipe {
@@ -336,7 +430,7 @@ mod imp {
                     0,
                     ptr::null(),
                     OPEN_EXISTING,
-                    0,
+                    FILE_FLAG_OVERLAPPED,
                     ptr::null_mut(),
                 )
             };
@@ -348,28 +442,58 @@ mod imp {
                 return Ok(0);
             }
             let mut transferred = 0u32;
+            // The OVERLAPPED block lives on this stack for as long as the read
+            // is pending: the kernel writes to it when the read completes.
+            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+            overlapped.hEvent = self.read_event.as_raw_handle();
+            // SAFETY: the event is live and the read is armed on it.
+            unsafe { ResetEvent(self.read_event.as_raw_handle()) };
             // SAFETY: `buf` is writable for its whole length, the handle is
-            // live, and a null `OVERLAPPED` asks for synchronous completion.
+            // live, and `overlapped` outlives the operation.
             let ok = unsafe {
                 ReadFile(
                     self.handle.as_raw_handle(),
                     buf.as_mut_ptr(),
                     buf.len() as u32,
                     &mut transferred,
-                    ptr::null_mut(),
+                    &mut overlapped,
                 )
             };
             if ok != 0 {
-                Ok(transferred as usize)
-            } else {
-                let error = io::Error::last_os_error();
+                return Ok(transferred as usize);
+            }
+            // The error is read before anything else: I/O overwrites this
+            // thread's last Win32 error.
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
                 // A closed pipe is a clean end of stream for a reader.
                 if disconnected(&error) {
-                    Ok(0)
-                } else {
-                    Err(error)
+                    return Ok(0);
                 }
+                return Err(error);
             }
+            // The read is pending: the file handle is signalled when it
+            // completes, because the OVERLAPPED block asked for no event of
+            // its own.
+            // SAFETY: the event is live and `overlapped` outlives the wait.
+            let waited = unsafe { WaitForSingleObject(self.read_event.as_raw_handle(), INFINITE) };
+            if waited != WAIT_OBJECT_0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut completed = 0u32;
+            // SAFETY: the operation has completed and `overlapped` is the
+            // block the kernel used for it.
+            let got = unsafe {
+                GetOverlappedResult(self.handle.as_raw_handle(), &overlapped, &mut completed, 0)
+            };
+            if got == 0 {
+                let error = io::Error::last_os_error();
+                if disconnected(&error) {
+                    return Ok(0);
+                }
+                return Err(error);
+            }
+            Ok(completed as usize)
         }
 
         fn write_blocking(&self, buf: &[u8]) -> io::Result<usize> {
@@ -377,27 +501,54 @@ mod imp {
                 return Ok(0);
             }
             let mut transferred = 0u32;
+            // The OVERLAPPED block lives on this stack for as long as the
+            // write is pending: the kernel writes to it when it completes.
+            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+            overlapped.hEvent = self.write_event.as_raw_handle();
+            // SAFETY: the event is live and the write is armed on it.
+            unsafe { ResetEvent(self.write_event.as_raw_handle()) };
             // SAFETY: `buf` is readable for its whole length, the handle is
-            // live, and a null `OVERLAPPED` asks for synchronous completion.
+            // live, and `overlapped` outlives the operation.
             let ok = unsafe {
                 WriteFile(
                     self.handle.as_raw_handle(),
                     buf.as_ptr(),
                     buf.len() as u32,
                     &mut transferred,
-                    ptr::null_mut(),
+                    &mut overlapped,
                 )
             };
             if ok != 0 {
-                Ok(transferred as usize)
-            } else {
+                return Ok(transferred as usize);
+            }
+            // The error is read before anything else: I/O overwrites this
+            // thread's last Win32 error.
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+                if disconnected(&error) {
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, error));
+                }
+                return Err(error);
+            }
+            // SAFETY: the event is live and `overlapped` outlives the wait.
+            let waited = unsafe { WaitForSingleObject(self.write_event.as_raw_handle(), INFINITE) };
+            if waited != WAIT_OBJECT_0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut completed = 0u32;
+            // SAFETY: the operation has completed and `overlapped` is the
+            // block the kernel used for it.
+            let got = unsafe {
+                GetOverlappedResult(self.handle.as_raw_handle(), &overlapped, &mut completed, 0)
+            };
+            if got == 0 {
                 let error = io::Error::last_os_error();
                 if disconnected(&error) {
-                    Err(io::Error::new(io::ErrorKind::BrokenPipe, error))
-                } else {
-                    Err(error)
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, error));
                 }
+                return Err(error);
             }
+            Ok(completed as usize)
         }
     }
 

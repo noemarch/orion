@@ -508,8 +508,6 @@ mod tests {
         )
     }
 
-    /// The daemon does not yet answer a client: the handshake hangs. Issue #19 tracks it.
-    #[ignore = "the daemon does not answer a client yet (issue #19)"]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_daemon_answers_the_health_handshake() {
         let session = unique_session("health");
@@ -526,8 +524,6 @@ mod tests {
         daemon.shutdown().await;
     }
 
-    /// The daemon does not yet answer a client: the handshake hangs. Issue #19 tracks it.
-    #[ignore = "the daemon does not answer a client yet (issue #19)"]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_daemon_answers_the_routes_the_engine_answers() {
         let session = unique_session("routes");
@@ -543,8 +539,6 @@ mod tests {
         daemon.shutdown().await;
     }
 
-    /// The daemon does not yet answer a client: the handshake hangs. Issue #19 tracks it.
-    #[ignore = "the daemon does not answer a client yet (issue #19)"]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_daemon_serves_a_terminal_it_started() {
         let session = unique_session("term");
@@ -604,8 +598,6 @@ mod tests {
         daemon.shutdown().await;
     }
 
-    /// The daemon does not yet answer a client: the handshake hangs. Issue #19 tracks it.
-    #[ignore = "the daemon does not answer a client yet (issue #19)"]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_second_daemon_refuses_the_same_session() {
         let session = unique_session("second");
@@ -617,8 +609,6 @@ mod tests {
         daemon.shutdown().await;
     }
 
-    /// The daemon does not yet answer a client: the handshake hangs. Issue #19 tracks it.
-    #[ignore = "the daemon does not answer a client yet (issue #19)"]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_daemon_keeps_serving_after_a_client_leaves() {
         let session = unique_session("keep");
