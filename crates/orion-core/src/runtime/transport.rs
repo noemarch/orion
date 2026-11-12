@@ -133,6 +133,9 @@ mod imp {
     /// A listener that hands out connections to the runtime socket.
     pub struct RuntimeListener {
         name: String,
+        /// A duplicate handle on the first instance, kept open for the life of
+        /// the listener so the pipe's name stays in the namespace.
+        _holder: Pipe,
         pending: tokio::sync::Mutex<Option<Pipe>>,
     }
 
@@ -141,8 +144,16 @@ mod imp {
         pub fn bind(session: &str) -> Result<Self> {
             let name = super::pipe_path(session);
             let first = create_instance(&name, true)?;
+            // Windows removes the pipe name from the namespace when the
+            // instance created with `FILE_FLAG_FIRST_PIPE_INSTANCE` closes,
+            // even while other instances of the same name are open. That first
+            // instance is the one the first client connects to, so a duplicate
+            // of its handle is kept for the whole life of the listener: the
+            // instance stays open, and so does the name.
+            let holder = duplicate_handle(&first)?;
             Ok(Self {
                 name,
+                _holder: holder,
                 pending: tokio::sync::Mutex::new(Some(first)),
             })
         }
@@ -154,16 +165,52 @@ mod imp {
                 io::Error::new(io::ErrorKind::BrokenPipe, "the runtime listener is closed")
             })?;
             // `ConnectNamedPipe` blocks until a client arrives, so it must not
-            // run on an async worker thread.
+            // run on an async worker thread. Exactly one instance is listening
+            // while this waits, so the client that arrives connects to THIS
+            // instance and not to the next one.
             let connected = tokio::task::spawn_blocking(move || connect_instance(server))
                 .await
                 .map_err(io::Error::other)??;
-            // A fresh instance exists before the connected one is handed out,
-            // so a client that arrives mid hand-off still finds a listening
-            // pipe instead of `NotFound`.
+            // The next instance exists before the connected one is handed out,
+            // so the pipe is never without an instance: a client that arrives
+            // mid hand-off still finds a listening pipe, and the name stays in
+            // the namespace.
             *pending = Some(create_instance(&self.name, false)?);
             Ok(RuntimeStream::from_pipe(connected))
         }
+    }
+
+    /// Duplicates a pipe instance's handle.
+    ///
+    /// The duplicate refers to the same instance, so keeping it open keeps the
+    /// instance — and the pipe's name — alive.
+    fn duplicate_handle(pipe: &Pipe) -> io::Result<Pipe> {
+        use windows_sys::Win32::Foundation::DuplicateHandle;
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        const DUPLICATE_SAME_ACCESS: u32 = 2;
+        let mut duplicate: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+        // SAFETY: the process handle is the one this thread runs in, and the
+        // duplicated handle is written only on success.
+        let ok = unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                pipe.handle.as_raw_handle(),
+                GetCurrentProcess(),
+                &mut duplicate,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Pipe {
+            // SAFETY: `DuplicateHandle` wrote a fresh handle here and nobody
+            // else owns it.
+            handle: unsafe { OwnedHandle::from_raw_handle(duplicate) },
+        })
     }
 
     fn wide(path: &str) -> Vec<u16> {
@@ -278,8 +325,8 @@ mod imp {
     }
 
     impl Pipe {
-        fn connect(session: &str) -> io::Result<Self> {
-            let path = wide(&super::pipe_path(session));
+        fn connect_path(path: &str) -> io::Result<Self> {
+            let path = wide(path);
             // SAFETY: `path` is NUL-terminated UTF-16, no sharing is requested,
             // and a null template keeps the connection private to this client.
             let handle = unsafe {
@@ -394,7 +441,15 @@ mod imp {
     impl RuntimeStream {
         /// Connects to the runtime socket for `session`.
         pub async fn connect(session: &str) -> io::Result<Self> {
-            Ok(Self::from_pipe(Pipe::connect(session)?))
+            let path = super::pipe_path(session);
+            // Opening the pipe blocks until the server has a listening instance
+            // to offer, so it must not run on an async worker thread: a
+            // runtime that hosts the server in the same process would
+            // otherwise wait for a connection it cannot make.
+            let pipe = tokio::task::spawn_blocking(move || Pipe::connect_path(&path))
+                .await
+                .map_err(io::Error::other)??;
+            Ok(Self::from_pipe(pipe))
         }
 
         fn from_pipe(pipe: Pipe) -> Self {
@@ -639,5 +694,66 @@ mod tests {
             second.is_err(),
             "a second listener must not take the same socket"
         );
+    }
+
+    #[tokio::test]
+    async fn a_client_can_reach_the_runtime_after_another_client_leaves() {
+        let session = unique_session("after");
+        let listener = RuntimeListener::bind(&session).expect("the listener binds");
+
+        {
+            let exchange =
+                async { tokio::join!(listener.accept(), RuntimeStream::connect(&session)) };
+            let (accepted, connected) = tokio::time::timeout(Duration::from_secs(10), exchange)
+                .await
+                .expect("the first transport answers within the timeout");
+            let mut server = accepted.expect("the listener accepts the first client");
+            let mut client = connected.expect("the first client connects");
+            let request = serde_json::json!({ "type": "ping", "id": 1 });
+            client
+                .write_frame(&request)
+                .expect("the first client writes");
+            assert_eq!(
+                server.read_frame().expect("the listener reads"),
+                Some(request)
+            );
+        }
+
+        let exchange = async { tokio::join!(listener.accept(), RuntimeStream::connect(&session)) };
+        let (accepted, connected) = tokio::time::timeout(Duration::from_secs(10), exchange)
+            .await
+            .expect("the second transport answers within the timeout");
+        let mut server = accepted.expect("the listener accepts the second client");
+        let mut client = connected.expect("the second client connects");
+        let request = serde_json::json!({ "type": "ping", "id": 2 });
+        client
+            .write_frame(&request)
+            .expect("the second client writes");
+        assert_eq!(
+            server.read_frame().expect("the listener reads"),
+            Some(request)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_can_reach_the_runtime_ten_times_in_a_row() {
+        let session = unique_session("ten");
+        let listener = RuntimeListener::bind(&session).expect("the listener binds");
+
+        for i in 0..10 {
+            let exchange =
+                async { tokio::join!(listener.accept(), RuntimeStream::connect(&session)) };
+            let (accepted, connected) = tokio::time::timeout(Duration::from_secs(10), exchange)
+                .await
+                .expect("the transport answers within the timeout");
+            let mut server = accepted.expect("the listener accepts");
+            let mut client = connected.expect("the client connects");
+            let request = serde_json::json!({ "type": "ping", "id": i });
+            client.write_frame(&request).expect("the client writes");
+            assert_eq!(
+                server.read_frame().expect("the listener reads"),
+                Some(request)
+            );
+        }
     }
 }

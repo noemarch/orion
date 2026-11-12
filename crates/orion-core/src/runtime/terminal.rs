@@ -36,6 +36,8 @@ struct TerminalState {
     /// The most recent chunks, oldest first: what a reader that attaches late missed.
     output: VecDeque<String>,
     sinks: Vec<OutputSink>,
+    /// Tail of an OSC status sequence split across reads, carried to the next chunk.
+    osc_pending: String,
 }
 
 /// One running program and the grid it draws on.
@@ -66,6 +68,7 @@ impl Terminal {
             exited: None,
             output: VecDeque::with_capacity(RECENT_CHUNKS),
             sinks: Vec::new(),
+            osc_pending: String::new(),
         }));
 
         // Runs on the PTY reader thread, so it takes the lock exactly once and keeps nothing but a
@@ -75,17 +78,25 @@ impl Terminal {
         // slow sink would stall the program's own output.
         let output_state = Arc::clone(&state);
         let on_text: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |text: String| {
-            let sinks = {
+            let (cleaned, sinks) = {
                 let mut state = output_state.lock();
-                state.screen.process(&text);
+                // An OSC status sequence may be split across reads: carry the
+                // tail from the previous chunk and prepend it before filtering.
+                let combined = std::mem::take(&mut state.osc_pending) + &text;
+                let (cleaned, leftover, status) = filter_osc(&combined);
+                state.osc_pending = leftover;
+                if let Some(status) = status {
+                    state.reported = Some(status);
+                }
+                state.screen.process(&cleaned);
                 if state.output.len() >= RECENT_CHUNKS {
                     state.output.pop_front();
                 }
-                state.output.push_back(text.clone());
-                state.sinks.clone()
+                state.output.push_back(cleaned.clone());
+                (cleaned, state.sinks.clone())
             };
             for sink in sinks {
-                sink(text.clone());
+                sink(cleaned.clone());
             }
         });
 
@@ -256,6 +267,78 @@ impl Drop for Terminal {
         // only thing that keeps a process alive.
         self.session.kill();
     }
+}
+
+/// Filters Orion's OSC status sequences out of a chunk of PTY output.
+///
+/// The sequence is `ESC ] 777 ; orion ; status=<state>` terminated by BEL
+/// (`\\x07`) or ST (`ESC \\`). `<state>` is one of `working`, `done`,
+/// `blocked`, `error` (see [`ReportedStatus`]); an unknown state is ignored
+/// but the sequence is still stripped. The sequence never reaches the grid.
+///
+/// A sequence may be split across two reads: the trailing bytes that could be
+/// the start of (or an incomplete) sequence are returned as the second value
+/// and must be prepended to the next chunk.
+pub fn filter_osc(input: &str) -> (String, String, Option<ReportedStatus>) {
+    const MARKER: &[u8] = b"\x1b]777;orion;status=";
+
+    let bytes = input.as_bytes();
+    let n = bytes.len();
+    let mut out: Vec<u8> = Vec::with_capacity(n);
+    let mut i = 0usize;
+    let mut status: Option<ReportedStatus> = None;
+
+    while i < n {
+        if bytes[i] == 0x1b && i + 1 < n && bytes[i + 1] == b']' && bytes[i..].starts_with(MARKER) {
+            let state_start = i + MARKER.len();
+            // Look for a terminator from state_start onward.
+            let mut j = state_start;
+            let mut term: Option<(usize, usize)> = None; // (state_end, after_term)
+            while j < n {
+                if bytes[j] == 0x07 {
+                    term = Some((j, j + 1));
+                    break;
+                }
+                if bytes[j] == 0x1b && j + 1 < n && bytes[j + 1] == b'\\' {
+                    term = Some((j, j + 2));
+                    break;
+                }
+                j += 1;
+            }
+            if let Some((state_end, after)) = term {
+                let state_str = std::str::from_utf8(&bytes[state_start..state_end]).unwrap_or("");
+                if let Some(parsed) = ReportedStatus::from_wire(state_str.trim()) {
+                    status = Some(parsed);
+                }
+                i = after;
+                continue;
+            }
+            // No terminator in this chunk: carry the whole sequence tail.
+            let leftover = String::from_utf8_lossy(&bytes[i..]).into_owned();
+            return (String::from_utf8_lossy(&out).into_owned(), leftover, status);
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    // Carry a trailing partial marker prefix (e.g. a lone ESC at the end).
+    if n > 0 {
+        let max = MARKER.len().min(n);
+        for len in (1..=max).rev() {
+            if bytes[n - len..] == MARKER[..len] {
+                let new_len = out.len().saturating_sub(len);
+                out.truncate(new_len);
+                let leftover = String::from_utf8_lossy(&bytes[n - len..]).into_owned();
+                return (String::from_utf8_lossy(&out).into_owned(), leftover, status);
+            }
+        }
+    }
+
+    (
+        String::from_utf8_lossy(&out).into_owned(),
+        String::new(),
+        status,
+    )
 }
 
 /// Encodes one logical key chord into the bytes a terminal receives.
@@ -503,6 +586,91 @@ mod tests {
             wait_until(|| terminal.exited().is_some()),
             "the program outlived its terminal"
         );
+    }
+
+    #[test]
+    fn an_osc_status_sequence_is_stripped_and_sets_status() {
+        let (cleaned, leftover, status) = filter_osc("\x1b]777;orion;status=done\x07");
+        assert_eq!(status, Some(ReportedStatus::Done));
+        assert!(!cleaned.contains("777"));
+        assert!(!cleaned.contains("status=done"));
+        assert!(leftover.is_empty());
+    }
+
+    #[test]
+    fn an_osc_status_sequence_split_across_reads_is_understood() {
+        let (cleaned1, carry, status1) = filter_osc("\x1b]777;orion;status=do");
+        assert!(status1.is_none());
+        let combined = carry + "ne\x07";
+        let (cleaned2, leftover2, status2) = filter_osc(&combined);
+        assert_eq!(status2, Some(ReportedStatus::Done));
+        assert!(leftover2.is_empty());
+        let _ = (cleaned1, cleaned2);
+    }
+
+    #[test]
+    fn an_osc_status_sequence_with_st_terminator_is_stripped() {
+        let (cleaned, leftover, status) = filter_osc("\x1b]777;orion;status=error\x1b\\");
+        assert_eq!(status, Some(ReportedStatus::Error));
+        assert!(!cleaned.contains("777"));
+        assert!(leftover.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_osc_status_is_ignored_but_stripped() {
+        let (cleaned, leftover, status) = filter_osc("\x1b]777;orion;status=nope\x07");
+        assert!(status.is_none());
+        assert!(!cleaned.contains("777"));
+        assert!(leftover.is_empty());
+    }
+
+    /// A program that prints its environment's RUNTIME_ variables.
+    fn env_printer() -> LaunchSpec {
+        #[cfg(windows)]
+        let spec = LaunchSpec {
+            program: "powershell.exe".into(),
+            args: vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "Write-Host ([Environment]::GetEnvironmentVariable('RUNTIME_TERMINAL_ID')); Write-Host ([Environment]::GetEnvironmentVariable('RUNTIME_SOCKET')); Write-Host ([Environment]::GetEnvironmentVariable('RUNTIME_CLI'))".into(),
+            ],
+        };
+        #[cfg(not(windows))]
+        let spec = LaunchSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf '%s\\n' \"$RUNTIME_TERMINAL_ID\" \"$RUNTIME_SOCKET\" \"$RUNTIME_CLI\""
+                    .into(),
+            ],
+        };
+        spec
+    }
+
+    #[test]
+    fn a_terminal_receives_the_runtime_environment() {
+        let env = vec![
+            ("RUNTIME_TERMINAL_ID".to_string(), "term-42".to_string()),
+            (
+                "RUNTIME_SOCKET".to_string(),
+                "\\\\.\\pipe\\orion-runtime-qa".to_string(),
+            ),
+            ("RUNTIME_CLI".to_string(), "C:\\orion-rt.exe".to_string()),
+        ];
+        let terminal = Terminal::spawn("env1".into(), &env_printer(), None, &env, size())
+            .expect("a terminal starts");
+        assert!(
+            wait_until(|| terminal.snapshot().contains("term-42")),
+            "screen was {:?}",
+            terminal.snapshot()
+        );
+        let snap = terminal.snapshot();
+        assert!(snap.contains("term-42"), "missing terminal id: {snap:?}");
+        assert!(
+            snap.contains("orion-runtime-qa"),
+            "missing socket: {snap:?}"
+        );
+        assert!(snap.contains("orion-rt.exe"), "missing cli: {snap:?}");
     }
 
     #[test]

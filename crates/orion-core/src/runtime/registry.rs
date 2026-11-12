@@ -157,6 +157,8 @@ impl Registry {
         parent_id: Option<&str>,
         name: Option<&str>,
         outlive_parent: bool,
+        runtime_session: Option<&str>,
+        runtime_cli: Option<PathBuf>,
     ) -> Result<TerminalInfo> {
         let limits = self.inner.limits;
         let depth = {
@@ -210,7 +212,28 @@ impl Registry {
 
         // A short id, unique by construction rather than by a check that could race.
         let id = self.next_id();
-        let mut terminal = Terminal::spawn(id.clone(), spec, Some(cwd), env, size)?;
+
+        // The daemon injects the runtime's own coordinates so anything running
+        // inside the terminal can call back into it. `RUNTIME_TERMINAL_ID` is
+        // this terminal's id; the socket path and CLI path come from the daemon.
+        let mut full_env: Vec<(String, String)> = env.to_vec();
+        full_env.push(("RUNTIME_TERMINAL_ID".to_string(), id.clone()));
+        if let Some(session) = runtime_session {
+            full_env.push((
+                "RUNTIME_SOCKET".to_string(),
+                crate::runtime::transport::socket_path(session)
+                    .to_string_lossy()
+                    .into_owned(),
+            ));
+        }
+        if let Some(cli) = runtime_cli {
+            full_env.push((
+                "RUNTIME_CLI".to_string(),
+                cli.to_string_lossy().into_owned(),
+            ));
+        }
+
+        let mut terminal = Terminal::spawn(id.clone(), spec, Some(cwd), &full_env, size)?;
         if let Some(name) = name {
             terminal.set_name(name);
         }
@@ -541,7 +564,7 @@ mod tests {
 
     fn create_in(registry: &Registry, cwd: &Path) -> TerminalInfo {
         registry
-            .create(&printer(), cwd, &[], size(), None, None, false)
+            .create(&printer(), cwd, &[], size(), None, None, false, None, None)
             .expect("a terminal starts")
     }
 
@@ -605,7 +628,17 @@ mod tests {
         let registry = Registry::new();
         let parent = create_in(&registry, &dir);
         let child = registry
-            .create(&printer(), &dir, &[], size(), Some(&parent.id), None, false)
+            .create(
+                &printer(),
+                &dir,
+                &[],
+                size(),
+                Some(&parent.id),
+                None,
+                false,
+                None,
+                None,
+            )
             .expect("a child starts");
 
         assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
@@ -619,11 +652,31 @@ mod tests {
         let registry = Registry::with_limits(limits(1, 16, 64));
         let parent = create_in(&registry, &dir);
         let child = registry
-            .create(&printer(), &dir, &[], size(), Some(&parent.id), None, false)
+            .create(
+                &printer(),
+                &dir,
+                &[],
+                size(),
+                Some(&parent.id),
+                None,
+                false,
+                None,
+                None,
+            )
             .expect("a first child starts");
         assert!(
             registry
-                .create(&printer(), &dir, &[], size(), Some(&child.id), None, false)
+                .create(
+                    &printer(),
+                    &dir,
+                    &[],
+                    size(),
+                    Some(&child.id),
+                    None,
+                    false,
+                    None,
+                    None
+                )
                 .is_err(),
             "depth two is past a limit of one"
         );
@@ -636,11 +689,31 @@ mod tests {
         let registry = Registry::with_limits(limits(16, 1, 64));
         let parent = create_in(&registry, &dir);
         registry
-            .create(&printer(), &dir, &[], size(), Some(&parent.id), None, false)
+            .create(
+                &printer(),
+                &dir,
+                &[],
+                size(),
+                Some(&parent.id),
+                None,
+                false,
+                None,
+                None,
+            )
             .expect("the first child starts");
         assert!(
             registry
-                .create(&printer(), &dir, &[], size(), Some(&parent.id), None, false)
+                .create(
+                    &printer(),
+                    &dir,
+                    &[],
+                    size(),
+                    Some(&parent.id),
+                    None,
+                    false,
+                    None,
+                    None
+                )
                 .is_err(),
             "a second child is past a limit of one"
         );
@@ -654,7 +727,7 @@ mod tests {
         create_in(&registry, &dir);
         assert!(
             registry
-                .create(&printer(), &dir, &[], size(), None, None, false)
+                .create(&printer(), &dir, &[], size(), None, None, false, None, None)
                 .is_err(),
             "a second terminal is past a limit of one"
         );
@@ -677,7 +750,9 @@ mod tests {
                     size(),
                     Some(&parent.id),
                     None,
-                    false
+                    false,
+                    None,
+                    None
                 )
                 .is_err(),
             "a sibling directory is not inside the parent's"
@@ -694,6 +769,8 @@ mod tests {
                 Some(&parent.id),
                 None,
                 false,
+                None,
+                None,
             )
             .expect("a child inside the parent's directory starts");
         assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
@@ -705,7 +782,17 @@ mod tests {
         let registry = Registry::new();
         let parent = create_in(&registry, &dir);
         let child = registry
-            .create(&printer(), &dir, &[], size(), Some(&parent.id), None, false)
+            .create(
+                &printer(),
+                &dir,
+                &[],
+                size(),
+                Some(&parent.id),
+                None,
+                false,
+                None,
+                None,
+            )
             .expect("a child starts");
 
         registry.kill(&parent.id).expect("the parent ends");
@@ -720,7 +807,17 @@ mod tests {
         let registry = Registry::new();
         let parent = create_in(&registry, &dir);
         let child = registry
-            .create(&printer(), &dir, &[], size(), Some(&parent.id), None, true)
+            .create(
+                &printer(),
+                &dir,
+                &[],
+                size(),
+                Some(&parent.id),
+                None,
+                true,
+                None,
+                None,
+            )
             .expect("a child starts");
 
         registry.kill(&parent.id).expect("the parent ends");
