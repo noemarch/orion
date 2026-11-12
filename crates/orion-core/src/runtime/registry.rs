@@ -23,6 +23,7 @@ use crate::agents::LaunchSpec;
 use crate::error::{OrionError, Result};
 use crate::protocol::{ReportedStatus, TerminalSize};
 use crate::runtime::limits::{cwd_is_within, RuntimeLimits};
+use crate::runtime::persist::RuntimeStore;
 use crate::runtime::terminal::Terminal;
 
 /// How often a watcher looks at the terminal it follows.
@@ -86,6 +87,8 @@ type Watcher = Arc<dyn Fn(RegistryEvent) + Send + Sync>;
 /// the lifetime of the process.
 struct Inner {
     limits: RuntimeLimits,
+    /// Where the records and screens are written, if this registry keeps any.
+    store: Option<RuntimeStore>,
     terminals: Mutex<HashMap<String, Record>>,
     watchers: Mutex<Vec<(u64, Watcher)>>,
     next_watcher: AtomicU64,
@@ -106,6 +109,65 @@ impl Inner {
             watcher(event.clone());
         }
     }
+
+    /// Writes the records back after a change.
+    ///
+    /// A store that cannot be written must not break the terminal that changed: the daemon keeps
+    /// its records in memory and the next change tries again.
+    fn persist(&self) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let infos = self.records();
+        let _ = store.save_terminals(&infos);
+    }
+
+    /// Every record in the table, in id order.
+    fn records(&self) -> Vec<TerminalInfo> {
+        let mut infos = self
+            .terminals
+            .lock()
+            .values()
+            .map(|record| record.info.clone())
+            .collect::<Vec<_>>();
+        infos.sort_by(|left, right| left.id.cmp(&right.id));
+        infos
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // A clean stop keeps what the terminals were showing: a later reader has the last screen
+        // of a terminal that will not come back, and the records say what existed. The terminals
+        // are still alive here; their own drop ends the programs afterwards.
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let terminals = self.terminals.get_mut();
+        for record in terminals.values() {
+            let _ = store.save_screen(&record.info.id, &record.terminal.replay());
+        }
+        let mut infos = terminals
+            .values()
+            .map(|record| record.info.clone())
+            .collect::<Vec<_>>();
+        infos.sort_by(|left, right| left.id.cmp(&right.id));
+        let _ = store.save_terminals(&infos);
+    }
+}
+
+/// What a restart knows about the terminals that came before it.
+///
+/// A restored record is a memory, not a process: nothing is started from it. `open` holds the
+/// records with no exit code — their program may still be running, and a registry that still
+/// holds one can hand it back with [`Registry::get`]. `ended` holds the records of programs known
+/// to be gone, with their exit code, so the app can show the record and its saved screen.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoredTerminals {
+    /// Records whose program had not reported an exit.
+    pub open: Vec<TerminalInfo>,
+    /// Records whose program had ended.
+    pub ended: Vec<TerminalInfo>,
 }
 
 /// The daemon's table of terminals.
@@ -124,15 +186,50 @@ impl Registry {
 
     /// A registry with limits of its own.
     pub fn with_limits(limits: RuntimeLimits) -> Self {
+        Self::build(limits, None)
+    }
+
+    /// A registry that writes its records to `store`.
+    ///
+    /// The daemon uses this so a restart can tell the app what existed; a registry with no store
+    /// owns the same terminals and leaves nothing behind.
+    pub fn with_store(store: RuntimeStore) -> Self {
+        Self::build(RuntimeLimits::default(), Some(store))
+    }
+
+    /// The registry behind every constructor.
+    fn build(limits: RuntimeLimits, store: Option<RuntimeStore>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 limits,
+                store,
                 terminals: Mutex::new(HashMap::new()),
                 watchers: Mutex::new(Vec::new()),
                 next_watcher: AtomicU64::new(0),
                 next_id: AtomicU32::new(id_seed()),
             }),
         }
+    }
+
+    /// Reads the terminals a previous runtime recorded.
+    ///
+    /// A record does not resurrect a process, and nothing is started here: this only reports what
+    /// the last daemon left. The split follows the one piece of evidence a record carries —
+    /// whether the program had reported an exit — so the caller decides what a terminal it cannot
+    /// reattach should look like.
+    pub fn load_restored(&self) -> RestoredTerminals {
+        let Some(store) = self.inner.store.as_ref() else {
+            return RestoredTerminals::default();
+        };
+        let mut restored = RestoredTerminals::default();
+        for info in store.load_terminals() {
+            if info.exited.is_some() {
+                restored.ended.push(info);
+            } else {
+                restored.open.push(info);
+            }
+        }
+        restored
     }
 
     /// The limits this registry enforces.
@@ -268,6 +365,7 @@ impl Registry {
             self.inner.terminals.lock().remove(&id);
             return Err(error);
         }
+        self.inner.persist();
         self.inner.emit(RegistryEvent::Created(info.clone()));
         Ok(info)
     }
@@ -332,6 +430,7 @@ impl Registry {
             record.info.name = Some(name.to_string());
             record.info.clone()
         };
+        self.inner.persist();
         self.inner.emit(RegistryEvent::Updated(info));
         Ok(())
     }
@@ -357,6 +456,7 @@ impl Registry {
             }
         };
         if changed {
+            self.inner.persist();
             self.inner.emit(RegistryEvent::StatusChanged {
                 id: id.to_string(),
                 status,
@@ -392,10 +492,18 @@ impl Registry {
             }
             doomed
         };
+        // The screen is saved while the terminal is still alive and still holds what the program
+        // last drew; killing it first would leave the reader with a screen nobody saw.
+        for (id, terminal) in &doomed {
+            if let Some(store) = self.inner.store.as_ref() {
+                let _ = store.save_screen(id, &terminal.replay());
+            }
+        }
         for (id, terminal) in doomed {
             terminal.kill();
             self.inner.emit(RegistryEvent::Removed { id });
         }
+        self.inner.persist();
         Ok(())
     }
 
@@ -404,10 +512,15 @@ impl Registry {
     /// The program ends when the last holder lets go of it: a terminal is only alive while the
     /// registry, or a reader that asked for it by id, keeps it.
     pub fn remove(&self, id: &str) -> Result<()> {
-        let removed = self.inner.terminals.lock().remove(id);
-        if removed.is_none() {
+        let Some(record) = self.inner.terminals.lock().remove(id) else {
             return Err(OrionError::Internal(format!("no such terminal: {id}")));
+        };
+        // The last screen is kept before the record goes: a removed terminal is exactly the one a
+        // later reader can no longer ask about.
+        if let Some(store) = self.inner.store.as_ref() {
+            let _ = store.save_screen(&record.info.id, &record.terminal.replay());
         }
+        self.inner.persist();
         self.inner
             .emit(RegistryEvent::Removed { id: id.to_string() });
         Ok(())
@@ -458,6 +571,7 @@ impl Registry {
                 let mut status_event = None;
                 let mut exit = None;
                 let mut ended = false;
+                let mut changed = false;
                 {
                     let mut terminals = registry.terminals.lock();
                     let Some(record) = terminals.get_mut(&watch_id) else {
@@ -466,6 +580,7 @@ impl Registry {
                     if let Some(status) = terminal.reported_status() {
                         if record.info.status != Some(status) {
                             record.info.status = Some(status);
+                            changed = true;
                             status_event = Some(RegistryEvent::StatusChanged {
                                 id: watch_id.clone(),
                                 status,
@@ -476,9 +591,13 @@ impl Registry {
                         ended = true;
                         if record.info.exited != Some(code) {
                             record.info.exited = Some(code);
+                            changed = true;
                             exit = Some(code);
                         }
                     }
+                }
+                if changed {
+                    registry.persist();
                 }
                 if let Some(event) = status_event {
                     registry.emit(event);
@@ -515,6 +634,7 @@ fn id_seed() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::persist::RuntimeStore;
     use std::time::Instant;
 
     /// What a test watcher has seen so far.
@@ -896,5 +1016,45 @@ mod tests {
 
         assert!(registry.get(&info.id).is_none());
         assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn a_registry_with_a_store_remembers_its_terminals() {
+        let dir = temp_dir("stored");
+        let store = RuntimeStore::at(dir.join("state"));
+        let registry = Registry::with_store(store.clone());
+        let info = create_in(&registry, &dir);
+
+        let saved = store.load_terminals();
+        assert!(
+            saved.iter().any(|terminal| terminal.id == info.id),
+            "the stored records were {saved:?}"
+        );
+
+        // Drop the registry before the directory: its shutdown writes the final records.
+        drop(registry);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_registry_without_a_store_still_works() {
+        let dir = temp_dir("unstore");
+        let registry = Registry::new();
+        let info = create_in(&registry, &dir);
+
+        registry
+            .set_name(&info.id, "kept")
+            .expect("the rename lands");
+        assert_eq!(
+            registry
+                .info(&info.id)
+                .expect("the terminal is in the table")
+                .name
+                .as_deref(),
+            Some("kept")
+        );
+        registry.remove(&info.id).expect("the terminal is removed");
+        assert!(registry.get(&info.id).is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
