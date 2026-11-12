@@ -22,6 +22,7 @@
 //! existing imports keep working.
 
 use crate::agents::agent_rows;
+use crate::terminal_tree::{status_token, terminal_rows, TerminalRow, TerminalSource};
 use crate::theme::Theme;
 use gpui::prelude::*;
 use gpui::{div, px, Context, FocusHandle, Render, Styled, StyledText, TextStyle, Window};
@@ -84,6 +85,11 @@ pub struct WorkspaceSidebar {
     engine: Option<Arc<dyn Runtime>>,
     snapshot: Option<Value>,
     last_body: Option<String>,
+    /// Where the runtime's terminals come from, once the shell wires it up.
+    terminal_source: Option<Arc<dyn TerminalSource>>,
+    /// The runtime's last reported terminals (`{"terminals": [...]}`).
+    terminals: Option<Value>,
+    last_terminals: Option<String>,
     focus_handle: FocusHandle,
     row_seq: usize,
     pulse_phase: u32,
@@ -96,6 +102,9 @@ impl WorkspaceSidebar {
             engine: None,
             snapshot: None,
             last_body: None,
+            terminal_source: None,
+            terminals: None,
+            last_terminals: None,
             focus_handle: cx.focus_handle(),
             row_seq: 0,
             pulse_phase: 0,
@@ -115,6 +124,15 @@ impl WorkspaceSidebar {
     pub fn attach(&mut self, engine: Arc<dyn Runtime>) {
         self.engine = Some(engine);
         self.refresh();
+    }
+
+    /// Where the sidebar reads the runtime's terminals from.
+    ///
+    /// The runtime is a separate process the shell has not wired up yet; until
+    /// it is, the section stays hidden rather than showing an empty header.
+    pub fn attach_terminals(&mut self, source: Arc<dyn TerminalSource>) {
+        self.terminal_source = Some(source);
+        self.refresh_terminals();
     }
 
     pub fn set_rail(&mut self, rail: bool) {
@@ -295,6 +313,11 @@ impl WorkspaceSidebar {
     }
 
     pub fn refresh(&mut self) {
+        self.refresh_session();
+        self.refresh_terminals();
+    }
+
+    fn refresh_session(&mut self) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
@@ -308,6 +331,29 @@ impl WorkspaceSidebar {
         }
         self.last_body = Some(encoded);
         self.snapshot = body.get("snapshot").cloned();
+    }
+
+    /// The terminal source is polled on the same tick as the session. A source
+    /// that cannot answer, or an empty runtime, is an empty list, not an error.
+    fn refresh_terminals(&mut self) {
+        let Some(source) = self.terminal_source.clone() else {
+            return;
+        };
+        let body = source.terminals();
+        let encoded = body.as_ref().map(Value::to_string);
+        if self.last_terminals == encoded {
+            return;
+        }
+        self.last_terminals = encoded;
+        self.terminals = body;
+    }
+
+    /// The runtime's terminals as tree rows; empty when nothing is attached.
+    fn runtime_terminals(&self) -> Vec<TerminalRow> {
+        self.terminals
+            .as_ref()
+            .map(terminal_rows)
+            .unwrap_or_default()
     }
 
     fn start_poll(&self, cx: &mut Context<Self>) {
@@ -411,6 +457,17 @@ fn pane_field<'a>(panes: Option<&'a Vec<Value>>, pane_id: &str, field: &str) -> 
         .as_str()
 }
 
+/// What a terminal row shows: its name, else its program, else its id.
+fn terminal_label(row: &TerminalRow) -> String {
+    if let Some(name) = row.name.as_deref().filter(|name| !name.is_empty()) {
+        return name.to_string();
+    }
+    if !row.program.is_empty() {
+        return row.program.clone();
+    }
+    row.id.clone()
+}
+
 impl Render for WorkspaceSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
@@ -424,6 +481,7 @@ impl Render for WorkspaceSidebar {
             .map(str::to_string);
         let workspaces = self.workspaces();
         let agents = self.snapshot.as_ref().map(agent_rows).unwrap_or_default();
+        let terminal_entries = self.runtime_terminals();
 
         let empty = workspaces.is_empty();
         let list = div()
@@ -537,7 +595,7 @@ impl Render for WorkspaceSidebar {
             }));
 
         let _ = focused_id;
-        div()
+        let mut sidebar = div()
             .id("workspace-sidebar")
             .track_focus(&self.focus_handle)
             .flex()
@@ -682,17 +740,64 @@ impl Render for WorkspaceSidebar {
                                 cx.notify();
                             }))
                     })),
-            )
-            .child(div().flex_1().child(if empty {
-                div()
-                    .px_2()
-                    .py_1()
-                    .text_size(px(12.0 * scale))
-                    .text_color(theme.text_dim)
-                    .child("No workspaces yet — open a workspace to begin.")
-            } else {
-                div()
-            }))
+            );
+
+        if !terminal_entries.is_empty() {
+            sidebar = sidebar
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(11.0 * scale))
+                        .text_color(theme.text_dim)
+                        .child("TERMINALS"),
+                )
+                .child(div().flex().flex_col().gap_1().px_2().py_2().children(
+                    terminal_entries.iter().map(|row| {
+                        let label = terminal_label(row);
+                        let status =
+                            status_token(row.status.as_deref()).and_then(AgentStatus::from_wire);
+                        let badge = status
+                            .map(|status| Self::status_color(status, &theme, self.pulse_phase));
+                        div()
+                            .id(self.next_row_id())
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0 * scale))
+                            .min_h(px(row_h.max(44.0)))
+                            .pl(px(row.depth as f32 * 12.0 * scale))
+                            .pr_2()
+                            .rounded_md()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .text_size(px(12.0 * scale))
+                                    .text_color(theme.text)
+                                    .child(label),
+                            )
+                            .child(div().flex_none().flex().items_center().children(
+                                badge.map(|color| div().size(px(8.0)).rounded_full().bg(color)),
+                            ))
+                    }),
+                ));
+        }
+
+        sidebar.child(div().flex_1().child(if empty {
+            div()
+                .px_2()
+                .py_1()
+                .text_size(px(12.0 * scale))
+                .text_color(theme.text_dim)
+                .child("No workspaces yet — open a workspace to begin.")
+        } else {
+            div()
+        }))
     }
 }
 
