@@ -5,7 +5,7 @@ use gpui::{
     div, px, App, Application, Context, Entity, Render, Size, Subscription, Window, WindowBounds,
     WindowOptions,
 };
-use orion_core::runtime::Runtime;
+use orion_core::runtime::{Runtime, RuntimeClient, RuntimeStream};
 use orion_core::{Engine, FrameSink, Role};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,6 +73,89 @@ pub struct OrionApp {
     notice: Option<String>,
 }
 
+/// The runtime session this shell belongs to.
+///
+/// `ORION_RUNTIME_SESSION` names an isolated runtime, which is how a second
+/// shell and the tests keep out of each other's way.
+fn runtime_session() -> String {
+    std::env::var("ORION_RUNTIME_SESSION")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+/// The runtime the shell talks to.
+///
+/// The runtime is another process: the terminals it owns outlive this window.
+/// When no runtime is running, one is started and waited for.
+async fn connect_or_start_runtime(session: &str) -> Result<Arc<dyn Runtime>, String> {
+    if let Some(runtime) = try_connect_runtime(session).await {
+        return Ok(runtime);
+    }
+    start_runtime(session)?;
+    // The runtime needs a moment to bind its socket.
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Some(runtime) = try_connect_runtime(session).await {
+            return Ok(runtime);
+        }
+    }
+    Err("the runtime did not answer".to_string())
+}
+
+/// A runtime that answers, if one is listening.
+async fn try_connect_runtime(session: &str) -> Option<Arc<dyn Runtime>> {
+    let stream = RuntimeStream::connect(session).await.ok()?;
+    // The handshake writes a frame and waits for the answer, so it belongs on a
+    // blocking thread rather than an async worker.
+    let client = tokio::task::spawn_blocking(move || RuntimeClient::new(Box::new(stream)))
+        .await
+        .ok()?
+        .ok()?;
+    Some(Arc::new(client) as Arc<dyn Runtime>)
+}
+
+/// Starts a runtime for `session`.
+///
+/// The runtime is detached: it must outlive the shell that started it, or
+/// closing the shell would take the terminals with it.
+fn start_runtime(session: &str) -> Result<(), String> {
+    let mut command = runtime_command()?;
+    command.arg("daemon");
+    command.env("ORION_RUNTIME_SESSION", session);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("could not start the runtime: {error}"))
+}
+
+/// The command that starts a runtime.
+///
+/// The runtime lives in the `orion` binary, which sits beside the shell's own
+/// binary; `PATH` is the fallback.
+fn runtime_command() -> Result<std::process::Command, String> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(if cfg!(windows) { "orion.exe" } else { "orion" });
+            if candidate.exists() {
+                return Ok(std::process::Command::new(candidate));
+            }
+        }
+    }
+    Ok(std::process::Command::new("orion"))
+}
+
 impl OrionApp {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let workspace_sidebar = cx.new(WorkspaceSidebar::new);
@@ -86,7 +169,22 @@ impl OrionApp {
         let split_terminal_pane = cx.new(TerminalPane::new);
         let split_file_tree = cx.new(FileTree::new);
         let split_changes_view = cx.new(ChangesView::new);
-        let engine: Arc<dyn Runtime> = Arc::new(Engine::new());
+        let session = runtime_session();
+        let runtime = tokio::runtime::Runtime::new()
+            .ok()
+            .and_then(|rt| rt.block_on(connect_or_start_runtime(&session)).ok());
+        // Without a runtime of its own the shell keeps the engine in this
+        // process, and the reader is told the terminals will not survive it.
+        let (engine, notice) = match runtime {
+            Some(engine) => (engine, None),
+            None => (
+                Arc::new(Engine::new()) as Arc<dyn Runtime>,
+                Some(
+                    "The Orion runtime is unavailable, so terminals will end with Orion. Start `orion daemon` and reopen Orion."
+                        .to_string(),
+                ),
+            ),
+        };
 
         let mut app = Self {
             workspace_sidebar,
@@ -109,7 +207,7 @@ impl OrionApp {
             split_changes_view,
             subscriptions: Vec::new(),
             focus_handle: cx.focus_handle(),
-            notice: None,
+            notice,
         };
 
         // Lifecycle clicks are events, so the shell re-renders at once instead
@@ -172,11 +270,11 @@ impl OrionApp {
             .update(cx, |view, _cx| view.attach(Arc::clone(&engine)));
 
         // Put the user back where they were before starting a fresh agent.
-        self.engine.restore();
+        engine.restore();
         self.workspace_sidebar
             .update(cx, |view, _cx| view.refresh());
 
-        let snapshot = self.engine.snapshot_value();
+        let snapshot = engine.snapshot_value();
         let first_pane = snapshot
             .get("panes")
             .and_then(Value::as_array)
@@ -220,20 +318,21 @@ impl OrionApp {
     /// Point every lens at one pane and start its PTY pump. Re-attaching is
     /// cheap and keeps workspace/tab switches showing the active pane.
     fn attach_pane(&mut self, cx: &mut App, pane_id: &str) {
+        let engine = Arc::clone(&self.engine);
         if self.attached_pane.as_deref() == Some(pane_id) {
             return;
         }
-        let Some(pane) = self.engine.pane_by_id(pane_id) else {
+        let Some(pane) = engine.pane_by_id(pane_id) else {
             return;
         };
         // Stop streaming the pane we are leaving; its pump also stops on the
         // generation check below.
         if let Some(previous) = self.attached_pane.take() {
-            if let Some(previous_pane) = self.engine.pane_by_id(&previous) {
+            if let Some(previous_pane) = engine.pane_by_id(&previous) {
                 previous_pane.detach("gpu-terminal");
             }
         }
-        let engine = Arc::clone(&self.engine);
+        let engine = Arc::clone(&engine);
 
         // The attach sink runs on the PTY reader thread, so it can only push
         // into a channel; the async task below drains that channel, feeds the
@@ -359,7 +458,8 @@ impl OrionApp {
     /// Runs one lifecycle command through the Route Table. A failure becomes
     /// the shell's one-line notice instead of a silent no-op.
     fn call_route(&mut self, path: &str, body: &Value) -> Option<Value> {
-        let (status, answer) = self.engine.http("POST", path, body);
+        let engine = Arc::clone(&self.engine);
+        let (status, answer) = engine.http("POST", path, body);
         if status == 200 {
             self.notice = None;
             return Some(answer);
@@ -428,7 +528,8 @@ impl OrionApp {
                     .find_map(|workspace| workspace.cwd.clone()),
             )
         });
-        let (status, body) = self.engine.http("GET", "/api/preferences", &Value::Null);
+        let engine = Arc::clone(&self.engine);
+        let (status, body) = engine.http("GET", "/api/preferences", &Value::Null);
         let explicit = if status == 200 {
             body.get("settings")
                 .and_then(|settings| settings.get("recentDirectory"))
@@ -1055,15 +1156,11 @@ impl Render for OrionApp {
             if let Some(second_id) = split_second.clone() {
                 if self.split_attached_pane.as_deref() != Some(second_id.as_str()) {
                     self.split_attached_pane = Some(second_id.clone());
-                    if let Some(second_pane) = self.engine.pane_by_id(&second_id) {
+                    let engine = Arc::clone(&self.engine);
+                    if let Some(second_pane) = engine.pane_by_id(&second_id) {
                         self.split_chat_view.update(cx, |view, cx| {
                             let seam = seam_of(&second_pane);
-                            view.attach(
-                                Some(Arc::clone(&self.engine)),
-                                seam,
-                                second_id.clone(),
-                                cx,
-                            );
+                            view.attach(Some(Arc::clone(&engine)), seam, second_id.clone(), cx);
                         });
                         self.split_terminal_pane
                             .update(cx, |view, _cx| view.set_pane(Arc::clone(&second_pane)));
