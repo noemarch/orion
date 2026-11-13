@@ -22,7 +22,7 @@
 //! screen.
 
 use crate::chat_entities::{
-    cap_turns, ChatPart, ChatPrompt, ChatRole, ChatTurn, ConversationResponse,
+    cap_turns, delegated_terminals, ChatPart, ChatPrompt, ChatRole, ChatTurn, ConversationResponse,
 };
 use crate::chat_model::{at_bottom, format_timestamp, ChatModel};
 use crate::composer::Composer;
@@ -32,6 +32,7 @@ use crate::markdown::{
 };
 use crate::pane_seam::PaneSeam;
 use crate::prompt_card::{answer_hint, PromptCard, PromptCardEvent};
+use crate::terminal_tree::status_token;
 use crate::theme::{Theme, CHAT_INLINE_CODE_RATIO, CHAT_LINE_HEIGHT};
 use crate::tool_card::{
     clipped_output, lines_with_paths, part_card, tool_object, tool_verb, DiffLine, PartCard,
@@ -42,8 +43,9 @@ use gpui::{
     div, px, App, Context, Entity, FocusHandle, FontStyle, FontWeight, IntoElement, Render,
     ScrollHandle, ScrollWheelEvent, StyledText, Subscription, TextStyle, Window,
 };
+use orion_core::protocol::AgentStatus;
 use orion_core::runtime::Runtime;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -61,6 +63,9 @@ pub enum ChatEvent {
     ShowTerminal,
     /// The reader clicked a file path.
     OpenFile(String),
+    /// The reader clicked a terminal this agent started: the Terminal Lens
+    /// is where that terminal lives.
+    FocusTerminal { id: String },
 }
 
 impl gpui::EventEmitter<ChatEvent> for ChatView {}
@@ -110,6 +115,11 @@ pub struct ChatView {
     /// The menu the reader answered, and when: the agent's screen may still
     /// show it for a moment, and the card must not come back.
     answered_prompt: Option<(String, Instant)>,
+    /// The runtime's last reported terminals (`{"terminals": [...]}`), from
+    /// which the cards under the conversation are filtered.
+    terminals: Option<Value>,
+    /// The body that was last read, so an unchanged list is not drawn again.
+    last_terminals: Option<String>,
     /// What takes the focus on the next draw.
     focus_wanted: FocusWanted,
     /// Whether this lens is the one on screen. A hidden transcript is not
@@ -164,6 +174,8 @@ impl ChatView {
             prompt_card: None,
             prompt_subscriptions: Vec::new(),
             answered_prompt: None,
+            terminals: None,
+            last_terminals: None,
             focus_wanted: FocusWanted::None,
             visible: true,
             reads: 0,
@@ -287,6 +299,9 @@ impl ChatView {
         if self.agent_name.is_none() {
             self.read_agent_name(&engine);
         }
+        // The terminals the agent started are polled on the same tick: a
+        // delegation can appear while the conversation body stands still.
+        self.refresh_terminals(&engine);
         let path = format!("/api/pane/conversation?pane_id={}", self.pane_id);
         self.reads += 1;
         let (status, body) = engine.http("GET", &path, &Value::Null);
@@ -309,6 +324,23 @@ impl ChatView {
         let working = self.agent_is_working();
         self.composer
             .update(cx, |composer, _cx| composer.set_running(working));
+    }
+
+    /// The runtime's terminals, asked through the same runtime the
+    /// conversation is read from (`terminal-list`, the verb the daemon
+    /// answers). A runtime that cannot answer holds no terminals the chat
+    /// can show, so the answer is an empty list, not an error.
+    fn refresh_terminals(&mut self, engine: &Arc<dyn Runtime>) {
+        let body = engine
+            .dispatch_from(None, &json!({ "type": "terminal-list" }))
+            .ok()
+            .flatten();
+        let encoded = body.as_ref().map(Value::to_string);
+        if self.last_terminals == encoded {
+            return;
+        }
+        self.last_terminals = encoded;
+        self.terminals = body;
     }
 
     fn start_poll(&self, cx: &mut Context<Self>) {
@@ -758,6 +790,14 @@ impl Render for ChatView {
             self.render_turns(cx)
         };
 
+        // The terminals the agent started sit under the conversation: they are
+        // not transcript turns, so they follow the last turn instead of
+        // pretending to be one.
+        let mut scroll_body = div().flex().flex_col().child(content);
+        if let Some(cards) = self.render_terminal_cards(cx) {
+            scroll_body = scroll_body.child(cards);
+        }
+
         let list = div()
             .id("chat-scroll")
             .flex()
@@ -765,7 +805,7 @@ impl Render for ChatView {
             .flex_1()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
-            .child(content);
+            .child(scroll_body);
 
         // New turns follow the bottom only while the reader is there.
         if self.model.follows_bottom() {
@@ -1426,6 +1466,113 @@ impl ChatView {
             }))
             .into_any_element()
     }
+
+    /// The terminals this pane's agent started, as compact cards under the
+    /// conversation.
+    ///
+    /// A delegation is not a transcript turn — the agent's own record does not
+    /// carry it — so the cards sit after the last turn under a label that says
+    /// whose they are. The status badge follows the sidebar's rule exactly: a
+    /// terminal that has not reported shows no badge, and the shell does not
+    /// guess one from the screen.
+    fn render_terminal_cards(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let terminals = self.terminals.as_ref()?;
+        let rows = delegated_terminals(terminals, &self.pane_id);
+        if rows.is_empty() {
+            return None;
+        }
+        let theme = Theme::current();
+        let mut section = div()
+            .id(self.next_row_id())
+            .debug_selector(|| "chat-terminals".to_string())
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .px_3()
+            .pb_3()
+            .child(
+                div()
+                    .text_size(px(11.0 * theme.density_scale()))
+                    .text_color(theme.text_dim)
+                    .child("Terminals this agent started"),
+            );
+        for row in rows {
+            let id = row.id.clone();
+            let selector_id = id.clone();
+            let label = row
+                .name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| row.id.clone());
+            let token = status_token(row.status.as_deref());
+            // The card is a tool row in another guise: the same panel, the
+            // same padding, the same 44px header row (DESIGN.md §5).
+            let mut header = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .min_h(px(44.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(12.0 * theme.density_scale()))
+                        .text_color(theme.text)
+                        .child(label),
+                );
+            if let Some(token) = token {
+                let color = terminal_status_color(token, &theme);
+                header = header
+                    .child(
+                        div()
+                            .debug_selector(|| "chat-terminal-badge".to_string())
+                            .flex_none()
+                            .text_size(px(11.0 * theme.density_scale()))
+                            .text_color(color)
+                            .child(token),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "chat-terminal-badge".to_string())
+                            .flex_none()
+                            .size(px(8.0))
+                            .rounded_full()
+                            .bg(color),
+                    );
+            }
+            let card = div()
+                .id(self.next_row_id())
+                .debug_selector(move || format!("chat-terminal-card-{selector_id}"))
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .rounded_md()
+                .bg(theme.surface_panel)
+                .p_2()
+                .cursor_pointer()
+                .child(header)
+                .on_click(cx.listener(move |_this, _, _, cx| {
+                    cx.emit(ChatEvent::FocusTerminal { id: id.clone() });
+                    cx.notify();
+                }));
+            section = section.child(card);
+        }
+        Some(section.into_any_element())
+    }
+}
+
+/// The color a reported status paints: the sidebar's status tokens, never the
+/// accent (DESIGN.md §1).
+fn terminal_status_color(token: &str, theme: &Theme) -> gpui::Rgba {
+    match AgentStatus::from_wire(token) {
+        Some(AgentStatus::Working) => theme.status_working,
+        Some(AgentStatus::Done) => theme.status_done,
+        Some(AgentStatus::Blocked) => theme.status_blocked,
+        Some(AgentStatus::Error) => theme.indicator_blocked,
+        _ => theme.indicator_unknown,
+    }
 }
 
 #[cfg(test)]
@@ -1435,7 +1582,8 @@ mod tests {
     use crate::pane_seam::test_doubles::{menu_prompt, RecordingPane, SeamCall};
     use gpui::Window;
     use orion_core::engine::store::Store;
-    use orion_core::Engine;
+    use orion_core::runtime::PaneHandle;
+    use orion_core::{Engine, FrameSink};
     use serde_json::json;
 
     /// The window's root view: the chat the test drives.
@@ -2536,6 +2684,146 @@ let x = 1;
             seam.calls(),
             vec![SeamCall::Answer("p1".to_string(), 1)],
             "the pointer chose the second option"
+        );
+    }
+
+    /// A runtime that answers the conversation route and the terminal list.
+    ///
+    /// The chat asks the runtime it already holds, so a fake that answers
+    /// those two questions is enough to bring the cards on screen.
+    struct FakeRuntime {
+        terminals: Value,
+    }
+
+    impl Runtime for FakeRuntime {
+        fn identity(&self) -> Value {
+            json!({ "version": "0.0.0", "protocol": 1 })
+        }
+
+        fn http(&self, _method: &str, path: &str, _body: &Value) -> (u16, Value) {
+            if path.starts_with("/api/pane/conversation") {
+                return (200, json!({ "source": "claude-transcript", "turns": [] }));
+            }
+            (200, Value::Null)
+        }
+
+        fn pane_by_id(&self, _pane_id: &str) -> Option<Arc<dyn PaneHandle>> {
+            None
+        }
+
+        fn connect(&self, _sink: FrameSink) -> String {
+            "conn-fake".to_string()
+        }
+
+        fn send_to(&self, _connection: &str, _frame: Value) {}
+
+        fn disconnect(&self, _connection: &str) {}
+
+        fn dispatch_from(
+            &self,
+            _connection: Option<&str>,
+            request: &Value,
+        ) -> Result<Option<Value>, String> {
+            if request.get("type").and_then(Value::as_str) == Some("terminal-list") {
+                return Ok(Some(self.terminals.clone()));
+            }
+            Ok(None)
+        }
+
+        fn snapshot_value(&self) -> Value {
+            Value::Null
+        }
+
+        fn restore(&self) {}
+    }
+
+    #[gpui::test]
+    fn a_terminal_the_agent_started_is_a_card_the_reader_can_click(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        let runtime: Arc<dyn Runtime> = Arc::new(FakeRuntime {
+            terminals: json!({
+                "terminals": [
+                    { "id": "00000002", "name": "build", "parent_id": "p1",
+                      "program": "omp", "status": "working" },
+                    { "id": "00000003", "name": "someone else's", "parent_id": "p2",
+                      "program": "omp", "status": "working" },
+                ],
+            }),
+        });
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            chat.update(app, |view, cx| {
+                let seam: Arc<dyn PaneSeam> = Arc::new(RecordingPane::new());
+                view.attach(Some(Arc::clone(&runtime)), seam, "p1".to_string(), cx);
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        assert!(
+            cx.debug_bounds("chat-terminal-card-00000002").is_some(),
+            "the terminal this agent started is a card"
+        );
+        assert!(
+            cx.debug_bounds("chat-terminal-card-00000003").is_none(),
+            "a terminal another pane started is not this pane's card"
+        );
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        // The subscription must outlive the test, or the events go nowhere.
+        let subscription = cx.update(|_window, app| {
+            app.subscribe(
+                &root.read(app).view.clone(),
+                move |_entity, event: &ChatEvent, _cx| {
+                    collected.borrow_mut().push(event.clone());
+                },
+            )
+        });
+        let bounds = cx
+            .debug_bounds("chat-terminal-card-00000002")
+            .expect("the card");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+
+        assert!(
+            events.borrow().contains(&ChatEvent::FocusTerminal {
+                id: "00000002".to_string()
+            }),
+            "the click asked for that terminal: {:?}",
+            events.borrow()
+        );
+        drop(subscription);
+    }
+
+    #[gpui::test]
+    fn a_terminal_that_has_not_reported_shows_no_badge(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+            view: cx.new(ChatView::new),
+        });
+        let runtime: Arc<dyn Runtime> = Arc::new(FakeRuntime {
+            terminals: json!({
+                "terminals": [
+                    { "id": "00000002", "name": "build", "parent_id": "p1",
+                      "program": "omp" },
+                ],
+            }),
+        });
+        cx.update(|_window, app| {
+            let chat = root.read(app).view.clone();
+            chat.update(app, |view, cx| {
+                let seam: Arc<dyn PaneSeam> = Arc::new(RecordingPane::new());
+                view.attach(Some(Arc::clone(&runtime)), seam, "p1".to_string(), cx);
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let _card = cx
+            .debug_bounds("chat-terminal-card-00000002")
+            .expect("the card is drawn");
+        assert!(
+            cx.debug_bounds("chat-terminal-badge").is_none(),
+            "a terminal that has not reported wears no badge"
         );
     }
 }

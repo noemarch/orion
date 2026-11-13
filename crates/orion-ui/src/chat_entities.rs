@@ -8,6 +8,7 @@
 //! deserialize the raw `Value` into [`ChatPart::Unknown`] so a newer server never
 //! blanks a turn.
 
+use crate::terminal_tree::{terminal_rows, TerminalRow};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -42,6 +43,20 @@ pub fn cap_turns<T>(mut turns: Vec<T>, cap: usize) -> Vec<T> {
         turns.drain(..turns.len() - cap);
     }
     turns
+}
+
+/// The runtime terminals the pane's own agent started.
+///
+/// A terminal whose parent is this pane is one this agent delegated to; a
+/// terminal with no parent belongs to nobody and is not shown here. The pane's
+/// id is the id the runtime knows it by, so the parent match is exact — and a
+/// terminal that has not reported keeps no status, which the card must not
+/// invent.
+pub fn delegated_terminals(terminals: &Value, pane_terminal_id: &str) -> Vec<TerminalRow> {
+    terminal_rows(terminals)
+        .into_iter()
+        .filter(|row| row.parent_id.as_deref() == Some(pane_terminal_id))
+        .collect()
 }
 
 /// One conversation turn: a user message or one assistant response step.
@@ -300,5 +315,45 @@ mod tests {
         let prompt = ChatPrompt::from_value(&value).expect("prompt");
         assert_eq!(prompt.options[0].label, "Yes");
         assert!(ChatPrompt::from_value(&json!(null)).is_none());
+    }
+
+    #[test]
+    fn a_terminal_the_pane_started_is_a_delegation() {
+        let terminals = json!([
+            { "id": "pane-1", "program": "claude" },
+            { "id": "t1", "name": "build", "parent_id": "pane-1",
+              "program": "omp", "status": "working" },
+        ]);
+        let rows = delegated_terminals(&terminals, "pane-1");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "t1");
+        assert_eq!(rows[0].name.as_deref(), Some("build"));
+        assert_eq!(rows[0].status.as_deref(), Some("working"));
+    }
+
+    #[test]
+    fn a_terminal_the_pane_did_not_start_is_not_a_delegation() {
+        let terminals = json!([
+            { "id": "t1", "parent_id": "other-pane", "program": "omp" },
+            { "id": "t2", "program": "claude" },
+        ]);
+
+        assert!(delegated_terminals(&terminals, "pane-1").is_empty());
+    }
+
+    #[test]
+    fn a_terminal_that_has_not_reported_has_no_badge() {
+        let terminals = json!([
+            { "id": "t1", "parent_id": "pane-1", "program": "omp" },
+        ]);
+        let rows = delegated_terminals(&terminals, "pane-1");
+
+        assert_eq!(rows[0].status, None);
+        assert_eq!(
+            crate::terminal_tree::status_token(rows[0].status.as_deref()),
+            None,
+            "the projection does not invent a status"
+        );
     }
 }

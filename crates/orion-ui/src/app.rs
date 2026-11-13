@@ -434,6 +434,63 @@ impl OrionApp {
                     }
                 }
             },
+            ChatEvent::FocusTerminal { id } => {
+                // A runtime terminal is not a session pane: the daemon's
+                // `pane-open` verb finds it in the runtime registry, and its
+                // output reaches the shell as `pty-data` frames carrying that
+                // id. The Terminal Lens takes it; the chat keeps its own pane,
+                // because a runtime terminal has no conversation to read.
+                if let Some(pane) = self.engine.pane_by_id(id.as_str()) {
+                    let (pty_tx, pty_rx) = flume::unbounded::<String>();
+                    let sink: FrameSink = Arc::new(move |frame: Value| {
+                        if frame["type"] == "pty-data" {
+                            if let Some(data) = frame["data"].as_str() {
+                                let _ = pty_tx.send(data.to_string());
+                            }
+                        }
+                    });
+                    if pane
+                        .attach("gpu-terminal", sink, Role::Interact, 120, 32, false)
+                        .is_ok()
+                    {
+                        let terminal_pane = self.terminal_pane.clone();
+                        terminal_pane.update(cx, |view, cx| {
+                            view.set_pane(Arc::clone(&pane));
+                            cx.notify();
+                        });
+                        // The session pane is not what the Terminal Lens shows
+                        // any more, so the lens must attach it again when the
+                        // reader goes back to the agent.
+                        self.attached_pane = None;
+                        // The pump: the focused terminal's output goes to the
+                        // grid, and the generation stops the pane left behind.
+                        let generation = Arc::clone(&self.attach_generation);
+                        let mine = generation.fetch_add(1, Ordering::SeqCst) + 1;
+                        cx.spawn(async move |cx| {
+                            while let Ok(first) = pty_rx.recv_async().await {
+                                if generation.load(Ordering::SeqCst) != mine {
+                                    break;
+                                }
+                                let generation = Arc::clone(&generation);
+                                let _ = cx.update(|cx| {
+                                    if generation.load(Ordering::SeqCst) != mine {
+                                        return;
+                                    }
+                                    terminal_pane.update(cx, |view, cx| {
+                                        view.feed(&first);
+                                        while let Ok(more) = pty_rx.try_recv() {
+                                            view.feed(&more);
+                                        }
+                                        cx.notify();
+                                    });
+                                });
+                            }
+                        })
+                        .detach();
+                    }
+                }
+                self.set_lens(Lens::Terminal, cx);
+            }
             ChatEvent::OpenFile(path) => {
                 match pane {
                     ChatPane::Focused => self.set_lens(Lens::Changes, cx),

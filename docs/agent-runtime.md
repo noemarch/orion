@@ -13,23 +13,39 @@ terminal on this machine in the same runtime session.
 Every command prints plain text. Exit code 0 means it did what you asked; 1
 means it did not, and the reason is on stderr.
 
+THE VERBS
+
+  spawn-agent   start a terminal and give back its id
+  list          show the terminals
+  send          write text to a terminal
+  wait          wait for a report or an exit
+  read          print what a terminal printed
+  kill          end a terminal and its children
+  report        record what a program says about itself
+
+`run` is another name for `spawn-agent`, and `ls` for `list`.
+
 START ANOTHER AGENT
 
-  orion-rt run --agent claude --name reviewer
-  orion-rt run --agent codex --name fixer --cwd ../other-worktree
-  orion-rt run --name probe -- cmd.exe /C \"echo hello\"
+  orion-rt spawn-agent --agent claude --name reviewer
+  orion-rt spawn-agent --agent codex --name fixer --cwd ../other-worktree
+  orion-rt spawn-agent --name probe -- cmd.exe /C "echo hello"
 
-`run` prints the new terminal's id and then its address, `<socket>:<id>`, and
-returns at once; the program keeps running. `--agent` accepts one kind: claude,
-codex, agy, opencode, cursor, grok, omp, omo, pi, hermes, devin. Without
-`--agent`, put the program and its arguments after `--`. The new terminal is a
-child of the terminal you are running in, when the runtime knows which one that
-is, and a child must stay inside its parent's directory. `--bg` prints only the
-id.
+`spawn-agent` prints the new terminal's id and then its address,
+`<socket>:<id>`, and returns at once; the program keeps running. `--agent`
+accepts one kind: claude, codex, agy, opencode, cursor, grok, omp, omo, pi,
+hermes, devin. Without `--agent`, put the program and its arguments after `--`,
+and the program gets exactly those arguments. The new terminal is a child of
+the terminal you are running in, when the runtime knows which one that is, and
+a child must stay inside its parent's directory. `--bg` prints only the id.
+
+A bash shell rewrites a single-letter switch such as `/C` into a drive path
+before the program sees it, and the CLI puts that switch back. In a bash shell,
+write `//C` to keep it as it is.
 
 FIND A TERMINAL AGAIN
 
-  orion-rt ls
+  orion-rt list
 
 One line per terminal, tab-separated: id, name, parent, status, cwd. An empty
 runtime prints `no terminals`. A terminal's address is always `<socket>:<id>`,
@@ -37,7 +53,7 @@ and the id alone is enough for every other command.
 
 SEND WORK
 
-  orion-rt send <id> \"run the test suite and report what failed\"
+  orion-rt send <id> "run the test suite and report what failed"
 
 `send` writes the text to the terminal's stdin and presses Enter. Words after
 the id are joined with spaces.
@@ -81,15 +97,27 @@ CLEAN UP
   orion-rt kill <id>
 
 Ends the terminal and its children. A terminal whose program ends on its own
-stays in the table until it is killed; `ls` shows its exit code in place of a
+stays in the table until it is killed; `list` shows its exit code in place of a
 status.
+
+WHERE YOU ARE
+
+The daemon gives every terminal three variables:
+
+  RUNTIME_TERMINAL_ID   the id of the terminal you are running in
+  RUNTIME_SOCKET        the socket the runtime listens on
+  RUNTIME_CLI           the orion-rt binary to call
+
+A terminal started from inside another is its child, and `RUNTIME_TERMINAL_ID`
+tells the runtime which parent to record. A child ends with its parent unless
+it was asked to outlive it.
 
 A WHOLE JOB
 
-  orion-rt run --agent claude --name reviewer
+  orion-rt spawn-agent --agent claude --name reviewer
   1a2b3c4d
   address /run/user/1000/orion/runtime/default.sock:1a2b3c4d
-  orion-rt send 1a2b3c4d \"review src/lib.rs and list what is wrong\"
+  orion-rt send 1a2b3c4d "review src/lib.rs and list what is wrong"
   orion-rt wait 1a2b3c4d --timeout 600
   orion-rt read 1a2b3c4d --lines 80
   orion-rt kill 1a2b3c4d
