@@ -414,7 +414,7 @@ impl OrionApp {
                         let changed = view.revision() != before;
                         // Only notify when the screen actually changed and enough
                         // time has passed since the last repaint.
-                        if changed && last_notify.elapsed() >= std::time::Duration::from_millis(33) {
+                        if changed && last_notify.elapsed() >= std::time::Duration::from_millis(50) {
                             cx.notify();
                             last_notify = std::time::Instant::now();
                         }
