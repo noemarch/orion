@@ -80,6 +80,9 @@ struct RuntimeClientInner {
     connections: Mutex<HashMap<String, FrameSink>>,
     identity: Value,
     alive: AtomicBool,
+    /// Short-TTL cache for GET responses so repeated calls (polls, render)
+    /// return instantly without a socket round-trip.
+    http_cache: Mutex<HashMap<String, (u16, Value, std::time::Instant)>>,
 }
 
 impl RuntimeClientInner {
@@ -134,6 +137,7 @@ impl RuntimeClient {
             connections: Mutex::new(HashMap::new()),
             identity,
             alive: AtomicBool::new(true),
+            http_cache: Mutex::new(HashMap::new()),
         });
 
         let pump_inner = std::sync::Arc::clone(&inner);
@@ -181,9 +185,10 @@ impl RuntimeClient {
                 .map_err(|error| error.to_string())?;
         }
 
-        match receiver.recv() {
+        match receiver.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(frame) => Ok(frame),
-            Err(_) => Err("connection closed".to_string()),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err("runtime did not answer in time".to_string()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("connection closed".to_string()),
         }
     }
 
@@ -215,6 +220,19 @@ impl Runtime for RuntimeClient {
     }
 
     fn http(&self, method: &str, path: &str, body: &Value) -> (u16, Value) {
+        // Cache GET responses for 100ms so repeated calls (polls, render)
+        // return instantly without a socket round-trip.
+        let cache_key = format!("{method} {path}");
+        if method == "GET" {
+            let cache = self.inner.http_cache.lock();
+            if let Some((status, body, when)) = cache.get(&cache_key) {
+                if when.elapsed() < std::time::Duration::from_millis(100) {
+                    return (*status, body.clone());
+                }
+            }
+            drop(cache);
+        }
+
         let answer = match self.request(json!({
             "type": "http",
             "method": method,
@@ -226,6 +244,14 @@ impl Runtime for RuntimeClient {
         };
         let status = answer.get("status").and_then(Value::as_u64).unwrap_or(0) as u16;
         let body = answer.get("body").cloned().unwrap_or(Value::Null);
+
+        if method == "GET" {
+            self.inner.http_cache.lock().insert(cache_key, (status, body.clone(), std::time::Instant::now()));
+        } else {
+            // Mutations invalidate the cache.
+            self.inner.http_cache.lock().clear();
+        }
+
         (status, body)
     }
 
