@@ -12,8 +12,8 @@
 //!
 //! | command | daemon verb | answer the CLI uses |
 //! |---|---|---|
-//! | `run` | `terminal-spawn` | `ok`, `terminal_id` |
-//! | `ls` | `terminal-list` | `terminals` |
+//! | `spawn-agent` (`run`) | `terminal-spawn` | `ok`, `terminal_id` |
+//! | `list` (`ls`) | `terminal-list` | `terminals` |
 //! | `attach` | (pushed `pty-data` frames) | `data` |
 //! | `read` | `terminal-read` | `text` |
 //! | `send` | `terminal-send` | `ok` |
@@ -49,10 +49,10 @@ const USAGE: &str = "\
 Usage: orion-rt <command> [arguments]
 
 Commands:
-  run [--bg] [--name NAME] [--cwd DIR] [--agent KIND] [-- <program> <args>...]
+  spawn-agent [--bg] [--name NAME] [--cwd DIR] [--agent KIND] [-- <program> <args>...]
       Start a terminal. `--agent` starts an agent CLI by kind; without it, give
       a program after `--`. Prints the terminal id, then its address.
-  ls
+  list
       List the terminals: id, name, parent, status, cwd.
   attach <id>
       Stream a terminal's new output until it ends.
@@ -68,6 +68,8 @@ Commands:
       Record what a program reported about itself.
   skill
       Print the agent-facing guide.
+
+Aliases: `run` is `spawn-agent`, `ls` is `list`.
 
 Options:
   --skill   Print the agent-facing guide and exit.
@@ -110,8 +112,8 @@ async fn run() -> Result<ExitCode, String> {
             flush_stdout()?;
             Ok(ExitCode::SUCCESS)
         }
-        "run" => run_verb(&rest).await,
-        "ls" => list_verb().await,
+        "spawn-agent" | "run" => spawn_verb(&rest).await,
+        "list" | "ls" => list_verb().await,
         "attach" => attach_verb(&rest).await,
         "read" => read_verb(&rest).await,
         "send" => send_verb(&rest).await,
@@ -176,24 +178,34 @@ fn terminal_info(client: &RuntimeClient, id: &str) -> Result<Value, String> {
                 .cloned()
         });
     found.ok_or_else(|| {
-        format!("No such terminal: {id}. Use `orion-rt ls` to see what this runtime holds.")
+        format!("No such terminal: {id}. Use `orion-rt list` to see what this runtime holds.")
     })
 }
 
-/// What `run` was asked for.
-struct RunOptions {
-    background: bool,
-    name: Option<String>,
-    cwd: Option<String>,
-    agent: Option<String>,
-    command: Vec<String>,
+/// What a spawn starts.
+enum SpawnTarget {
+    /// An agent CLI by kind. The runtime resolves the binary.
+    Agent(String),
+    /// A program and the arguments it gets.
+    Program { program: String, args: Vec<String> },
 }
 
-/// `run`: starts a terminal and hands back its id.
-async fn run_verb(args: &[String]) -> Result<ExitCode, String> {
-    let options = parse_run_args(args)?;
-    let (program, program_args) = command_for(&options)?;
-    let cwd = match &options.cwd {
+/// What a spawn asks for.
+struct SpawnRequest {
+    target: SpawnTarget,
+    name: Option<String>,
+    cwd: Option<String>,
+    background: bool,
+}
+
+/// `spawn-agent`: starts a terminal and hands back its id.
+async fn spawn_verb(args: &[String]) -> Result<ExitCode, String> {
+    let request = parse_spawn_request(args)?;
+    let (program, program_args) = match &request.target {
+        SpawnTarget::Agent(kind) => resolve_agent(kind)?,
+        SpawnTarget::Program { program, args } => (program.clone(), args.clone()),
+    };
+    let cwd = match &request.cwd {
         Some(dir) => dir.clone(),
         None => std::env::current_dir()
             .map_err(|error| format!("Cannot read the current directory: {error}"))?
@@ -210,7 +222,7 @@ async fn run_verb(args: &[String]) -> Result<ExitCode, String> {
             "program": program,
             "args": program_args,
             "cwd": cwd,
-            "name": options.name,
+            "name": request.name,
             "parent_id": current_terminal_id(),
             "outlive_parent": false,
         }),
@@ -229,47 +241,129 @@ async fn run_verb(args: &[String]) -> Result<ExitCode, String> {
         .ok_or_else(|| "The runtime did not return a terminal id.".to_string())?;
 
     println!("{id}");
-    if !options.background {
+    if !request.background {
         println!("address {}", address(&session, id));
     }
     flush_stdout()?;
     Ok(ExitCode::SUCCESS)
 }
 
-/// Reads `run`'s flags and the program after `--`.
-fn parse_run_args(args: &[String]) -> Result<RunOptions, String> {
-    let mut options = RunOptions {
-        background: false,
-        name: None,
-        cwd: None,
-        agent: None,
-        command: Vec::new(),
-    };
+/// Reads the spawn flags and the program after `--`.
+///
+/// Everything after `--` belongs to the program, so its own flags reach it.
+fn parse_spawn_request(args: &[String]) -> Result<SpawnRequest, String> {
+    let mut name = None;
+    let mut cwd = None;
+    let mut agent = None;
+    let mut background = false;
+    let mut command: Vec<String> = Vec::new();
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--bg" => options.background = true,
+            "--bg" => background = true,
             "--name" => {
                 index += 1;
-                options.name = Some(flag_value(args, index, "--name")?);
+                name = Some(flag_value(args, index, "--name")?);
             }
             "--cwd" => {
                 index += 1;
-                options.cwd = Some(flag_value(args, index, "--cwd")?);
+                cwd = Some(flag_value(args, index, "--cwd")?);
             }
             "--agent" => {
                 index += 1;
-                options.agent = Some(flag_value(args, index, "--agent")?);
+                agent = Some(flag_value(args, index, "--agent")?);
             }
             "--" => {
-                options.command = args[index + 1..].to_vec();
+                command = args[index + 1..].to_vec();
                 break;
             }
-            other => return Err(format!("Unknown option for run: {other}\n\n{USAGE}")),
+            other => {
+                return Err(format!(
+                    "Unknown option for spawn-agent: {other}\n\n{USAGE}"
+                ))
+            }
         }
         index += 1;
     }
-    Ok(options)
+
+    let target = match (&agent, command.first()) {
+        (Some(kind), None) => SpawnTarget::Agent(kind.clone()),
+        (Some(_), Some(_)) => {
+            return Err("Give either --agent or a program after `--`, not both.".to_string())
+        }
+        (None, Some(program)) => SpawnTarget::Program {
+            program: program.clone(),
+            args: restore_switches(&command[1..]),
+        },
+        (None, None) => {
+            return Err(format!(
+            "`spawn-agent` needs a program after `--`, or an agent kind with `--agent`.\n\n{USAGE}"
+        ))
+        }
+    };
+
+    Ok(SpawnRequest {
+        target,
+        name,
+        cwd,
+        background,
+    })
+}
+
+/// The environment variable a POSIX-path shell sets for the programs it starts.
+const POSIX_SHELL_ENV: &str = "MSYSTEM";
+
+/// Puts back the switches a POSIX-path shell rewrote.
+///
+/// Git Bash and MSYS2 turn a single-letter switch such as `/C` into `C:/`
+/// before a native program sees it. A program that gets `C:/` instead of `/C`
+/// starts in the wrong mode and waits for a person, so the CLI restores the
+/// one shape it can still recognise: a drive letter, a colon, and nothing
+/// else. It says so on stderr, because a caller who meant a real drive path
+/// deserves to know.
+fn restore_switches(args: &[String]) -> Vec<String> {
+    if std::env::var_os(POSIX_SHELL_ENV).is_none() {
+        return args.to_vec();
+    }
+    restore_posix_switches(args)
+}
+
+/// The switches a POSIX-path shell rewrote, put back.
+fn restore_posix_switches(args: &[String]) -> Vec<String> {
+    let mut restored = Vec::with_capacity(args.len());
+    let mut repaired: Vec<(String, String)> = Vec::new();
+    for arg in args {
+        match rewritten_switch(arg) {
+            Some(switch) => {
+                repaired.push((arg.clone(), switch.clone()));
+                restored.push(switch);
+            }
+            None => restored.push(arg.clone()),
+        }
+    }
+    for (was, now) in repaired {
+        eprintln!("note: the shell turned {was} into a drive path; the program gets {now}");
+    }
+    restored
+}
+
+/// The switch a POSIX-path shell rewrote, if this argument is one.
+fn rewritten_switch(arg: &str) -> Option<String> {
+    let mut chars = arg.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() {
+        return None;
+    }
+    if chars.next()? != ':' {
+        return None;
+    }
+    if chars.next()? != '/' {
+        return None;
+    }
+    if chars.next().is_some() {
+        return None;
+    }
+    Some(format!("/{letter}"))
 }
 
 /// The value of a flag that needs one.
@@ -277,20 +371,6 @@ fn flag_value(args: &[String], index: usize, flag: &str) -> Result<String, Strin
     args.get(index)
         .cloned()
         .ok_or_else(|| format!("{flag} needs a value.\n\n{USAGE}"))
-}
-
-/// The program and arguments `run` should start.
-fn command_for(options: &RunOptions) -> Result<(String, Vec<String>), String> {
-    match (&options.agent, options.command.first()) {
-        (Some(agent), None) => resolve_agent(agent),
-        (Some(_), Some(_)) => {
-            Err("Give either --agent or a program after `--`, not both.".to_string())
-        }
-        (None, Some(program)) => Ok((program.clone(), options.command[1..].to_vec())),
-        (None, None) => Err(format!(
-            "`run` needs a program after `--`, or an agent kind with `--agent`.\n\n{USAGE}"
-        )),
-    }
 }
 
 /// Turns an agent kind into the program and arguments the runtime starts.
@@ -306,7 +386,7 @@ fn resolve_agent(name: &str) -> Result<(String, Vec<String>), String> {
     Ok((spec.program.to_string_lossy().into_owned(), spec.args))
 }
 
-/// `ls`: one line per terminal.
+/// `list`: one line per terminal.
 async fn list_verb() -> Result<ExitCode, String> {
     let client = connect().await?;
     let answer = ask(&client, json!({ "type": "terminal-list" }))?;
@@ -326,7 +406,7 @@ async fn list_verb() -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// One tab-separated `ls` line: id, name, parent, status, cwd.
+/// One tab-separated `list` line: id, name, parent, status, cwd.
 fn terminal_row(terminal: &Value) -> String {
     let field = |key: &str| {
         terminal
@@ -603,10 +683,62 @@ mod tests {
         )
     }
 
+    /// The words of a command line, as the CLI receives them.
+    fn words(line: &[&str]) -> Vec<String> {
+        line.iter().map(|word| word.to_string()).collect()
+    }
+
     #[test]
-    fn the_skill_document_names_every_verb() {
+    fn the_program_and_its_arguments_reach_the_program() {
+        let line = words(&["run", "--", "cmd.exe", "/C", "echo hi"]);
+        let request = parse_spawn_request(&line[1..]).expect("the spawn parses");
+        let SpawnTarget::Program { program, args } = request.target else {
+            panic!("a program after `--` must stay a program");
+        };
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(args, ["/C", "echo hi"]);
+    }
+
+    #[test]
+    fn an_agent_kind_needs_no_program_arguments() {
+        let line = words(&["run", "--agent", "claude", "--name", "reviewer"]);
+        let request = parse_spawn_request(&line[1..]).expect("the spawn parses");
+        let SpawnTarget::Agent(kind) = request.target else {
+            panic!("`--agent` must stay an agent kind");
+        };
+        assert_eq!(kind, "claude");
+        assert_eq!(request.name.as_deref(), Some("reviewer"));
+    }
+
+    #[test]
+    fn a_program_with_no_arguments_is_still_a_program() {
+        let line = words(&["run", "--", "cmd.exe"]);
+        let request = parse_spawn_request(&line[1..]).expect("the spawn parses");
+        let SpawnTarget::Program { program, args } = request.target else {
+            panic!("a program after `--` must stay a program");
+        };
+        assert_eq!(program, "cmd.exe");
+        assert!(args.is_empty(), "a program may take no arguments");
+    }
+
+    #[test]
+    fn a_switch_a_posix_shell_rewrote_is_put_back() {
+        let rewritten = words(&["C:/", "echo hi"]);
+        assert_eq!(restore_posix_switches(&rewritten), ["/C", "echo hi"]);
+        let real_path = words(&["C:/Users"]);
+        assert_eq!(restore_posix_switches(&real_path), ["C:/Users"]);
+    }
+
+    #[test]
+    fn the_agent_facing_document_names_every_verb() {
         for verb in [
-            "run", "ls", "attach", "read", "send", "wait", "kill", "report",
+            "spawn-agent",
+            "send",
+            "read",
+            "wait",
+            "kill",
+            "list",
+            "report",
         ] {
             let example = format!("orion-rt {verb}");
             assert!(
@@ -619,11 +751,26 @@ mod tests {
     #[test]
     fn the_usage_lists_every_verb() {
         for verb in [
-            "run", "ls", "attach", "read", "send", "wait", "kill", "report",
+            "spawn-agent",
+            "list",
+            "attach",
+            "read",
+            "send",
+            "wait",
+            "kill",
+            "report",
         ] {
             let line = format!("\n  {verb}");
             assert!(USAGE.contains(&line), "the usage must list `{verb}`");
         }
+        assert!(
+            USAGE.contains("`run` is `spawn-agent`"),
+            "the usage must name the `run` alias"
+        );
+        assert!(
+            USAGE.contains("`ls` is `list`"),
+            "the usage must name the `ls` alias"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
