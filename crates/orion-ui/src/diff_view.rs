@@ -534,7 +534,7 @@ impl ChangesView {
 
     fn start_poll(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(2)).await;
+            cx.background_executor().timer(Duration::from_secs(5)).await;
             let _ = view.update(cx, |view, _cx| {
                 if view.visible {
                     view.refresh();

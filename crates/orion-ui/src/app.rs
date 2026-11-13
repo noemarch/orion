@@ -381,6 +381,10 @@ impl OrionApp {
         let mine = generation.fetch_add(1, Ordering::SeqCst) + 1;
         let terminal_pane = self.terminal_pane.clone();
         cx.spawn(async move |cx| {
+            // Throttle repaints: feeding every chunk is cheap, but repainting
+            // the grid on every chunk floods the UI thread. Batch the notify
+            // to at most ~30 frames per second.
+            let mut last_notify = std::time::Instant::now();
             while let Ok(first) = pty_rx.recv_async().await {
                 // A newer attach owns the view now; stop feeding it.
                 if generation.load(Ordering::SeqCst) != mine {
@@ -396,10 +400,21 @@ impl OrionApp {
                         while let Ok(more) = pty_rx.try_recv() {
                             view.feed(&more);
                         }
-                        cx.notify();
+                        // Only notify when enough time has passed since the last
+                        // repaint, so rapid output does not flood the UI thread.
+                        if last_notify.elapsed() >= std::time::Duration::from_millis(16) {
+                            cx.notify();
+                            last_notify = std::time::Instant::now();
+                        }
                     });
                 });
             }
+            // Final notify to flush any pending repaint.
+            let _ = cx.update(|cx| {
+                terminal_pane.update(cx, |_view, cx| {
+                    cx.notify();
+                });
+            });
         })
         .detach();
     }

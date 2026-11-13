@@ -346,7 +346,7 @@ impl ChatView {
     fn start_poll(&self, cx: &mut Context<Self>) {
         let _ = self;
         cx.spawn(async move |view, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(2)).await;
+            cx.background_executor().timer(Duration::from_secs(5)).await;
             let _ = view.update(cx, |view, cx| {
                 // Only a lens on screen is re-read: the conversation route
                 // reads the agent's whole transcript from disk, and that read

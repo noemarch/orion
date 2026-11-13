@@ -413,6 +413,12 @@ pub struct TerminalPane {
     touch: bool,
     /// The grid takes the focus on the next draw.
     focus_wanted: bool,
+    /// Cached viewport cells, keyed by (revision, scroll offset) so a frame
+    /// that paints the same content reuses the allocation instead of walking
+    /// the grid again.
+    cached_viewport_revision: u64,
+    cached_viewport_offset: usize,
+    cached_viewport_cells: Vec<(usize, Vec<TermCell>)>,
 }
 
 impl TerminalPane {
@@ -447,6 +453,9 @@ impl TerminalPane {
             pending_resize: None,
             touch: false,
             focus_wanted: false,
+            cached_viewport_revision: 0,
+            cached_viewport_offset: 0,
+            cached_viewport_cells: Vec::new(),
         }
     }
 
@@ -460,6 +469,9 @@ impl TerminalPane {
             .is_none_or(|current| current.id() != pane.id());
         if changed {
             self.screen = ScreenState::new(self.last_rows, self.last_cols);
+            self.cached_viewport_revision = 0;
+            self.cached_viewport_offset = 0;
+            self.cached_viewport_cells.clear();
             self.find_matches.clear();
             self.find_current = None;
             self.sel_anchor = None;
@@ -743,14 +755,26 @@ impl TerminalPane {
     /// screen or walk the ten-thousand row ring, so the grid can be drawn every
     /// frame. Same rows the plain read gives, with every cell's styling.
     fn viewport_cells(&mut self) -> Vec<(usize, Vec<TermCell>)> {
+        let revision = self.screen.revision();
         let offset = self.screen.offset_from_bottom();
+        if revision == self.cached_viewport_revision
+            && offset == self.cached_viewport_offset
+            && !self.cached_viewport_cells.is_empty()
+        {
+            return self.cached_viewport_cells.clone();
+        }
         let base = self.screen.scrollback_len().saturating_sub(offset);
-        self.screen
+        let cells: Vec<(usize, Vec<TermCell>)> = self
+            .screen
             .viewport_cells(offset)
             .into_iter()
             .enumerate()
             .map(|(index, cells)| (base + index, cells))
-            .collect()
+            .collect();
+        self.cached_viewport_revision = revision;
+        self.cached_viewport_offset = offset;
+        self.cached_viewport_cells = cells.clone();
+        cells
     }
 
     /// Map a window-relative position onto a visible (row, col) cell.

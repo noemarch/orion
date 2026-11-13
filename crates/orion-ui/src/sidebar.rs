@@ -358,7 +358,7 @@ impl WorkspaceSidebar {
 
     fn start_poll(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(2)).await;
+            cx.background_executor().timer(Duration::from_secs(5)).await;
             let _ = view.update(cx, |view, _cx| view.refresh());
             if view.upgrade().is_none() {
                 break;
@@ -370,7 +370,7 @@ impl WorkspaceSidebar {
     fn start_pulse(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| loop {
             cx.background_executor()
-                .timer(std::time::Duration::from_millis(120))
+                .timer(std::time::Duration::from_millis(250))
                 .await;
             let _ = view.update(cx, |view, cx| {
                 // Pulse only matters for live statuses; tick the phase so
