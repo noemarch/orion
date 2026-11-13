@@ -399,6 +399,7 @@ impl OrionApp {
                         // Feed at most ~64 KiB per pump tick so a flood of output
                         // does not block the UI thread for the whole chunk.
                         const CHUNK_LIMIT: usize = 64 * 1024;
+                        let before = view.revision();
                         let mut fed = first.len();
                         view.feed(&first);
                         while fed < CHUNK_LIMIT {
@@ -410,9 +411,10 @@ impl OrionApp {
                                 Err(_) => break,
                             }
                         }
-                        // Only notify when enough time has passed since the last
-                        // repaint, so rapid output does not flood the UI thread.
-                        if last_notify.elapsed() >= std::time::Duration::from_millis(16) {
+                        let changed = view.revision() != before;
+                        // Only notify when the screen actually changed and enough
+                        // time has passed since the last repaint.
+                        if changed && last_notify.elapsed() >= std::time::Duration::from_millis(16) {
                             cx.notify();
                             last_notify = std::time::Instant::now();
                         }

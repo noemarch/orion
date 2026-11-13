@@ -553,6 +553,11 @@ impl TerminalPane {
         // live screen, and only the live bottom follows the new output.
     }
 
+    /// The current screen revision, so callers can tell whether feeding changed anything.
+    pub fn revision(&self) -> u64 {
+        self.screen.revision()
+    }
+
     fn send_chord(&self, chord: &str) {
         if let Some(pane) = &self.pane {
             let _ = pane.keys(&[chord.to_string()]);
