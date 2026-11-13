@@ -55,6 +55,7 @@ use crate::protocol::{ReportedStatus, TerminalSize};
 use crate::runtime::client::FrameConnection;
 use crate::runtime::client::FrameSink;
 use crate::runtime::lock::RuntimeLock;
+use crate::runtime::persist::RuntimeStore;
 use crate::runtime::registry::{Registry, RegistryEvent};
 
 use crate::runtime::transport::{socket_path, RuntimeListener, RuntimeStream};
@@ -97,7 +98,9 @@ impl RuntimeDaemon {
         // The saved session comes back before the socket starts answering, so
         // a client that reaches the daemon finds it ready.
         engine.restore();
-        let registry = Arc::new(Registry::new());
+        // The registry remembers its terminals beside the socket, so a restart can
+        // tell the shell what terminals existed before the daemon went away.
+        let registry = Arc::new(Registry::with_store(RuntimeStore::in_runtime_dir()));
 
         let conn_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
