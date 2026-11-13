@@ -419,6 +419,10 @@ pub struct TerminalPane {
     cached_viewport_revision: u64,
     cached_viewport_offset: usize,
     cached_viewport_cells: Vec<(usize, Vec<TermCell>)>,
+    /// Cached render key: (revision, offset, sel_anchor, sel_cursor, find_matches len).
+    cached_render_key: (u64, usize, Option<(usize, usize)>, Option<(usize, usize)>, usize),
+    /// Whether the cached render is valid.
+    render_cache_valid: bool,
 }
 
 impl TerminalPane {
@@ -456,6 +460,8 @@ impl TerminalPane {
             cached_viewport_revision: 0,
             cached_viewport_offset: 0,
             cached_viewport_cells: Vec::new(),
+            cached_render_key: (0, 0, None, None, 0),
+            render_cache_valid: false,
         }
     }
 
@@ -472,6 +478,8 @@ impl TerminalPane {
             self.cached_viewport_revision = 0;
             self.cached_viewport_offset = 0;
             self.cached_viewport_cells.clear();
+            self.cached_render_key = (0, 0, None, None, 0);
+            self.render_cache_valid = false;
             self.find_matches.clear();
             self.find_current = None;
             self.sel_anchor = None;

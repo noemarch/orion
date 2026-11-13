@@ -226,7 +226,7 @@ impl Runtime for RuntimeClient {
         if method == "GET" {
             let cache = self.inner.http_cache.lock();
             if let Some((status, body, when)) = cache.get(&cache_key) {
-                if when.elapsed() < std::time::Duration::from_millis(250) {
+                if when.elapsed() < std::time::Duration::from_millis(1000) {
                     return (*status, body.clone());
                 }
             }
