@@ -396,9 +396,19 @@ impl OrionApp {
                         return;
                     }
                     terminal_pane.update(cx, |view, cx| {
+                        // Feed at most ~64 KiB per pump tick so a flood of output
+                        // does not block the UI thread for the whole chunk.
+                        const CHUNK_LIMIT: usize = 64 * 1024;
+                        let mut fed = first.len();
                         view.feed(&first);
-                        while let Ok(more) = pty_rx.try_recv() {
-                            view.feed(&more);
+                        while fed < CHUNK_LIMIT {
+                            match pty_rx.try_recv() {
+                                Ok(more) => {
+                                    fed += more.len();
+                                    view.feed(&more);
+                                }
+                                Err(_) => break,
+                            }
                         }
                         // Only notify when enough time has passed since the last
                         // repaint, so rapid output does not flood the UI thread.
