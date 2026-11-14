@@ -14,6 +14,10 @@ use serde_json::{json, Value};
 /// keeps the recent ones and drops the oldest without touching the visible screen.
 pub const SCROLLBACK_ROWS: usize = 10_000;
 
+/// Newest rows `find` examines per execution: the scrollback tail plus the live screen. Older
+/// rows are not searched, so a per-keystroke find never walks the whole ring.
+pub const FIND_MAX_ROWS: usize = 2000;
+
 /// A terminal cell's colour, as the program asked for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TermColor {
@@ -82,6 +86,10 @@ pub struct ScreenState {
     /// parser itself is never left offset: reads, status detection and prompt detection always see
     /// the live screen, and a scroll produces one repaint for the client that asked.
     scroll_offset: usize,
+    /// Set by `process` when the ring was already at capacity before the feed: rows may have
+    /// scrolled off the top, shifting every content coordinate by an amount vt100 does not
+    /// expose. Callers holding content-coordinate state (selection) must treat it as stale.
+    ring_wrapped: bool,
 }
 
 impl ScreenState {
@@ -90,13 +98,18 @@ impl ScreenState {
             parser: vt100::Parser::new(nonzero(rows), nonzero(cols), SCROLLBACK_ROWS),
             revision: 0,
             scroll_offset: 0,
+            ring_wrapped: false,
         }
     }
 
     /// Feeds decoded text to the grid. Returns the new revision.
     pub fn process(&mut self, text: &str) -> u64 {
+        let at_capacity = self.scrollback_len() >= SCROLLBACK_ROWS;
         self.parser.process(text.as_bytes());
         self.revision += 1;
+        // Conservative: any mutation while the ring is full may have dropped rows. vt100 keeps
+        // no public dropped-row counter, so callers must assume content coordinates shifted.
+        self.ring_wrapped = at_capacity;
         self.revision
     }
 
@@ -104,6 +117,7 @@ impl ScreenState {
     pub fn resize(&mut self, rows: u16, cols: u16) -> u64 {
         self.parser.set_size(nonzero(rows), nonzero(cols));
         self.revision += 1;
+        self.ring_wrapped = false;
         self.revision
     }
 
@@ -113,6 +127,13 @@ impl ScreenState {
         self.parser = vt100::Parser::new(nonzero(rows), nonzero(cols), SCROLLBACK_ROWS);
         self.scroll_offset = 0;
         self.revision += 1;
+        self.ring_wrapped = false;
+    }
+
+    /// Whether the last `process` ran while the scrollback ring was at capacity, meaning rows
+    /// may have been dropped and content coordinates shifted by an unknowable amount.
+    pub fn ring_wrapped(&self) -> bool {
+        self.ring_wrapped
     }
 
     pub fn revision(&self) -> u64 {
@@ -218,6 +239,7 @@ impl ScreenState {
 
     /// Every row the pane can show, oldest first: the scrollback ring and then the live screen.
     /// Blank rows under the cursor are dropped, as a reader expects.
+    // PERF: full-ring clone, O(scrollback)
     pub fn history(&self) -> Vec<String> {
         self.rows_with_wrap()
             .into_iter()
@@ -226,6 +248,7 @@ impl ScreenState {
     }
 
     /// History rows with their soft-wrap flag, so the chat can rejoin a line the PTY wrapped.
+    // PERF: full-ring clone, O(scrollback)
     pub fn rows_with_wrap(&self) -> Vec<(String, bool)> {
         let (rows, cols) = self.size();
         let rows = rows as usize;
@@ -264,7 +287,8 @@ impl ScreenState {
 
     /// The recent rows a chat lens reads. `unwrapped` joins rows the PTY soft-wrapped at its own
     /// width, so the chat's narrower width can reflow them. Returns `(text, truncated)`.
-    pub fn read_recent(&self, lines: usize, unwrapped: bool) -> (String, bool) {
+    // PERF: full-ring clone, O(scrollback)
+    pub fn read_recent(&mut self, lines: usize, unwrapped: bool) -> (String, bool) {
         let rows = self.rows_with_wrap();
         let start = rows.len().saturating_sub(lines);
         let truncated = start > 0;
@@ -300,6 +324,7 @@ impl ScreenState {
     }
 
     /// Whether the live screen or history contains `needle` (case-insensitive).
+    // PERF: full-ring clone, O(scrollback)
     pub fn contains(&self, needle: &str) -> bool {
         let needle = needle.to_lowercase();
         self.history()
@@ -308,32 +333,38 @@ impl ScreenState {
     }
 
     /// Matches in content coordinates (rows counted from the oldest history row, columns from 0).
-    pub fn find(&self, query: &str, limit: usize) -> Vec<Value> {
+    /// Cap: only the newest `FIND_MAX_ROWS` rows (scrollback tail plus the live screen) are
+    /// examined, so find shows recent matches first and never walks the whole ring per keystroke.
+    /// Matches are reported oldest-first within that window; rows older than the cap are not
+    /// searched.
+    // PERF: full-ring clone, O(scrollback); the cap truncates to the newest FIND_MAX_ROWS rows
+    pub fn find(&mut self, query: &str, limit: usize) -> Vec<Value> {
         if query.is_empty() {
             return Vec::new();
         }
         let query = query.to_lowercase();
+        let rows = self.rows_with_wrap();
+        let total = rows.len();
+        let window = total.min(FIND_MAX_ROWS);
+        let start_abs = total - window;
         let mut matches = Vec::new();
-        for (row, line) in self.history().iter().enumerate() {
-            let haystack = line.to_lowercase();
-            let mut from = 0usize;
-            while let Some(found) = haystack[from..].find(&query) {
-                let start = from + found;
-                let end = start + query.len();
-                matches.push(json!({
-                    "start": { "row": row, "col": start },
-                    "end": { "row": row, "col": end.saturating_sub(1) },
-                }));
-                if matches.len() >= limit {
-                    return matches;
-                }
-                from = end.max(start + 1);
+        for (offset, (line, _)) in rows[start_abs..].iter().enumerate() {
+            collect_matches(
+                &line.to_lowercase(),
+                &query,
+                start_abs + offset,
+                limit,
+                &mut matches,
+            );
+            if matches.len() >= limit {
+                break;
             }
         }
         matches
     }
 
     /// The text between two content cells, inclusive, with soft-wrapped rows joined.
+    // PERF: full-ring clone, O(scrollback)
     pub fn selection(
         &self,
         start_row: usize,
@@ -371,6 +402,28 @@ impl ScreenState {
             }
         }
         text
+    }
+}
+
+fn collect_matches(
+    haystack: &str,
+    query: &str,
+    row: usize,
+    limit: usize,
+    matches: &mut Vec<Value>,
+) {
+    let mut from = 0usize;
+    while let Some(found) = haystack[from..].find(query) {
+        let start = from + found;
+        let end = start + query.len();
+        matches.push(json!({
+            "start": { "row": row, "col": start },
+            "end": { "row": row, "col": end.saturating_sub(1) },
+        }));
+        if matches.len() >= limit {
+            return;
+        }
+        from = end.max(start + 1);
     }
 }
 
@@ -426,6 +479,23 @@ mod tests {
         );
         let (unwrapped, _) = screen.read_recent(10, true);
         assert_eq!(unwrapped, "abcdefghijkl");
+    }
+
+    #[test]
+    fn find_only_searches_the_newest_rows() {
+        let mut screen = ScreenState::new(2, 20);
+        screen.process("needle-old\r\n");
+        for i in 0..FIND_MAX_ROWS + 10 {
+            screen.process(&format!("filler-{i}\r\n"));
+        }
+        let matches = screen.find("needle-old", 10);
+        assert!(
+            matches.is_empty(),
+            "a match older than the {FIND_MAX_ROWS}-row cap must not be found"
+        );
+        screen.process("needle-new\r\n");
+        let matches = screen.find("needle-new", 10);
+        assert_eq!(matches.len(), 1);
     }
 
     #[test]
