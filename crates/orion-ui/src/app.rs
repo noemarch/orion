@@ -5,7 +5,7 @@ use gpui::{
     div, px, App, Application, Context, Entity, Render, Size, Subscription, Window, WindowBounds,
     WindowOptions,
 };
-use orion_core::runtime::{Runtime, RuntimeClient, RuntimeStream};
+use orion_core::runtime::{PaneHandle, Runtime, RuntimeClient, RuntimeStream};
 use orion_core::{Engine, FrameSink, Role};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,6 +60,9 @@ pub struct OrionApp {
     attached_pane: Option<String>,
     /// Increments per attach so an old PTY pump stops feeding a replaced pane.
     attach_generation: Arc<AtomicU64>,
+    /// Increments per split attach so the split's own PTY pump stops feeding a
+    /// replaced pane.
+    split_attach_generation: Arc<AtomicU64>,
     editing_tab: Option<(String, String)>,
     split_chat_view: Entity<ChatView>,
     split_terminal_pane: Entity<TerminalPane>,
@@ -156,6 +159,189 @@ fn runtime_command() -> Result<std::process::Command, String> {
     Ok(std::process::Command::new("orion"))
 }
 
+/// Capacity of the PTY output channel between the attach sink (PTY reader
+/// thread) and the pump. flume has no byte-aware bound, so this is a
+/// message-count bound: 256 chunks. Chunks are PTY frames, typically a few
+/// KiB; even if every chunk were 64 KiB (the pump's per-tick feed cap), the
+/// queue holds at most ~16 MiB. The producer blocks when the channel is
+/// full (herdr-core rule: block, never drop) — that is intended backpressure
+/// on the PTY reader thread and never touches the UI thread.
+const PTY_CHANNEL_CAPACITY: usize = 256;
+
+/// The connection id the split canvas's terminal attaches with.
+///
+/// The main pane owns `"gpu-terminal"`. The split needs an id of its own:
+/// a detach removes the attachment by key, and the split's key must never
+/// take the main pane's attachment away.
+const SPLIT_CONNECTION: &str = "gpu-terminal-split";
+
+/// How often the status line is refreshed from the pane.
+const STATUS_POLL_MS: u64 = 500;
+
+/// The PTY output pump shared by the main pane attach and the focused
+/// runtime terminal. Drains the channel in 64 KiB ticks so a flood of output
+/// does not block the UI thread for the whole chunk, feeds the grid, and
+/// notifies only when the screen revision changed. A newer attach bumps
+/// `attach_generation`, which stops this pump from feeding.
+fn spawn_pty_pump(
+    terminal_pane: Entity<TerminalPane>,
+    pty_rx: flume::Receiver<String>,
+    generation: Arc<AtomicU64>,
+    cx: &mut App,
+) {
+    let mine = generation.fetch_add(1, Ordering::SeqCst) + 1;
+    cx.spawn(async move |cx| {
+        while let Ok(first) = pty_rx.recv_async().await {
+            // A newer attach owns the view now; stop feeding it.
+            if generation.load(Ordering::SeqCst) != mine {
+                break;
+            }
+            let generation = Arc::clone(&generation);
+            let _ = cx.update(|cx| {
+                if generation.load(Ordering::SeqCst) != mine {
+                    return;
+                }
+                terminal_pane.update(cx, |view, cx| {
+                    // Feed at most ~64 KiB per pump tick so a flood of output
+                    // does not block the UI thread for the whole chunk.
+                    const CHUNK_LIMIT: usize = 64 * 1024;
+                    let before = view.revision();
+                    let mut fed = first.len();
+                    view.feed(&first);
+                    while fed < CHUNK_LIMIT {
+                        match pty_rx.try_recv() {
+                            Ok(more) => {
+                                fed += more.len();
+                                view.feed(&more);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if view.revision() != before {
+                        cx.notify();
+                    }
+                });
+            });
+        }
+        // Final notify to flush any pending repaint.
+        let _ = cx.update(|cx| {
+            terminal_pane.update(cx, |_view, cx| {
+                cx.notify();
+            });
+        });
+    })
+    .detach();
+}
+
+/// Attach the split canvas's terminal view to one pane and start its pump.
+///
+/// The split watches the pane's output; it does not own the pane's PTY.
+/// The attach uses the role the main pane already sends (`Role::Interact`),
+/// so the daemon's connection role does not change and the main pane keeps
+/// its input, and it asks to keep the size, so the attach-time resize is
+/// suppressed and the PTY keeps the size it already had. The view observes:
+/// its render follows its own box and never resizes the PTY.
+fn attach_split_terminal(
+    view: &Entity<TerminalPane>,
+    pane: Arc<dyn PaneHandle>,
+    generation: &Arc<AtomicU64>,
+    cx: &mut App,
+) -> bool {
+    // The split's own channel and pump: the split's output must not reach
+    // the main pane's grid, and its backpressure must not stall the main
+    // pane's reader.
+    let (pty_tx, pty_rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
+    let sink: FrameSink = Arc::new(move |frame: Value| {
+        if frame["type"] == "pty-data" {
+            if let Some(data) = frame["data"].as_str() {
+                // Blocks the PTY reader thread when the pump falls behind;
+                // that is the intended backpressure.
+                let _ = pty_tx.send(data.to_string());
+            }
+        }
+    });
+    if pane
+        .attach(SPLIT_CONNECTION, sink, Role::Interact, 120, 32, true)
+        .is_err()
+    {
+        return false;
+    }
+    view.update(cx, |view, cx| {
+        view.set_pane(pane);
+        view.set_observe(true);
+        cx.notify();
+    });
+    spawn_pty_pump(view.clone(), pty_rx, Arc::clone(generation), cx);
+    true
+}
+
+/// Let the split canvas go: the pane keeps no split attachment and the
+/// split's pump stops feeding the grid it was reading.
+fn detach_split_terminal(pane: Option<&Arc<dyn PaneHandle>>, generation: &Arc<AtomicU64>) {
+    if let Some(pane) = pane {
+        pane.detach(SPLIT_CONNECTION);
+    }
+    // The pump stops at its next chunk: the generation it claimed is stale.
+    generation.fetch_add(1, Ordering::SeqCst);
+}
+
+/// The status-line poller. `pane.status()` is a synchronous socket
+/// round-trip on the daemon path (30s timeout), so it never runs on the UI
+/// thread: a dedicated thread asks the pane what it is doing every
+/// `STATUS_POLL_MS` and pushes the answer into a one-slot channel; the async
+/// task applies it to the view. A stale line is fine; a frozen UI is not.
+/// On error the thread keeps the last value on screen (the view is only
+/// updated with a fresh answer). A newer attach bumps `attach_generation`,
+/// which stops this poller the same way it stops the pump.
+fn spawn_status_poller(
+    terminal_pane: Entity<TerminalPane>,
+    pane: Arc<dyn orion_core::runtime::PaneHandle>,
+    generation: Arc<AtomicU64>,
+    cx: &mut App,
+) {
+    // The pump claims the generation before this runs; read it, never bump it.
+    let mine = generation.load(Ordering::SeqCst);
+    let weak = terminal_pane.downgrade();
+    // One slot: a slow UI drops intermediate answers, never the latest.
+    let (tx, rx) = flume::bounded::<String>(1);
+    let thread_generation = Arc::clone(&generation);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(STATUS_POLL_MS));
+            if thread_generation.load(Ordering::SeqCst) != mine {
+                break;
+            }
+            // Blocking round-trip on the daemon path; this thread exists so
+            // the UI thread never waits on it.
+            let status = pane.status().as_wire().to_string();
+            // The receiver is gone when the view is gone; stop the thread.
+            if tx.send(status).is_err() {
+                break;
+            }
+        }
+    });
+    cx.spawn(async move |cx| {
+        while let Ok(status) = rx.recv_async().await {
+            if generation.load(Ordering::SeqCst) != mine {
+                break;
+            }
+            let applied = cx.update(|cx| {
+                weak.update(cx, |view, cx| {
+                    if view.set_status_line(status) {
+                        cx.notify();
+                    }
+                })
+                .is_ok()
+            });
+            // The view is gone (or the app is shutting down): stop polling.
+            if !applied.unwrap_or(false) {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
 impl OrionApp {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let workspace_sidebar = cx.new(WorkspaceSidebar::new);
@@ -199,6 +385,7 @@ impl OrionApp {
             focused_pane: None,
             attached_pane: None,
             attach_generation: Arc::new(AtomicU64::new(0)),
+            split_attach_generation: Arc::new(AtomicU64::new(0)),
             editing_tab: None,
             split_chat_view,
             split_terminal_pane,
@@ -337,10 +524,12 @@ impl OrionApp {
         // The attach sink runs on the PTY reader thread, so it can only push
         // into a channel; the async task below drains that channel, feeds the
         // grid, and notifies the view so GPUI repaints.
-        let (pty_tx, pty_rx) = flume::unbounded::<String>();
+        let (pty_tx, pty_rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
         let sink: FrameSink = Arc::new(move |frame: Value| {
             if frame["type"] == "pty-data" {
                 if let Some(data) = frame["data"].as_str() {
+                    // Blocks the PTY reader thread when the pump falls
+                    // behind; that is the intended backpressure.
                     let _ = pty_tx.send(data.to_string());
                 }
             }
@@ -378,57 +567,64 @@ impl OrionApp {
         });
 
         let generation = Arc::clone(&self.attach_generation);
-        let mine = generation.fetch_add(1, Ordering::SeqCst) + 1;
         let terminal_pane = self.terminal_pane.clone();
-        cx.spawn(async move |cx| {
-            // Throttle repaints: feeding every chunk is cheap, but repainting
-            // the grid on every chunk floods the UI thread. Batch the notify
-            // to at most ~30 frames per second.
-            let mut last_notify = std::time::Instant::now();
-            while let Ok(first) = pty_rx.recv_async().await {
-                // A newer attach owns the view now; stop feeding it.
-                if generation.load(Ordering::SeqCst) != mine {
-                    break;
-                }
-                let generation = Arc::clone(&generation);
-                let _ = cx.update(|cx| {
-                    if generation.load(Ordering::SeqCst) != mine {
-                        return;
-                    }
-                    terminal_pane.update(cx, |view, cx| {
-                        // Feed at most ~64 KiB per pump tick so a flood of output
-                        // does not block the UI thread for the whole chunk.
-                        const CHUNK_LIMIT: usize = 64 * 1024;
-                        let before = view.revision();
-                        let mut fed = first.len();
-                        view.feed(&first);
-                        while fed < CHUNK_LIMIT {
-                            match pty_rx.try_recv() {
-                                Ok(more) => {
-                                    fed += more.len();
-                                    view.feed(&more);
-                                }
-                                Err(_) => break,
-                            }
-                        }
-                        let changed = view.revision() != before;
-                        // Only notify when the screen actually changed and enough
-                        // time has passed since the last repaint.
-                        if changed && last_notify.elapsed() >= std::time::Duration::from_millis(50) {
-                            cx.notify();
-                            last_notify = std::time::Instant::now();
-                        }
-                    });
-                });
+        spawn_pty_pump(terminal_pane.clone(), pty_rx, Arc::clone(&generation), cx);
+        spawn_status_poller(terminal_pane, pane, generation, cx);
+    }
+
+    /// Point the split canvas at one pane and start its own PTY pump.
+    ///
+    /// The split is a second lens over a second pane. It attaches with its own
+    /// connection id and its own pump, so it never takes the main pane's
+    /// attachment away and never feeds the main pane's grid.
+    fn attach_split_pane(&mut self, cx: &mut App, pane_id: &str) {
+        if self.split_attached_pane.as_deref() == Some(pane_id) {
+            return;
+        }
+        let engine = Arc::clone(&self.engine);
+        // The pane the split is leaving keeps no split attachment.
+        if let Some(previous) = self.split_attached_pane.replace(pane_id.to_string()) {
+            if let Some(previous_pane) = engine.pane_by_id(&previous) {
+                previous_pane.detach(SPLIT_CONNECTION);
             }
-            // Final notify to flush any pending repaint.
-            let _ = cx.update(|cx| {
-                terminal_pane.update(cx, |_view, cx| {
-                    cx.notify();
-                });
-            });
-        })
-        .detach();
+        }
+        let Some(pane) = engine.pane_by_id(pane_id) else {
+            return;
+        };
+        self.split_chat_view.update(cx, |view, cx| {
+            let seam = seam_of(&pane);
+            view.attach(Some(Arc::clone(&engine)), seam, pane_id.to_string(), cx);
+        });
+        self.split_file_tree.update(cx, |view, cx| {
+            view.attach(
+                cx,
+                Arc::clone(&self.engine),
+                Arc::clone(&pane),
+                pane_id.to_string(),
+            );
+        });
+        self.split_changes_view.update(cx, |view, _cx| {
+            view.attach(
+                Arc::clone(&self.engine),
+                Arc::clone(&pane),
+                pane_id.to_string(),
+            );
+        });
+        // The split's terminal watches the pane: the attach keeps the PTY's
+        // size, and the view never resizes it.
+        let generation = Arc::clone(&self.split_attach_generation);
+        attach_split_terminal(&self.split_terminal_pane, pane, &generation, cx);
+    }
+
+    /// Let the split canvas go: the pane keeps no split attachment and the
+    /// split's pump stops feeding the grid it was reading.
+    fn detach_split_pane(&mut self) {
+        let Some(previous) = self.split_attached_pane.take() else {
+            return;
+        };
+        let engine = Arc::clone(&self.engine);
+        let pane = engine.pane_by_id(&previous);
+        detach_split_terminal(pane.as_ref(), &self.split_attach_generation);
     }
 
     fn set_lens(&mut self, lens: Lens, cx: &mut impl gpui::AppContext) {
@@ -468,10 +664,12 @@ impl OrionApp {
                 // id. The Terminal Lens takes it; the chat keeps its own pane,
                 // because a runtime terminal has no conversation to read.
                 if let Some(pane) = self.engine.pane_by_id(id.as_str()) {
-                    let (pty_tx, pty_rx) = flume::unbounded::<String>();
+                    let (pty_tx, pty_rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
                     let sink: FrameSink = Arc::new(move |frame: Value| {
                         if frame["type"] == "pty-data" {
                             if let Some(data) = frame["data"].as_str() {
+                                // Blocks the PTY reader thread when the pump
+                                // falls behind; intended backpressure.
                                 let _ = pty_tx.send(data.to_string());
                             }
                         }
@@ -492,28 +690,8 @@ impl OrionApp {
                         // The pump: the focused terminal's output goes to the
                         // grid, and the generation stops the pane left behind.
                         let generation = Arc::clone(&self.attach_generation);
-                        let mine = generation.fetch_add(1, Ordering::SeqCst) + 1;
-                        cx.spawn(async move |cx| {
-                            while let Ok(first) = pty_rx.recv_async().await {
-                                if generation.load(Ordering::SeqCst) != mine {
-                                    break;
-                                }
-                                let generation = Arc::clone(&generation);
-                                let _ = cx.update(|cx| {
-                                    if generation.load(Ordering::SeqCst) != mine {
-                                        return;
-                                    }
-                                    terminal_pane.update(cx, |view, cx| {
-                                        view.feed(&first);
-                                        while let Ok(more) = pty_rx.try_recv() {
-                                            view.feed(&more);
-                                        }
-                                        cx.notify();
-                                    });
-                                });
-                            }
-                        })
-                        .detach();
+                        spawn_pty_pump(terminal_pane.clone(), pty_rx, Arc::clone(&generation), cx);
+                        spawn_status_poller(terminal_pane, pane, generation, cx);
                     }
                 }
                 self.set_lens(Lens::Terminal, cx);
@@ -1117,7 +1295,8 @@ impl Render for OrionApp {
             None
         };
         if split_second.is_none() {
-            self.split_attached_pane = None;
+            // The split is gone: its attachment and its pump go with it.
+            self.detach_split_pane();
         }
         let split_changes_active = split_second
             .as_deref()
@@ -1238,33 +1417,8 @@ impl Render for OrionApp {
                 }
             };
             if let Some(second_id) = split_second.clone() {
-                if self.split_attached_pane.as_deref() != Some(second_id.as_str()) {
-                    self.split_attached_pane = Some(second_id.clone());
-                    let engine = Arc::clone(&self.engine);
-                    if let Some(second_pane) = engine.pane_by_id(&second_id) {
-                        self.split_chat_view.update(cx, |view, cx| {
-                            let seam = seam_of(&second_pane);
-                            view.attach(Some(Arc::clone(&engine)), seam, second_id.clone(), cx);
-                        });
-                        self.split_terminal_pane
-                            .update(cx, |view, _cx| view.set_pane(Arc::clone(&second_pane)));
-                        self.split_file_tree.update(cx, |view, cx| {
-                            view.attach(
-                                cx,
-                                Arc::clone(&self.engine),
-                                Arc::clone(&second_pane),
-                                second_id.clone(),
-                            );
-                        });
-                        self.split_changes_view.update(cx, |view, _cx| {
-                            view.attach(
-                                Arc::clone(&self.engine),
-                                Arc::clone(&second_pane),
-                                second_id.clone(),
-                            );
-                        });
-                    }
-                }
+                // The split's own lenses, its own attachment and its own pump.
+                self.attach_split_pane(cx, &second_id);
                 let second_body = match self.lens_book.lens_for(Some(second_id.as_str())) {
                     Lens::Chat => div()
                         .id("pane-split-second-chat")
@@ -1416,4 +1570,456 @@ pub fn run() {
         )
         .unwrap();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orion_core::agents::LaunchSpec;
+    use orion_core::engine::pane::{Pane, PaneConfig, PaneEvent};
+    use orion_core::protocol::{AgentKind, TerminalSize};
+    use orion_core::runtime::{FrameConnection, PROTOCOL_VERSION};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
+
+    #[gpui::test]
+    fn the_pump_feeds_chunks_and_notifies_only_on_revision_change(cx: &mut gpui::TestAppContext) {
+        let view = cx.update(|app| app.new(TerminalPane::new));
+        let (tx, rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
+        let generation = Arc::new(AtomicU64::new(0));
+        let notifies = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&notifies);
+        let _subscription = cx.update(|app| {
+            app.observe(&view, move |_view, _app| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+        cx.update(|app| {
+            spawn_pty_pump(view.clone(), rx, Arc::clone(&generation), app);
+        });
+        for i in 0..100 {
+            tx.send(format!("chunk {i}\r\n"))
+                .expect("the pump is listening");
+        }
+        drop(tx);
+        cx.run_until_parked();
+
+        let revision = cx.read(|app| view.read(app).revision());
+        assert!(
+            revision >= 100,
+            "every chunk advanced the revision: {revision}"
+        );
+        let notifies = notifies.load(Ordering::SeqCst);
+        assert!(notifies >= 1, "the pump notified at least once");
+        assert!(
+            notifies <= 100,
+            "the pump notified at most once per chunk: {notifies}"
+        );
+    }
+
+    #[test]
+    fn the_pty_channel_blocks_the_producer_at_capacity() {
+        // A paused consumer (the pump is not draining) must not grow the
+        // queue without bound: the producer blocks at the capacity bound.
+        let (tx, _rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
+        for i in 0..PTY_CHANNEL_CAPACITY {
+            tx.try_send(format!("chunk {i}"))
+                .expect("the channel accepts up to its capacity");
+        }
+        assert!(tx.is_full(), "the channel is full at capacity");
+        assert!(
+            tx.try_send("one more".to_string()).is_err(),
+            "the producer is blocked at capacity, not dropped"
+        );
+        // With the consumer paused, a blocking send waits instead of
+        // growing the queue; the timeout proves it was waiting.
+        assert!(
+            tx.send_timeout("one more".to_string(), std::time::Duration::from_millis(50))
+                .is_err(),
+            "a blocked producer waits for the consumer instead of growing the queue"
+        );
+    }
+
+    #[gpui::test]
+    fn a_stale_pump_stops_feeding_when_the_generation_bumps(cx: &mut gpui::TestAppContext) {
+        let view = cx.update(|app| app.new(TerminalPane::new));
+        let (tx, rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
+        let generation = Arc::new(AtomicU64::new(0));
+        cx.update(|app| {
+            spawn_pty_pump(view.clone(), rx, Arc::clone(&generation), app);
+        });
+        tx.send("first\r\n".to_string())
+            .expect("the pump is listening");
+        cx.run_until_parked();
+        let after_first = cx.read(|app| view.read(app).revision());
+        assert!(after_first >= 1, "the first chunk was fed: {after_first}");
+
+        // A newer attach owns the view now; the stale pump must stop feeding.
+        generation.fetch_add(1, Ordering::SeqCst);
+        tx.send("stale\r\n".to_string())
+            .expect("the pump is listening");
+        drop(tx);
+        cx.run_until_parked();
+
+        let after_stale = cx.read(|app| view.read(app).revision());
+        assert_eq!(
+            after_first, after_stale,
+            "a stale pump must not feed the grid"
+        );
+    }
+
+    /// What the split asked of the pane when it attached.
+    #[derive(Clone)]
+    struct SplitAttach {
+        connection: String,
+        role: Role,
+        keep_size: bool,
+    }
+
+    /// A pane that records what the split asked of it and can emit output.
+    struct SplitPane {
+        cwd: std::path::PathBuf,
+        attaches: Arc<Mutex<Vec<SplitAttach>>>,
+        detaches: Arc<Mutex<Vec<String>>>,
+        sink: Arc<Mutex<Option<FrameSink>>>,
+    }
+
+    impl SplitPane {
+        /// The pane's output, as the PTY reader thread would deliver it.
+        fn emit(&self, text: &str) {
+            let sink = self.sink.lock().expect("the sink's lock").clone();
+            if let Some(sink) = sink {
+                sink(json!({
+                    "type": "pty-data",
+                    "pane_id": "split-pane",
+                    "data": text,
+                }));
+            }
+        }
+    }
+
+    impl PaneHandle for SplitPane {
+        fn id(&self) -> &str {
+            "split-pane"
+        }
+
+        fn cwd(&self) -> &std::path::Path {
+            &self.cwd
+        }
+
+        fn write(&self, _data: &str) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn keys(&self, _keys: &[String]) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn interrupt(&self) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn resize(&self, _cols: u16, _rows: u16) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn clear(&self) {}
+
+        fn status(&self) -> orion_core::protocol::AgentStatus {
+            orion_core::protocol::AgentStatus::Idle
+        }
+
+        fn prompt(&self) -> Option<orion_core::prompt::DetectedPrompt> {
+            None
+        }
+
+        fn attach(
+            &self,
+            connection: &str,
+            sink: FrameSink,
+            role: Role,
+            _cols: u16,
+            _rows: u16,
+            keep_size: bool,
+        ) -> orion_core::Result<()> {
+            self.attaches
+                .lock()
+                .expect("the log's lock")
+                .push(SplitAttach {
+                    connection: connection.to_string(),
+                    role,
+                    keep_size,
+                });
+            // The pane keeps the connection: its output goes on reaching the
+            // split until the split lets go of it.
+            *self.sink.lock().expect("the sink's lock") = Some(sink);
+            self.emit("split-live-output\r\n");
+            Ok(())
+        }
+
+        fn detach(&self, connection: &str) {
+            self.detaches
+                .lock()
+                .expect("the log's lock")
+                .push(connection.to_string());
+            // The connection keeps its sink: a detach must stop the split's
+            // pump even when the connection still delivers.
+        }
+
+        fn detach_all(&self, connection: &str) {
+            self.detach(connection);
+        }
+    }
+
+    /// The split watches the pane: it takes the output, never the size.
+    #[gpui::test]
+    fn the_split_watches_the_pane_without_taking_its_size(cx: &mut gpui::TestAppContext) {
+        let attaches = Arc::new(Mutex::new(Vec::new()));
+        let detaches = Arc::new(Mutex::new(Vec::new()));
+        let pane = Arc::new(SplitPane {
+            cwd: std::path::PathBuf::from("."),
+            attaches: Arc::clone(&attaches),
+            detaches,
+            sink: Arc::new(Mutex::new(None)),
+        });
+        let handle: Arc<dyn PaneHandle> = pane.clone();
+        let view = cx.update(|app| app.new(TerminalPane::new));
+        let generation = Arc::new(AtomicU64::new(0));
+        cx.update(|app| {
+            assert!(
+                attach_split_terminal(&view, handle, &generation, app),
+                "the split attaches"
+            );
+        });
+
+        let attaches = attaches.lock().expect("the log's lock").clone();
+        assert_eq!(attaches.len(), 1, "the split attaches once");
+        let attach = &attaches[0];
+        assert_eq!(
+            attach.connection, SPLIT_CONNECTION,
+            "the split attaches under its own connection id"
+        );
+        assert_ne!(
+            attach.connection, "gpu-terminal",
+            "the split never takes the main pane's attachment"
+        );
+        assert_eq!(
+            attach.role,
+            Role::Interact,
+            "the split sends the role the main pane sends: the main pane keeps the keyboard"
+        );
+        assert!(
+            attach.keep_size,
+            "the split asks to keep the pane's size: the attach does not resize it"
+        );
+
+        // The split's view shows the pane's output.
+        cx.run_until_parked();
+        let text = cx.read(|app| view.read(app).visible_text());
+        assert!(
+            text.contains("split-live-output"),
+            "the split shows the pane's output: {text:?}"
+        );
+    }
+
+    /// The split lets go of the pane: its attachment goes and its pump stops.
+    #[gpui::test]
+    fn detaching_the_split_stops_its_pump(cx: &mut gpui::TestAppContext) {
+        let attaches = Arc::new(Mutex::new(Vec::new()));
+        let detaches = Arc::new(Mutex::new(Vec::new()));
+        let pane = Arc::new(SplitPane {
+            cwd: std::path::PathBuf::from("."),
+            attaches: Arc::clone(&attaches),
+            detaches: Arc::clone(&detaches),
+            sink: Arc::new(Mutex::new(None)),
+        });
+        let handle: Arc<dyn PaneHandle> = pane.clone();
+        let view = cx.update(|app| app.new(TerminalPane::new));
+        let generation = Arc::new(AtomicU64::new(0));
+        cx.update(|app| {
+            assert!(
+                attach_split_terminal(&view, handle, &generation, app),
+                "the split attaches"
+            );
+        });
+        cx.run_until_parked();
+        let fed = cx.read(|app| view.read(app).revision());
+        assert!(fed > 0, "the split's pump fed the view: {fed}");
+
+        // The split goes: the pane keeps no split attachment...
+        let handle: Arc<dyn PaneHandle> = pane.clone();
+        detach_split_terminal(Some(&handle), &generation);
+        assert_eq!(
+            detaches.lock().expect("the log's lock").clone(),
+            vec![SPLIT_CONNECTION.to_string()],
+            "the split lets go of the pane under its own connection id"
+        );
+
+        // ...and its pump stops feeding the grid it was reading.
+        pane.emit("late output\r\n");
+        cx.run_until_parked();
+        let after = cx.read(|app| view.read(app).revision());
+        assert_eq!(fed, after, "a detached split's pump must not feed the grid");
+    }
+
+    /// A real pane in this process: the split's rule is about a real PTY's
+    /// size, so the test uses one.
+    fn real_pane() -> Option<Arc<Pane>> {
+        let command = if cfg!(windows) { "more.com" } else { "cat" };
+        let spec = LaunchSpec::for_command(command, &[]).ok()?;
+        let events: Arc<dyn Fn(PaneEvent) + Send + Sync> = Arc::new(|_| {});
+        let pane = Pane::spawn(
+            PaneConfig {
+                id: "split-pane".into(),
+                workspace_id: "w".into(),
+                tab_id: "t".into(),
+                agent: AgentKind::Claude,
+                label: "test".into(),
+                cwd: std::env::temp_dir(),
+                spec,
+                args: Vec::new(),
+                size: TerminalSize {
+                    cols: 120,
+                    rows: 32,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+            },
+            events,
+        )
+        .ok()?;
+        Some(Arc::new(pane))
+    }
+
+    /// The agent's PTY keeps the size it had when the split opens.
+    #[gpui::test]
+    fn the_split_attach_leaves_the_pane_the_size_it_had(cx: &mut gpui::TestAppContext) {
+        let Some(pane) = real_pane() else {
+            eprintln!("skipped: no command to hold a terminal open on this machine");
+            return;
+        };
+        // The main pane owns the size: it tells the agent how big it is.
+        pane.attach(
+            "gpu-terminal",
+            Arc::new(|_| {}),
+            Role::Interact,
+            80,
+            24,
+            false,
+        )
+        .expect("the main pane attaches");
+        let before = pane.size();
+        assert_eq!(
+            before,
+            (24, 80),
+            "the main pane sized the agent: {before:?}"
+        );
+
+        let view = cx.update(|app| app.new(TerminalPane::new));
+        let generation = Arc::new(AtomicU64::new(0));
+        let handle: Arc<dyn PaneHandle> = pane.clone();
+        cx.update(|app| {
+            assert!(
+                attach_split_terminal(&view, handle, &generation, app),
+                "the split attaches"
+            );
+        });
+        assert_eq!(
+            pane.size(),
+            before,
+            "the split did not resize the agent's PTY"
+        );
+    }
+
+    /// A connection that records what the shell sends and answers what the
+    /// runtime would answer.
+    #[derive(Clone)]
+    struct RecordingConnection {
+        sent: Arc<Mutex<Vec<Value>>>,
+        inbox: Arc<Mutex<std::sync::mpsc::Receiver<Value>>>,
+        outbox: std::sync::mpsc::Sender<Value>,
+    }
+
+    impl FrameConnection for RecordingConnection {
+        fn read_frame(&mut self) -> std::io::Result<Option<Value>> {
+            let inbox = self.inbox.lock().expect("the inbox's lock");
+            match inbox.recv() {
+                Ok(frame) => Ok(Some(frame)),
+                Err(_) => Ok(None),
+            }
+        }
+
+        fn write_frame(&mut self, frame: &Value) -> std::io::Result<()> {
+            self.sent
+                .lock()
+                .expect("the log's lock")
+                .push(frame.clone());
+            let answer = match frame.get("type").and_then(Value::as_str) {
+                Some("health") => Some(json!({
+                    "ok": true,
+                    "version": "0",
+                    "protocol": PROTOCOL_VERSION,
+                })),
+                Some("pane-open") => Some(json!({
+                    "id": frame.get("id").cloned().unwrap_or(Value::Null),
+                    "ok": true,
+                    "cwd": ".",
+                })),
+                _ => None,
+            };
+            if let Some(answer) = answer {
+                let _ = self.outbox.send(answer);
+            }
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn FrameConnection> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// The split leaves the runtime's connection interactive.
+    ///
+    /// The role belongs to the connection, not to the pane: a split that sent
+    /// `observe` would turn the main pane read-only on the daemon path.
+    #[gpui::test]
+    fn the_split_keeps_the_runtime_connection_interactive(cx: &mut gpui::TestAppContext) {
+        let (outbox, inbox) = std::sync::mpsc::channel::<Value>();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let connection = RecordingConnection {
+            sent: Arc::clone(&sent),
+            inbox: Arc::new(Mutex::new(inbox)),
+            outbox,
+        };
+        let client = RuntimeClient::new(Box::new(connection)).expect("the runtime answers");
+        let pane = client.pane_by_id("pane-2").expect("the pane is open");
+
+        let view = cx.update(|app| app.new(TerminalPane::new));
+        let generation = Arc::new(AtomicU64::new(0));
+        cx.update(|app| {
+            assert!(
+                attach_split_terminal(&view, pane, &generation, app),
+                "the split attaches"
+            );
+        });
+
+        let sent = sent.lock().expect("the log's lock").clone();
+        let role = sent
+            .iter()
+            .find(|frame| frame["type"] == "role")
+            .expect("the split sends a role");
+        assert_eq!(
+            role["mode"], "interact",
+            "the split sends the role the main pane sends: the main pane keeps the keyboard"
+        );
+        let attach = sent
+            .iter()
+            .find(|frame| frame["type"] == "attach")
+            .expect("the split attaches");
+        assert_eq!(attach["pane_id"], "pane-2");
+        assert_eq!(
+            attach["keep_size"], true,
+            "the split keeps the pane's size: the attach does not resize it"
+        );
+    }
 }

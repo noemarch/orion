@@ -156,7 +156,7 @@ fn grid_style(font: Option<&TerminalFont>, theme: &Theme, font_size: f32) -> Tex
 /// One line of grid content plus its highlight ranges (byte offsets).
 fn grid_line(
     text: String,
-    highlights: Vec<(std::ops::Range<usize>, HighlightStyle)>,
+    highlights: &[(std::ops::Range<usize>, HighlightStyle)],
     style: &TextStyle,
 ) -> impl IntoElement {
     div()
@@ -164,7 +164,7 @@ fn grid_line(
         .flex_row()
         .w_full()
         .overflow_hidden()
-        .child(StyledText::new(text).with_default_highlights(style, highlights))
+        .child(StyledText::new(text).with_default_highlights(style, highlights.iter().cloned()))
 }
 
 /// How much of the foreground a dim cell keeps: gpui's `fade_out` factor, so
@@ -253,6 +253,16 @@ impl CellStyle {
     }
 }
 
+/// Per-row scratch reused across rows and frames: the byte span each grid
+/// column occupies in the row's text, the highlight runs, and the text
+/// buffer itself. Cleared and refilled per row; the capacities persist.
+#[derive(Default)]
+struct CellScratch {
+    col_bytes: Vec<(usize, usize)>,
+    runs: Vec<(Range<usize>, HighlightStyle)>,
+    text: String,
+}
+
 /// The overlays a row's cells can carry, in the row's own coordinates: the
 /// reader's selection as an inclusive grid-column span, and the find matches
 /// as byte spans into the row's text.
@@ -260,6 +270,33 @@ impl CellStyle {
 struct RowOverlays {
     selection: Option<(usize, usize)>,
     find: Vec<Range<usize>>,
+}
+
+/// The key a cached row is valid for: the content it was built from, the
+/// scroll offset it was built at, the row's own content coordinates, the
+/// overlays painted on it (the selection span in the row's columns and the
+/// find revision - a counter, not the match count, so same-count-different-
+/// spans still invalidates), and the theme colours the runs were resolved
+/// against.
+#[derive(Clone, PartialEq)]
+struct RowCacheKey {
+    revision: u64,
+    offset: usize,
+    content_row: usize,
+    selection: Option<(usize, usize)>,
+    find_revision: u64,
+    theme_fg: Rgba,
+    theme_bg: Rgba,
+    theme_selection: Rgba,
+    theme_accent: Rgba,
+}
+
+/// One row's rendered text and highlight runs, shared by reference so a
+/// cache hit clones neither the cells nor the runs.
+struct CachedRow {
+    key: RowCacheKey,
+    text: String,
+    runs: Vec<(Range<usize>, HighlightStyle)>,
 }
 
 /// Build one row's text and its highlight runs from the row's cells.
@@ -273,22 +310,27 @@ struct RowOverlays {
 /// background and keeps the cell's own colours, a find match repaints the
 /// background with the accent and the text with the terminal background, and a
 /// cell under both is painted by the find match (applied last).
-fn cell_runs(
-    cells: &[TermCell],
-    theme: &Theme,
-    overlays: &RowOverlays,
-) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
-    let mut text = String::with_capacity(cells.len());
-    // The byte span each grid column occupies in `text`; a wide character's
-    // second half maps onto the same bytes as the character itself.
-    let mut col_bytes: Vec<(usize, usize)> = Vec::with_capacity(cells.len());
+///
+/// The row's text, column spans and runs are written into `scratch`, which
+/// the caller reuses across rows and frames; the capacities persist.
+fn cell_runs(cells: &[TermCell], theme: &Theme, overlays: &RowOverlays, scratch: &mut CellScratch) {
+    scratch.text.clear();
+    scratch.col_bytes.clear();
+    scratch.runs.clear();
+    let text = &mut scratch.text;
+    let col_bytes = &mut scratch.col_bytes;
     for cell in cells {
         if cell.wide_continuation {
-            let span = col_bytes
-                .last()
-                .copied()
-                .unwrap_or((text.len(), text.len()));
-            col_bytes.push(span);
+            match col_bytes.last().copied() {
+                Some(span) => col_bytes.push(span),
+                // Malformed content: a continuation with no wide character
+                // before it. Render a space rather than panic.
+                None => {
+                    let start = text.len();
+                    text.push(' ');
+                    col_bytes.push((start, text.len()));
+                }
+            }
             continue;
         }
         let start = text.len();
@@ -309,15 +351,7 @@ fn cell_runs(
         let end = col_bytes.get(last)?.1;
         (start < end).then_some(start..end)
     });
-    // The find matches, clamped to the row's own bytes.
-    let find: Vec<Range<usize>> = overlays
-        .find
-        .iter()
-        .map(|span| span.start..span.end.min(text.len()))
-        .filter(|span| span.start < span.end)
-        .collect();
-
-    let mut runs: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    let runs = &mut scratch.runs;
     let mut group_start: Option<usize> = None;
     let mut group_style = CellStyle {
         fg: theme.term_fg,
@@ -327,7 +361,7 @@ fn cell_runs(
         italic: false,
         underline: false,
     };
-    for (cell, (start, _)) in cells.iter().zip(&col_bytes) {
+    for (cell, (start, _)) in cells.iter().zip(col_bytes.iter()) {
         let start = *start;
         if cell.wide_continuation {
             continue; // no bytes of its own; the wide character's run covers it
@@ -338,7 +372,11 @@ fn cell_runs(
                 style.bg = theme.term_selection;
             }
         }
-        for span in &find {
+        // The find matches, clamped to the row's own bytes.
+        for span in overlays.find.iter().filter_map(|span| {
+            let end = span.end.min(text.len());
+            (span.start < end).then_some(span.start..end)
+        }) {
             if start >= span.start && start < span.end {
                 style.bg = theme.accent;
                 style.fg = theme.term_bg;
@@ -364,8 +402,42 @@ fn cell_runs(
             runs.push((group_start..text.len(), group_style.highlight(theme)));
         }
     }
-    (text, runs)
 }
+
+/// Debounce state for the find bar: a search fires only after `delay` has elapsed since the
+/// last keystroke, so a burst of typing costs at most one grid search per quiet window.
+struct FindDebouncer {
+    delay: Duration,
+    last_keystroke: Option<Instant>,
+    fired_for: Option<Instant>,
+}
+
+impl FindDebouncer {
+    fn new(delay: Duration) -> Self {
+        Self {
+            delay,
+            last_keystroke: None,
+            fired_for: None,
+        }
+    }
+
+    fn keystroke(&mut self, now: Instant) {
+        self.last_keystroke = Some(now);
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        match self.last_keystroke {
+            Some(t) => now.duration_since(t) >= self.delay && self.fired_for != Some(t),
+            None => false,
+        }
+    }
+
+    fn mark_fired(&mut self) {
+        self.fired_for = self.last_keystroke;
+    }
+}
+
+const FIND_DEBOUNCE_MS: u64 = 150;
 
 pub struct TerminalPane {
     screen: ScreenState,
@@ -383,6 +455,7 @@ pub struct TerminalPane {
     find_matches: Vec<(usize, usize, usize, usize)>, // start_row, start_col, end_row, end_col
     find_current: Option<usize>,
     find_open: bool,
+    find_debouncer: FindDebouncer,
     // Selection state in content coordinates (rows from oldest history row).
     sel_anchor: Option<(usize, usize)>,
     sel_cursor: Option<(usize, usize)>,
@@ -408,6 +481,10 @@ pub struct TerminalPane {
     /// The size the agent still has to be told about: the final size of a
     /// resize must reach it, even when the drag has already quieted down.
     pending_resize: Option<(u16, u16)>,
+    /// Whether this view only watches the pane. An observing view follows its
+    /// own box but never resizes the PTY: the pane's size belongs to the view
+    /// that owns it, and the split canvas shares that PTY with the main one.
+    observe: bool,
     /// Whether the device has shown a touch: the key bar is a touch
     /// affordance.
     touch: bool,
@@ -419,10 +496,25 @@ pub struct TerminalPane {
     cached_viewport_revision: u64,
     cached_viewport_offset: usize,
     cached_viewport_cells: Vec<(usize, Vec<TermCell>)>,
-    /// Cached render key: (revision, offset, sel_anchor, sel_cursor, find_matches len).
-    cached_render_key: (u64, usize, Option<(usize, usize)>, Option<(usize, usize)>, usize),
-    /// Whether the cached render is valid.
-    render_cache_valid: bool,
+    /// Bumped on every find-match refresh (and on the empty-query clear), so
+    /// the row cache can tell "same match count, different spans" apart.
+    find_revision: u64,
+    /// Per-row render cache, indexed by visible row. A row whose key matches
+    /// (content revision, offset, content row, selection span, find revision,
+    /// theme fingerprint) reuses its text and highlight runs instead of
+    /// re-running `cell_runs`.
+    row_cache: Vec<Option<Rc<CachedRow>>>,
+    /// How many times `cell_runs` ran during renders. Read by tests to prove
+    /// the cache-hit path does not rebuild rows.
+    cell_runs_calls: u64,
+    /// The status line the render path draws. `pane.status()` is a
+    /// synchronous socket round-trip on the daemon path (30s timeout), so
+    /// render never calls it: the status poller (app.rs) refreshes this
+    /// cache off the UI thread and render reads only the cache.
+    status_line: String,
+    /// Per-row scratch for `cell_runs`, reused across rows and frames so a
+    /// steady-state frame does not rebuild the column-span or run buffers.
+    cell_scratch: CellScratch,
 }
 
 impl TerminalPane {
@@ -442,6 +534,7 @@ impl TerminalPane {
             find_matches: Vec::new(),
             find_current: None,
             find_open: false,
+            find_debouncer: FindDebouncer::new(Duration::from_millis(FIND_DEBOUNCE_MS)),
             sel_anchor: None,
             sel_cursor: None,
             selecting: false,
@@ -455,13 +548,17 @@ impl TerminalPane {
             font: None,
             font_setting: String::new(),
             pending_resize: None,
+            observe: false,
             touch: false,
             focus_wanted: false,
             cached_viewport_revision: 0,
             cached_viewport_offset: 0,
             cached_viewport_cells: Vec::new(),
-            cached_render_key: (0, 0, None, None, 0),
-            render_cache_valid: false,
+            find_revision: 0,
+            row_cache: Vec::new(),
+            cell_runs_calls: 0,
+            status_line: "starting agent…".to_string(),
+            cell_scratch: CellScratch::default(),
         }
     }
 
@@ -478,12 +575,12 @@ impl TerminalPane {
             self.cached_viewport_revision = 0;
             self.cached_viewport_offset = 0;
             self.cached_viewport_cells.clear();
-            self.cached_render_key = (0, 0, None, None, 0);
-            self.render_cache_valid = false;
+            self.row_cache.clear();
             self.find_matches.clear();
             self.find_current = None;
             self.sel_anchor = None;
             self.sel_cursor = None;
+            self.status_line = "starting agent…".to_string();
         }
         self.pane = Some(pane);
     }
@@ -522,8 +619,28 @@ impl TerminalPane {
         self.font = measure_terminal_font(window.text_system(), &families, px(self.font_size));
     }
 
+    /// Watch the pane without owning its size.
+    ///
+    /// The split canvas shares a pane's PTY with the main canvas: its grid
+    /// follows its own box, but the agent keeps the size the view that owns
+    /// the pane gave it.
+    pub fn set_observe(&mut self, observe: bool) {
+        if self.observe == observe {
+            return;
+        }
+        self.observe = observe;
+        if observe {
+            // A size held back for the drag must not go out once the view
+            // stops owning the PTY.
+            self.pending_resize = None;
+        }
+    }
+
     /// Tell the agent about a new size, or hold it back until the drag has
     /// quieted down.
+    ///
+    /// The render is the only caller: the observing rule lives there, where
+    /// the view decides whether the agent's size is its business.
     fn request_resize(&mut self, cols: u16, rows: u16) {
         if self.last_resize.elapsed() >= Duration::from_millis(RESIZE_DEBOUNCE_MS) {
             self.last_resize = Instant::now();
@@ -556,7 +673,16 @@ impl TerminalPane {
 
     /// Feed a chunk of PTY text into the grid.
     pub fn feed(&mut self, text: &str) {
+        #[cfg(debug_assertions)]
+        let feed_started = Instant::now();
         self.screen.process(text);
+        adjust_selection_after_feed(
+            &mut self.sel_anchor,
+            &mut self.sel_cursor,
+            self.screen.ring_wrapped(),
+        );
+        #[cfg(debug_assertions)]
+        crate::perf::record_feed(feed_started.elapsed());
         // The reader's scroll position is theirs: the parser always reads the
         // live screen, and only the live bottom follows the new output.
     }
@@ -564,6 +690,22 @@ impl TerminalPane {
     /// The current screen revision, so callers can tell whether feeding changed anything.
     pub fn revision(&self) -> u64 {
         self.screen.revision()
+    }
+
+    /// The text the reader sees: the grid's live rows, one per line.
+    pub fn visible_text(&self) -> String {
+        self.screen.visible_text()
+    }
+
+    /// Store the status line the render path draws. Called by the status
+    /// poller (app.rs) off the UI thread; returns whether the value changed
+    /// so the poller can notify only then.
+    pub fn set_status_line(&mut self, status: String) -> bool {
+        if self.status_line == status {
+            return false;
+        }
+        self.status_line = status;
+        true
     }
 
     fn send_chord(&self, chord: &str) {
@@ -608,7 +750,7 @@ impl TerminalPane {
         let has_selection = self.sel_anchor.is_some() && self.sel_cursor.is_some();
         match key_action(ev, self.find_open, has_selection) {
             // The find bar owns the keyboard while it is open.
-            KeyAction::FindKey => self.on_find_key(ev),
+            KeyAction::FindKey => self.on_find_key(ev, cx),
             KeyAction::Paste => {
                 if let Some(text) = self.clipboard_text(cx) {
                     self.send_text(&text);
@@ -658,13 +800,13 @@ impl TerminalPane {
     }
 
     /// Keys while the find bar owns the input.
-    fn on_find_key(&mut self, ev: &KeyDownEvent) -> bool {
+    fn on_find_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         match ev.keystroke.key.to_ascii_lowercase().as_str() {
             "escape" => self.find_open = false,
             "enter" => self.find_next(),
             "backspace" => {
                 self.find_query.pop();
-                self.refresh_find_matches();
+                self.schedule_find_refresh(cx);
             }
             other
                 if other.chars().count() == 1
@@ -678,7 +820,7 @@ impl TerminalPane {
                     .unwrap_or_else(|| other.to_string());
                 if c.chars().count() == 1 {
                     self.find_query.push_str(&c);
-                    self.refresh_find_matches();
+                    self.schedule_find_refresh(cx);
                 }
             }
             _ => {}
@@ -686,7 +828,35 @@ impl TerminalPane {
         true
     }
 
+    /// Debounce the grid search: an empty query clears matches immediately, anything else
+    /// waits `FIND_DEBOUNCE_MS` after the last keystroke. Spawned timers that wake before the
+    /// quiet window elapses do nothing, so a burst of typing costs at most one search.
+    fn schedule_find_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.find_query.is_empty() {
+            self.find_matches.clear();
+            self.find_current = None;
+            self.find_revision += 1;
+            cx.notify();
+            return;
+        }
+        self.find_debouncer.keystroke(Instant::now());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(FIND_DEBOUNCE_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.find_debouncer.due(Instant::now()) {
+                    this.find_debouncer.mark_fired();
+                    this.refresh_find_matches();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn refresh_find_matches(&mut self) {
+        self.find_revision += 1;
         self.find_matches = self
             .screen
             .find(&self.find_query, 1024)
@@ -761,23 +931,20 @@ impl TerminalPane {
         true
     }
 
-    /// Viewport rows of the current content as cells: (content_row, cells) for
-    /// the visible window.
-    ///
-    /// The rows come from the core's cheap viewport read: it does not clone the
-    /// screen or walk the ten-thousand row ring, so the grid can be drawn every
-    /// frame. Same rows the plain read gives, with every cell's styling.
-    fn viewport_cells(&mut self) -> Vec<(usize, Vec<TermCell>)> {
+    /// Bring the viewport-cell cache up to date with the screen's current
+    /// (revision, offset). A frame that paints the same content reuses the
+    /// allocation instead of walking the grid again.
+    fn refresh_viewport_cache(&mut self) {
         let revision = self.screen.revision();
         let offset = self.screen.offset_from_bottom();
         if revision == self.cached_viewport_revision
             && offset == self.cached_viewport_offset
             && !self.cached_viewport_cells.is_empty()
         {
-            return self.cached_viewport_cells.clone();
+            return;
         }
         let base = self.screen.scrollback_len().saturating_sub(offset);
-        let cells: Vec<(usize, Vec<TermCell>)> = self
+        self.cached_viewport_cells = self
             .screen
             .viewport_cells(offset)
             .into_iter()
@@ -786,8 +953,25 @@ impl TerminalPane {
             .collect();
         self.cached_viewport_revision = revision;
         self.cached_viewport_offset = offset;
-        self.cached_viewport_cells = cells.clone();
-        cells
+    }
+
+    /// Viewport rows of the current content as cells: (content_row, cells) for
+    /// the visible window.
+    ///
+    /// The rows come from the core's cheap viewport read: it does not clone the
+    /// screen or walk the ten-thousand row ring, so the grid can be drawn every
+    /// frame. Same rows the plain read gives, with every cell's styling.
+    ///
+    /// The returned slice borrows the cache: call `refresh_viewport_cache`
+    /// first, and the frame paints the cached allocation without cloning it.
+    fn viewport_cells(&self) -> &[(usize, Vec<TermCell>)] {
+        &self.cached_viewport_cells
+    }
+
+    /// How many times `cell_runs` has run during renders. Tests use this to
+    /// prove a cache-hit frame does not rebuild rows.
+    pub fn cell_runs_calls(&self) -> u64 {
+        self.cell_runs_calls
     }
 
     /// Map a window-relative position onto a visible (row, col) cell.
@@ -882,6 +1066,25 @@ fn key_action(ev: &KeyDownEvent, find_open: bool, has_selection: bool) -> KeyAct
     }
 }
 
+/// Keep the selection pointed at the same text after a feed.
+///
+/// Content coordinates are stable below capacity: when a line enters scrollback,
+/// `scrollback_len` grows by one and every live-screen row's `vis_row` shrinks by one for the
+/// same text, so `content_row = scrollback_len - offset + vis_row` is unchanged. At capacity
+/// vt100 drops the oldest rows without exposing how many, so the shift is unknowable: the
+/// selection is cleared instead. A lost selection is visible and safe; a silently mis-pointed
+/// one copies the wrong text.
+fn adjust_selection_after_feed(
+    sel_anchor: &mut Option<(usize, usize)>,
+    sel_cursor: &mut Option<(usize, usize)>,
+    ring_wrapped: bool,
+) {
+    if ring_wrapped {
+        *sel_anchor = None;
+        *sel_cursor = None;
+    }
+}
+
 /// The selection's two ends in reading order: the reader may drag either way,
 /// and the text they copy must not depend on which way they dragged.
 fn ordered_selection(
@@ -965,6 +1168,8 @@ fn linear_map_keystroke(ev: &KeyDownEvent) -> Option<String> {
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(debug_assertions)]
+        let frame_started = Instant::now();
         // Keep the engine pane's geometry in sync with the window.
         // The font: the family the reader configured, or the first monospace
         // one that is installed. It is measured, not guessed: the cell is the
@@ -1002,12 +1207,20 @@ impl Render for TerminalPane {
             // The grid follows the box at once; the agent is told after the
             // debounce, so a drag does not flood it with resizes.
             self.screen.resize(rows, cols);
-            self.request_resize(cols, rows);
+            // An observing view follows its own box but never resizes the PTY
+            // it shares: the agent keeps the size the owning view gave it.
+            // An observing view follows its own box but never resizes the PTY
+            // it shares: the agent keeps the size the owning view gave it.
+            if !self.observe {
+                self.request_resize(cols, rows);
+            }
         }
         // A resize that was held back while the drag was still moving goes out
         // now: the final size must reach the agent.
         if let Some((cols, rows)) = self.pending_resize {
-            if self.last_resize.elapsed() >= Duration::from_millis(RESIZE_DEBOUNCE_MS) {
+            if !self.observe
+                && self.last_resize.elapsed() >= Duration::from_millis(RESIZE_DEBOUNCE_MS)
+            {
                 self.pending_resize = None;
                 self.last_resize = Instant::now();
                 self.send_resize(cols, rows);
@@ -1020,6 +1233,14 @@ impl Render for TerminalPane {
         let max_offset = self.screen.scrollback_len();
         let offset = self.screen.offset_from_bottom();
         let (visible_rows, _) = self.screen.size();
+        self.refresh_viewport_cache();
+        // Taken out of `self` so the render path can borrow the cached rows
+        // while the scratch is reused across rows; put back after the grid
+        // is built.
+        let mut scratch = std::mem::take(&mut self.cell_scratch);
+        let mut row_cache = std::mem::take(&mut self.row_cache);
+        let revision = self.screen.revision();
+        let find_revision = self.find_revision;
         let rows_v = self.viewport_cells();
 
         // The reader's selection, in content coordinates.
@@ -1030,9 +1251,11 @@ impl Render for TerminalPane {
         let theme = Theme::current();
         let style = grid_style(self.font.as_ref(), &theme, self.font_size);
 
+        let mut cell_runs_calls = 0u64;
         let grid_rows = rows_v
             .iter()
-            .map(|(content_row, cells)| {
+            .enumerate()
+            .map(|(vis_row, (content_row, cells))| {
                 let mut overlays = RowOverlays::default();
                 if let Some((a, b)) = sel {
                     if *content_row >= a.0 && *content_row <= b.0 {
@@ -1050,10 +1273,48 @@ impl Render for TerminalPane {
                         overlays.find.push(m.1..m.3 + 1);
                     }
                 }
-                let (text, ranges) = cell_runs(cells, &theme, &overlays);
-                grid_line(text, ranges, &style)
+                let key = RowCacheKey {
+                    revision,
+                    offset,
+                    content_row: *content_row,
+                    selection: overlays.selection,
+                    find_revision,
+                    theme_fg: theme.term_fg,
+                    theme_bg: theme.term_bg,
+                    theme_selection: theme.term_selection,
+                    theme_accent: theme.accent,
+                };
+                let cached = row_cache
+                    .get(vis_row)
+                    .and_then(|slot| slot.as_ref())
+                    .filter(|row| row.key == key)
+                    .cloned();
+                match cached {
+                    Some(row) => grid_line(row.text.clone(), &row.runs, &style),
+                    None => {
+                        cell_runs_calls += 1;
+                        cell_runs(cells, &theme, &overlays, &mut scratch);
+                        // The element owns the text ('static), so the buffer moves
+                        // out; the column spans and runs stay in the scratch.
+                        let text = std::mem::take(&mut scratch.text);
+                        scratch.text = String::with_capacity(cells.len());
+                        let row = Rc::new(CachedRow {
+                            key,
+                            text,
+                            runs: scratch.runs.clone(),
+                        });
+                        if row_cache.len() <= vis_row {
+                            row_cache.resize_with(vis_row + 1, || None);
+                        }
+                        row_cache[vis_row] = Some(row.clone());
+                        grid_line(row.text.clone(), &row.runs, &style)
+                    }
+                }
             })
             .collect::<Vec<_>>();
+        self.cell_scratch = scratch;
+        self.row_cache = row_cache;
+        self.cell_runs_calls += cell_runs_calls;
 
         // Scrollbar thumb geometry (visual; wheel is the primary control).
         let grid_height = bounds
@@ -1245,16 +1506,14 @@ impl Render for TerminalPane {
             div().h_0().into_any_element()
         };
 
-        let status_line = match &self.pane {
-            Some(pane) => {
-                let status = pane.status().as_wire().to_string();
-                if offset > 0 {
-                    format!("{status}  scroll {offset}/{max_offset}")
-                } else {
-                    status.to_string()
-                }
-            }
-            None => "starting agent…".to_string(),
+        // The status line comes only from the cache: `pane.status()` is a
+        // synchronous socket round-trip on the daemon path and must never
+        // run on the UI thread. The poller refreshes the cache; a stale
+        // line is fine, a frozen UI is not.
+        let status_line = if offset > 0 {
+            format!("{}  scroll {offset}/{max_offset}", self.status_line)
+        } else {
+            self.status_line.clone()
         };
         let status_bar = div()
             .flex()
@@ -1325,7 +1584,7 @@ impl Render for TerminalPane {
             None => grid,
         };
 
-        div()
+        let pane = div()
             .id("terminal-pane")
             .track_focus(&self.focus_handle)
             .flex()
@@ -1409,7 +1668,10 @@ impl Render for TerminalPane {
             )
             .child(find_bar)
             .child(key_bar)
-            .child(status_bar)
+            .child(status_bar);
+        #[cfg(debug_assertions)]
+        crate::perf::record_frame(frame_started.elapsed());
+        pane
     }
 }
 /// GPUI keystroke → logical chord name for `PaneHandle::keys` (the same names the
@@ -1419,6 +1681,18 @@ mod tests {
     use super::*;
     use gpui::Entity;
     use gpui::{Keystroke, Modifiers};
+
+    /// Run `cell_runs` with a fresh scratch and hand back the owned text and
+    /// runs, mirroring what the render path moves out of the scratch.
+    fn run_cell_runs(
+        cells: &[TermCell],
+        theme: &Theme,
+        overlays: &RowOverlays,
+    ) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
+        let mut scratch = CellScratch::default();
+        cell_runs(cells, theme, overlays, &mut scratch);
+        (scratch.text, scratch.runs)
+    }
 
     fn ev(key: &str, shift: bool, control: bool, alt: bool) -> KeyDownEvent {
         KeyDownEvent {
@@ -1434,6 +1708,33 @@ mod tests {
             },
             is_held: false,
         }
+    }
+
+    #[test]
+    fn find_debounce_fires_at_most_twice_for_20_keystrokes_in_1s() {
+        let mut debouncer = FindDebouncer::new(Duration::from_millis(FIND_DEBOUNCE_MS));
+        let start = Instant::now();
+        let mut searches = 0;
+        // 20 keystrokes, one every 50ms: the quiet window never elapses mid-burst.
+        for i in 0..20 {
+            let t = start + Duration::from_millis(i * 50);
+            debouncer.keystroke(t);
+            if debouncer.due(t) {
+                debouncer.mark_fired();
+                searches += 1;
+            }
+        }
+        // The quiet window after the last keystroke lets exactly one search through.
+        let quiet = start + Duration::from_millis(20 * 50 + FIND_DEBOUNCE_MS);
+        if debouncer.due(quiet) {
+            debouncer.mark_fired();
+            searches += 1;
+        }
+        assert!(
+            searches <= 2,
+            "expected at most 2 grid searches, got {searches}"
+        );
+        assert_eq!(searches, 1);
     }
 
     #[test]
@@ -1540,6 +1841,42 @@ mod tests {
     }
 
     #[test]
+    fn the_selection_survives_feeds_below_wrap_capacity() {
+        let mut screen = ScreenState::new(4, 20);
+        let mut anchor = Some((0, 0));
+        let mut cursor = Some((0, 3));
+        for _ in 0..100 {
+            screen.process("line\r\n");
+            adjust_selection_after_feed(&mut anchor, &mut cursor, screen.ring_wrapped());
+        }
+        assert_eq!(
+            anchor,
+            Some((0, 0)),
+            "content coordinates are stable below capacity"
+        );
+        assert_eq!(
+            cursor,
+            Some((0, 3)),
+            "content coordinates are stable below capacity"
+        );
+    }
+
+    #[test]
+    fn the_selection_is_cleared_when_the_ring_wraps() {
+        let mut screen = ScreenState::new(2, 20);
+        let fill = "x\r\n".repeat(orion_core::screen::SCROLLBACK_ROWS + 8);
+        screen.process(&fill);
+        assert_eq!(screen.scrollback_len(), orion_core::screen::SCROLLBACK_ROWS);
+        let mut anchor = Some((3, 0));
+        let mut cursor = Some((5, 2));
+        screen.process("more\r\n");
+        assert!(screen.ring_wrapped(), "feed at capacity reports the wrap");
+        adjust_selection_after_feed(&mut anchor, &mut cursor, screen.ring_wrapped());
+        assert_eq!(anchor, None, "selection cleared, not mis-pointed");
+        assert_eq!(cursor, None, "selection cleared, not mis-pointed");
+    }
+
+    #[test]
     fn a_selection_dragged_upward_copies_the_same_text_as_one_dragged_downward() {
         let mut screen = ScreenState::new(4, 20);
         screen.process("alpha\r\nbravo\r\ncharlie\r\n");
@@ -1595,7 +1932,7 @@ mod tests {
             cell.bold = true;
         }
 
-        let (text, ranges) = cell_runs(&cells, &theme, &RowOverlays::default());
+        let (text, ranges) = run_cell_runs(&cells, &theme, &RowOverlays::default());
 
         assert_eq!(text, "red !", "every cell contributes one character");
         assert_eq!(
@@ -1625,7 +1962,7 @@ mod tests {
         let mut inverse = cell("x", TermColor::Indexed(1), TermColor::Indexed(4));
         inverse.inverse = true;
 
-        let (text, ranges) = cell_runs(&[inverse], &theme, &RowOverlays::default());
+        let (text, ranges) = run_cell_runs(&[inverse], &theme, &RowOverlays::default());
 
         assert_eq!(text, "x");
         assert_eq!(ranges.len(), 1);
@@ -1657,7 +1994,7 @@ mod tests {
             cell("x", TermColor::Default, TermColor::Default),
         ];
 
-        let (text, ranges) = cell_runs(&cells, &theme, &RowOverlays::default());
+        let (text, ranges) = run_cell_runs(&cells, &theme, &RowOverlays::default());
         assert_eq!(text, "漢x", "the continuation contributes no character");
         assert!(ranges.is_empty(), "plain cells get no runs: {ranges:?}");
 
@@ -1666,7 +2003,7 @@ mod tests {
             selection: Some((1, 1)),
             find: Vec::new(),
         };
-        let (_, ranges) = cell_runs(&cells, &theme, &overlays);
+        let (_, ranges) = run_cell_runs(&cells, &theme, &overlays);
         assert_eq!(
             ranges.len(),
             1,
@@ -1687,7 +2024,7 @@ mod tests {
         let mut underlined = cell("u", TermColor::Indexed(2), TermColor::Default);
         underlined.underline = true;
 
-        let (text, ranges) = cell_runs(&[dim, underlined], &theme, &RowOverlays::default());
+        let (text, ranges) = run_cell_runs(&[dim, underlined], &theme, &RowOverlays::default());
 
         assert_eq!(text, "du");
         assert_eq!(ranges.len(), 2, "the dim cell is not plain: {ranges:?}");
@@ -1714,7 +2051,7 @@ mod tests {
         };
         overlays.find.push(0..2);
 
-        let (text, ranges) = cell_runs(&cells, &theme, &overlays);
+        let (text, ranges) = run_cell_runs(&cells, &theme, &overlays);
 
         assert_eq!(text, "abc");
         assert_eq!(
@@ -1746,7 +2083,7 @@ mod tests {
         );
         let rows = screen.viewport_cells(0);
 
-        let (text, ranges) = cell_runs(&rows[0], &Theme::dark(), &RowOverlays::default());
+        let (text, ranges) = run_cell_runs(&rows[0], &Theme::dark(), &RowOverlays::default());
 
         assert!(text.starts_with("RED BOLD GREEN TRUECOLOR"), "{text:?}");
         assert_eq!(ranges.len(), 3, "the plain gaps get no runs: {ranges:?}");
@@ -1764,6 +2101,76 @@ mod tests {
             truecolor.color,
             Some(crate::theme::rgb_color(255, 100, 0).into())
         );
+    }
+
+    #[test]
+    fn a_wide_char_row_with_selection_and_find_match_produces_stable_output() {
+        // Wide char + selection + find match on the same row: the exact
+        // (text, ranges) the pre-scratch implementation produced.
+        let theme = Theme::dark();
+        let mut wide = cell("漢", TermColor::Default, TermColor::Default);
+        wide.wide = true;
+        let continuation = TermCell {
+            text: String::new(),
+            wide_continuation: true,
+            ..cell("", TermColor::Default, TermColor::Default)
+        };
+        let cells = vec![
+            wide,
+            continuation,
+            cell("a", TermColor::Indexed(1), TermColor::Default),
+            cell("b", TermColor::Default, TermColor::Default),
+        ];
+        let overlays = RowOverlays {
+            selection: Some((0, 2)),
+            find: std::iter::once(3..4).collect(),
+        };
+
+        let (text, ranges) = run_cell_runs(&cells, &theme, &overlays);
+
+        assert_eq!(text, "漢ab");
+        // 漢 is bytes 0..3, 'a' is 3..4, 'b' is 4..5. The selection covers
+        // columns 0..=2 (bytes 0..4); the find match covers byte 3..4 and
+        // wins on the overlap. Runs break at cell boundaries: 漢 paints the
+        // selection, 'a' paints the find match, 'b' is plain.
+        assert_eq!(
+            ranges,
+            vec![
+                (
+                    0..3,
+                    HighlightStyle {
+                        background_color: Some(theme.term_selection.into()),
+                        ..HighlightStyle::default()
+                    }
+                ),
+                (
+                    3..4,
+                    HighlightStyle {
+                        background_color: Some(theme.accent.into()),
+                        color: Some(theme.term_bg.into()),
+                        ..HighlightStyle::default()
+                    }
+                ),
+            ],
+            "selection first, find second, find wins on overlap: {ranges:?}"
+        );
+    }
+
+    #[test]
+    fn a_lone_wide_continuation_at_index_zero_renders_a_space() {
+        // Malformed content: a continuation cell with no wide character
+        // before it must not panic and renders a space.
+        let theme = Theme::dark();
+        let continuation = TermCell {
+            text: String::new(),
+            wide_continuation: true,
+            ..cell("", TermColor::Default, TermColor::Default)
+        };
+
+        let (text, ranges) = run_cell_runs(&[continuation], &theme, &RowOverlays::default());
+
+        assert_eq!(text, " ");
+        assert!(ranges.is_empty(), "a plain space gets no run: {ranges:?}");
     }
 
     /// The terminal the test drives.
@@ -1822,6 +2229,213 @@ mod tests {
                 "the grid has a height of its own: {bounds:?}"
             );
         });
+    }
+
+    /// A pane whose `status()` must never run on the render path: it panics.
+    /// `pane.status()` is a synchronous socket round-trip on the daemon path
+    /// (30s timeout); render reads only the cached `status_line`.
+    struct StatusPanicsPane {
+        cwd: std::path::PathBuf,
+    }
+
+    impl PaneHandle for StatusPanicsPane {
+        fn id(&self) -> &str {
+            "status-panics"
+        }
+
+        fn cwd(&self) -> &std::path::Path {
+            &self.cwd
+        }
+
+        fn write(&self, _data: &str) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn keys(&self, _keys: &[String]) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn interrupt(&self) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn resize(&self, _cols: u16, _rows: u16) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn clear(&self) {}
+
+        fn status(&self) -> orion_core::protocol::AgentStatus {
+            panic!("render must not call pane.status(); the status line comes from the cache")
+        }
+
+        fn prompt(&self) -> Option<orion_core::prompt::DetectedPrompt> {
+            None
+        }
+
+        fn attach(
+            &self,
+            _connection: &str,
+            _sink: orion_core::FrameSink,
+            _role: orion_core::Role,
+            _cols: u16,
+            _rows: u16,
+            _keep_size: bool,
+        ) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn detach(&self, _connection: &str) {}
+
+        fn detach_all(&self, _connection: &str) {}
+    }
+
+    #[gpui::test]
+    fn render_reads_the_cached_status_line_never_the_pane(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+            view: cx.new(TerminalPane::new),
+        });
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, _cx| {
+                view.set_pane(Arc::new(StatusPanicsPane {
+                    cwd: std::path::PathBuf::from("."),
+                }));
+                assert!(view.set_status_line("working".to_string()));
+            });
+        });
+        // If render called pane.status(), the panic would fail this draw.
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            let status = view.read(app).status_line.clone();
+            assert_eq!(status, "working", "render drew the cached status line");
+        });
+    }
+
+    /// A pane that records every size it was asked to take.
+    struct ResizeRecordingPane {
+        cwd: std::path::PathBuf,
+        resizes: Arc<std::sync::Mutex<Vec<(u16, u16)>>>,
+    }
+
+    impl PaneHandle for ResizeRecordingPane {
+        fn id(&self) -> &str {
+            "resize-recorder"
+        }
+
+        fn cwd(&self) -> &std::path::Path {
+            &self.cwd
+        }
+
+        fn write(&self, _data: &str) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn keys(&self, _keys: &[String]) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn interrupt(&self) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn resize(&self, cols: u16, rows: u16) -> orion_core::Result<()> {
+            self.resizes
+                .lock()
+                .expect("the recorder's lock")
+                .push((cols, rows));
+            Ok(())
+        }
+
+        fn clear(&self) {}
+
+        fn status(&self) -> orion_core::protocol::AgentStatus {
+            orion_core::protocol::AgentStatus::Idle
+        }
+
+        fn prompt(&self) -> Option<orion_core::prompt::DetectedPrompt> {
+            None
+        }
+
+        fn attach(
+            &self,
+            _connection: &str,
+            _sink: orion_core::FrameSink,
+            _role: orion_core::Role,
+            _cols: u16,
+            _rows: u16,
+            _keep_size: bool,
+        ) -> orion_core::Result<()> {
+            Ok(())
+        }
+
+        fn detach(&self, _connection: &str) {}
+
+        fn detach_all(&self, _connection: &str) {}
+    }
+
+    /// A view that watches the pane never asks the agent for a new size.
+    ///
+    /// The split canvas shares the pane's PTY with the main canvas: the size
+    /// belongs to the view that owns the pane.
+    #[gpui::test]
+    fn an_observing_view_never_resizes_the_pane(cx: &mut gpui::TestAppContext) {
+        let resizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+            view: cx.new(TerminalPane::new),
+        });
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, _cx| {
+                view.set_pane(Arc::new(ResizeRecordingPane {
+                    cwd: std::path::PathBuf::from("."),
+                    resizes: Arc::clone(&resizes),
+                }));
+                // A cell the test controls: the grid's size is then the box's
+                // size divided by this cell, whatever fonts the machine has.
+                view.font = Some(TerminalFont {
+                    family: String::new(),
+                    cell: CellSize {
+                        width: 8.0,
+                        height: 16.0,
+                    },
+                });
+            });
+        });
+        // The first draw learns the grid's box, the second one resizes to it.
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let owner = resizes.lock().expect("the recorder's lock").len();
+        assert!(owner > 0, "the owning view told the agent about its box");
+
+        // The observing view takes the same box and must leave the PTY alone.
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, _cx| {
+                view.set_observe(true);
+                // A size the grid has never seen, so the render takes the
+                // resize branch, and no debounce left to wait for.
+                view.last_cols = 0;
+                view.last_rows = 0;
+                view.last_resize = Instant::now() - Duration::from_millis(RESIZE_DEBOUNCE_MS);
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let observed = resizes.lock().expect("the recorder's lock").len();
+        assert_eq!(observed, owner, "an observing view never resizes the pane");
+        // The render did take the resize branch: the grid followed its box.
+        // Only the agent's PTY was left alone.
+        let mut grid_cols = 0;
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            grid_cols = view.read(app).last_cols;
+        });
+        assert!(
+            grid_cols > 0,
+            "the observing view still followed its own box"
+        );
     }
 
     #[test]
@@ -1937,5 +2551,241 @@ mod tests {
                 );
             });
         });
+    }
+
+    #[gpui::test]
+    fn the_cache_hit_path_borrows_the_cached_rows(cx: &mut gpui::TestAppContext) {
+        let view = cx.update(|app| app.new(TerminalPane::new));
+        cx.update(|app| {
+            view.update(app, |view, _cx| {
+                for line in 0..80 {
+                    view.feed(&format!("line {line}\r\n"));
+                }
+                view.refresh_viewport_cache();
+                let cached = view.viewport_cells().as_ptr();
+                let cached_revision = view.cached_viewport_revision;
+
+                view.refresh_viewport_cache();
+
+                assert_eq!(
+                    cached,
+                    view.viewport_cells().as_ptr(),
+                    "an unchanged (revision, offset) reuses the cached allocation"
+                );
+                assert_eq!(view.cached_viewport_revision, cached_revision);
+
+                // A feed after a scroll changes the revision: the cache is
+                // rebuilt and the new output is on screen.
+                view.screen.scroll_to(5);
+                view.feed("late output\r\n");
+                view.refresh_viewport_cache();
+
+                assert_ne!(
+                    view.cached_viewport_revision, cached_revision,
+                    "a feed after a scroll invalidates the cache"
+                );
+                assert_eq!(
+                    view.screen.offset_from_bottom(),
+                    5,
+                    "the reader stays where they scrolled"
+                );
+                let text: String = view
+                    .viewport_cells()
+                    .iter()
+                    .flat_map(|(_, cells)| cells.iter().map(|cell| cell.text.as_str()))
+                    .collect();
+                assert!(
+                    !text.contains("late output"),
+                    "the rebuilt cache shows the scrolled viewport, not the live bottom"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_cache_hit_frame_does_not_call_cell_runs(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+            view: cx.new(TerminalPane::new),
+        });
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, _cx| {
+                for line in 0..40 {
+                    view.feed(&format!("line {line}\r\n"));
+                }
+            });
+        });
+        // Warm up: the first draws build the cache and learn the grid's box.
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let mut calls = 0;
+        cx.update(|_window, app| {
+            calls = root.read(app).view.read(app).cell_runs_calls();
+        });
+        assert!(calls > 0, "the warm-up draws built the rows");
+
+        // Force a re-render with no content change: the cache must serve it.
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |_view, cx| cx.notify());
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let mut after = 0;
+        cx.update(|_window, app| {
+            after = root.read(app).view.read(app).cell_runs_calls();
+        });
+        assert_eq!(
+            calls, after,
+            "an unchanged frame reuses the cached rows instead of re-running cell_runs"
+        );
+        // The cached frame still paints the fed content.
+        let mut text = String::new();
+        cx.update(|_window, app| {
+            text = root
+                .read(app)
+                .view
+                .read(app)
+                .viewport_cells()
+                .iter()
+                .flat_map(|(_, cells)| cells.iter().map(|cell| cell.text.as_str()))
+                .collect();
+        });
+        assert!(
+            text.contains("line 39"),
+            "the cached frame paints the content"
+        );
+    }
+
+    #[gpui::test]
+    fn the_row_cache_invalidates_on_feed_scroll_selection_and_find(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+            view: cx.new(TerminalPane::new),
+        });
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, _cx| {
+                for line in 0..40 {
+                    view.feed(&format!("line {line}\r\n"));
+                }
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        // A feed bumps the content revision: every visible row rebuilds.
+        let mut before = 0;
+        cx.update(|_window, app| {
+            before = root.read(app).view.read(app).cell_runs_calls();
+        });
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, cx| {
+                view.feed("fresh output\r\n");
+                cx.notify();
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let mut after_feed = 0;
+        cx.update(|_window, app| {
+            after_feed = root.read(app).view.read(app).cell_runs_calls();
+        });
+        assert!(after_feed > before, "a feed invalidates the cached rows");
+
+        // A scroll changes the offset: the cached rows rebuild.
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, cx| {
+                view.screen.scroll_to(3);
+                cx.notify();
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let mut after_scroll = 0;
+        cx.update(|_window, app| {
+            after_scroll = root.read(app).view.read(app).cell_runs_calls();
+        });
+        assert!(
+            after_scroll > after_feed,
+            "a scroll invalidates the cached rows"
+        );
+
+        // A selection on one visible row rebuilds exactly that row.
+        let mut before_selection = 0;
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, cx| {
+                let row = view.viewport_cells()[0].0;
+                view.sel_anchor = Some((row, 0));
+                view.sel_cursor = Some((row, 4));
+                cx.notify();
+                before_selection = view.cell_runs_calls();
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let mut after_selection = 0;
+        cx.update(|_window, app| {
+            after_selection = root.read(app).view.read(app).cell_runs_calls();
+        });
+        assert_eq!(
+            after_selection - before_selection,
+            1,
+            "a one-row selection rebuilds exactly the selected row"
+        );
+
+        // A find refresh bumps the find revision even when the matches are
+        // identical - the count is not the fingerprint.
+        let mut rev = 0;
+        let mut before_find = 0;
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, cx| {
+                view.find_query = "line".to_string();
+                view.refresh_find_matches();
+                cx.notify();
+                rev = view.find_revision;
+                before_find = view.cell_runs_calls();
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let mut after_find = 0;
+        cx.update(|_window, app| {
+            after_find = root.read(app).view.read(app).cell_runs_calls();
+        });
+        assert!(
+            after_find > before_find,
+            "a find refresh invalidates the cached rows"
+        );
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, _cx| view.refresh_find_matches());
+        });
+        let mut rev_after = 0;
+        cx.update(|_window, app| {
+            rev_after = root.read(app).view.read(app).find_revision;
+        });
+        assert_eq!(
+            rev_after,
+            rev + 1,
+            "every refresh bumps the find revision, even with identical matches"
+        );
+
+        // Clearing the query bumps the revision too.
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, cx| {
+                view.find_query.clear();
+                view.schedule_find_refresh(cx);
+            });
+        });
+        let mut rev_cleared = 0;
+        cx.update(|_window, app| {
+            rev_cleared = root.read(app).view.read(app).find_revision;
+        });
+        assert_eq!(
+            rev_cleared,
+            rev + 2,
+            "the empty-query clear bumps the find revision"
+        );
     }
 }
