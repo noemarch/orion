@@ -1,7 +1,9 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Json, State};
@@ -19,7 +21,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Clone)]
 struct AppState {
@@ -54,6 +56,142 @@ impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.engine.disconnect(&self.id);
     }
+}
+
+/// Outbound frames per connection are bounded so a client that stops reading
+/// cannot grow server memory without limit. 1024 frames at roughly 4 KiB each
+/// is about 4 MiB per connection: enough to absorb a burst of PTY output,
+/// small enough to bound a stalled client. A client whose queue stays full
+/// for `OUTBOUND_SEND_TIMEOUT` is disconnected as a sustained overflow.
+const OUTBOUND_CAPACITY: usize = 1024;
+
+/// How long a push may wait for room in a connection's outbound queue before
+/// the connection is declared a sustained overflow and disconnected.
+const OUTBOUND_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The time source for a push's overflow window.
+///
+/// Production reads the wall clock and sleeps between attempts. Tests drive a
+/// scripted clock, so the threshold is exact and no test sleeps.
+trait OverflowClock {
+    /// How long this push has been waiting for room.
+    fn elapsed(&mut self) -> Duration;
+    /// Waits between two attempts.
+    fn pause(&mut self, wait: Duration);
+}
+
+/// The production clock: wall-clock time since the push started.
+struct WallClock {
+    started: Instant,
+}
+
+impl OverflowClock for WallClock {
+    fn elapsed(&mut self) -> Duration {
+        self.started.elapsed()
+    }
+
+    fn pause(&mut self, wait: Duration) {
+        std::thread::sleep(wait);
+    }
+}
+
+/// Pushes one frame into a connection's bounded outbound queue. On timeout
+/// the connection is marked dead and the reaper is notified; the frame is
+/// dropped because the connection is being disconnected. Once a connection is
+/// marked dead its frames are undeliverable and are dropped here; the reaper
+/// forgets the connection right after.
+///
+/// tokio's bounded `Sender` has no stable timed send, so a full queue is
+/// retried against a deadline. The retry only runs while the queue is full
+/// (a stalled client); a healthy client never reaches it.
+fn push_outbound(
+    out_tx: &mpsc::Sender<Value>,
+    dead: &AtomicBool,
+    dead_tx: &std::sync::mpsc::Sender<()>,
+    frame: Value,
+    timeout: Duration,
+) {
+    push_outbound_with(
+        out_tx,
+        dead,
+        dead_tx,
+        frame,
+        timeout,
+        &mut WallClock {
+            started: Instant::now(),
+        },
+    );
+}
+
+/// [`push_outbound`] over a caller-supplied clock. The clock only decides when
+/// the overflow window ends; production passes [`WallClock`], tests pass a
+/// counter.
+fn push_outbound_with(
+    out_tx: &mpsc::Sender<Value>,
+    dead: &AtomicBool,
+    dead_tx: &std::sync::mpsc::Sender<()>,
+    frame: Value,
+    timeout: Duration,
+    clock: &mut dyn OverflowClock,
+) {
+    if dead.load(Ordering::SeqCst) {
+        return;
+    }
+    let mut frame = frame;
+    loop {
+        match out_tx.try_send(frame) {
+            Ok(()) => return,
+            Err(mpsc::error::TrySendError::Full(returned)) => {
+                frame = returned;
+                let waited = clock.elapsed();
+                if waited >= timeout {
+                    dead.store(true, Ordering::SeqCst);
+                    let _ = dead_tx.send(());
+                    return;
+                }
+                clock.pause((timeout - waited).min(Duration::from_millis(1)));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => return,
+        }
+    }
+}
+
+/// Builds the per-connection sink. Frames go into a bounded queue; a client
+/// that stays full for `timeout` is marked dead and the reaper disconnects it.
+/// The sink never calls `engine.disconnect` itself: the connections lock is
+/// not reentrant, so disconnecting from inside a sink would deadlock.
+fn outbound_sink(
+    out_tx: mpsc::Sender<Value>,
+    dead: Arc<AtomicBool>,
+    dead_tx: std::sync::mpsc::Sender<()>,
+    timeout: Duration,
+) -> orion_core::FrameSink {
+    Arc::new(move |frame: Value| {
+        push_outbound(&out_tx, &dead, &dead_tx, frame, timeout);
+    })
+}
+
+/// Waits for the sink to report a sustained overflow, then forgets the
+/// connection. Runs off the connections lock and after the sink returns, so
+/// the disconnect cannot deadlock against an in-flight push. Exits silently
+/// when every sink clone is dropped (the connection ended normally).
+fn spawn_reaper(
+    dead_rx: std::sync::mpsc::Receiver<()>,
+    engine: Engine,
+    conn_id: String,
+    timeout: Duration,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        if dead_rx.recv().is_err() {
+            return;
+        }
+        warn!(
+            conn_id = %conn_id,
+            "disconnecting slow consumer: outbound queue stayed full for {:?}",
+            timeout
+        );
+        engine.disconnect(&conn_id);
+    })
 }
 
 #[tokio::main]
@@ -294,10 +432,17 @@ async fn events_handler(
         )
             .into_response();
     }
-    let (tx, rx) = mpsc::unbounded_channel::<Value>();
-    let id = state.engine.connect(Arc::new(move |frame: Value| {
-        let _ = tx.send(frame);
-    }));
+    let (tx, rx) = mpsc::channel::<Value>(OUTBOUND_CAPACITY);
+    let dead = Arc::new(AtomicBool::new(false));
+    let (dead_tx, dead_rx) = std::sync::mpsc::channel::<()>();
+    let sink = outbound_sink(tx, dead, dead_tx, OUTBOUND_SEND_TIMEOUT);
+    let id = state.engine.connect(sink);
+    let _reaper = spawn_reaper(
+        dead_rx,
+        state.engine.clone(),
+        id.clone(),
+        OUTBOUND_SEND_TIMEOUT,
+    );
     let guard = ConnectionGuard {
         engine: state.engine.clone(),
         id,
@@ -361,10 +506,17 @@ async fn ws_handler(
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
-    let connection = state.engine.connect(Arc::new(move |frame: Value| {
-        let _ = tx.send(frame);
-    }));
+    let (tx, mut rx) = mpsc::channel::<Value>(OUTBOUND_CAPACITY);
+    let dead = Arc::new(AtomicBool::new(false));
+    let (dead_tx, dead_rx) = std::sync::mpsc::channel::<()>();
+    let sink = outbound_sink(tx, dead, dead_tx, OUTBOUND_SEND_TIMEOUT);
+    let connection = state.engine.connect(sink);
+    let _reaper = spawn_reaper(
+        dead_rx,
+        state.engine.clone(),
+        connection.clone(),
+        OUTBOUND_SEND_TIMEOUT,
+    );
     state
         .engine
         .send_to(&connection, state.engine.snapshot_frame());
@@ -409,3 +561,79 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 }
 
 fn _unused(_: Infallible) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::Mutex;
+
+    fn scratch_store(tag: &str) -> Store {
+        let dir = std::env::temp_dir().join(format!(
+            "orion-serve-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        Store::at(dir)
+    }
+
+    #[test]
+    fn a_stalled_remote_client_is_disconnected_after_the_threshold() {
+        let engine = Engine::with_store(scratch_store("slow-remote"));
+        let (out_tx, mut out_rx) = mpsc::channel::<Value>(1);
+        let dead = Arc::new(AtomicBool::new(false));
+        let (dead_tx, dead_rx) = std::sync::mpsc::channel::<()>();
+        let timeout = Duration::from_millis(50);
+        let sink = outbound_sink(out_tx, Arc::clone(&dead), dead_tx, timeout);
+        let conn_id = engine.connect(sink);
+        let reaper = spawn_reaper(dead_rx, engine.clone(), conn_id.clone(), timeout);
+
+        // A second connection that keeps up must be unaffected.
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink_received = Arc::clone(&received);
+        let other_id = engine.connect(Arc::new(move |frame| {
+            sink_received.lock().push(frame);
+        }));
+
+        // Fill the queue (capacity 1), then overflow it: the second push
+        // blocks for `timeout`, marks the connection dead, and notifies the reaper.
+        engine.send_to(&conn_id, json!({ "type": "pty-data", "data": "a" }));
+        engine.send_to(&conn_id, json!({ "type": "pty-data", "data": "b" }));
+        assert!(
+            dead.load(Ordering::SeqCst),
+            "the stalled sink must be marked dead"
+        );
+
+        // The reaper disconnects the stalled connection.
+        reaper.join().expect("the reaper finishes");
+
+        // The engine keeps serving after the stalled client is dropped.
+        let (status, _) = engine.http("GET", "/api/health", &Value::Null);
+        assert_eq!(
+            status, 200,
+            "the engine keeps serving after a stalled client is dropped"
+        );
+
+        // The other connection is unaffected.
+        engine.send_to(&other_id, json!({ "type": "pty-data", "data": "c" }));
+        assert_eq!(received.lock().len(), 1);
+
+        // The stalled connection is forgotten: send_to is a no-op and no
+        // further frames reach its queue.
+        engine.send_to(&conn_id, json!({ "type": "pty-data", "data": "d" }));
+        let mut queued = Vec::new();
+        while let Ok(frame) = out_rx.try_recv() {
+            queued.push(frame);
+        }
+        assert_eq!(
+            queued.len(),
+            1,
+            "no further frames reach the stalled connection"
+        );
+        assert_eq!(queued[0]["data"], "a");
+    }
+}
