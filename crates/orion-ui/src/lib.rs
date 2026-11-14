@@ -15,6 +15,8 @@ pub mod files_view;
 pub mod markdown;
 pub mod new_workspace;
 pub mod pane_seam;
+#[cfg(debug_assertions)]
+pub mod perf;
 pub mod prompt_card;
 pub mod settings;
 pub mod shell_model;
