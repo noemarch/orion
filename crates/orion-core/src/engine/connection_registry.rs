@@ -58,9 +58,18 @@ impl ConnectionRegistry {
     }
 
     /// Sends one frame to an open connection, if it is still open.
+    ///
+    /// The sink is cloned out under the lock and called after the guard is
+    /// dropped: a sink may block (a bounded outbound queue) or re-enter the
+    /// registry, and neither may stall every other connection.
     pub fn send_to(&self, connection: &str, frame: Value) {
-        if let Some(entry) = self.connections.lock().get(connection) {
-            (entry.sink)(frame);
+        let sink = self
+            .connections
+            .lock()
+            .get(connection)
+            .map(|entry| std::sync::Arc::clone(&entry.sink));
+        if let Some(sink) = sink {
+            sink(frame);
         }
     }
 
@@ -82,15 +91,23 @@ impl ConnectionRegistry {
     }
 
     /// Fans one frame out to every connection, skipping present ones for UI-only kinds.
+    ///
+    /// Sinks are cloned out under the lock and called after the guard is
+    /// dropped, so a blocked sink never stalls the registry or other connections.
     pub fn broadcast(&self, frame: Value) {
         let kind = frame.get("type").and_then(Value::as_str).unwrap_or("");
         let suppress = kind == "pane-status" || kind == "session-changed";
-        let connections = self.connections.lock();
-        for (connection_id, connection) in connections.iter() {
-            if suppress && self.is_present(connection_id) {
+        let targets: Vec<(String, FrameSink)> = self
+            .connections
+            .lock()
+            .iter()
+            .map(|(id, connection)| (id.clone(), std::sync::Arc::clone(&connection.sink)))
+            .collect();
+        for (connection_id, sink) in targets {
+            if suppress && self.is_present(&connection_id) {
                 continue;
             }
-            (connection.sink)(frame.clone());
+            sink(frame.clone());
         }
     }
 
@@ -204,6 +221,116 @@ mod tests {
         assert!(registry.require_interact(None).is_ok());
         registry.set_role(&id, Role::Interact);
         assert!(registry.require_interact(Some(&id)).is_ok());
+    }
+
+    #[test]
+    fn a_blocked_sink_does_not_block_send_to_on_another_connection() {
+        let registry = std::sync::Arc::new(ConnectionRegistry::new());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let sink_release = std::sync::Arc::clone(&release);
+        let blocked_sink: FrameSink = std::sync::Arc::new(move |_| {
+            let _ = entered_tx.send(());
+            sink_release.wait();
+        });
+        let id_blocked = registry.connect(blocked_sink);
+        let received = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let sink_received = std::sync::Arc::clone(&received);
+        let id_other = registry.connect(std::sync::Arc::new(move |frame| {
+            sink_received.lock().push(frame);
+        }));
+
+        let registry_bg = std::sync::Arc::clone(&registry);
+        let blocked = std::thread::spawn(move || {
+            registry_bg.send_to(&id_blocked, serde_json::json!({ "type": "ping" }));
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the blocked sink must be entered");
+        // The blocked sink holds no registry lock: a second connection is served.
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let registry_other = std::sync::Arc::clone(&registry);
+        let other = std::thread::spawn(move || {
+            registry_other.send_to(&id_other, serde_json::json!({ "type": "ping" }));
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("send_to on another connection must not block behind a blocked sink");
+        // Only the ping was sent to this connection, so count that frame: a
+        // total count would encode whatever else reached it, not delivery.
+        let pings = received
+            .lock()
+            .iter()
+            .filter(|frame| frame["type"] == "ping")
+            .count();
+        assert_eq!(
+            pings, 1,
+            "the other connection received its ping while the blocked sink held"
+        );
+        release.wait();
+        blocked.join().expect("the blocked send_to returns");
+        other.join().expect("the other send_to returns");
+    }
+
+    #[test]
+    fn a_blocked_sink_does_not_block_broadcast_for_another_connection() {
+        let registry = std::sync::Arc::new(ConnectionRegistry::new());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let sink_release = std::sync::Arc::clone(&release);
+        let blocked_sink: FrameSink = std::sync::Arc::new(move |_| {
+            let _ = entered_tx.send(());
+            sink_release.wait();
+        });
+        let _id_blocked = registry.connect(blocked_sink);
+        let received = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let sink_received = std::sync::Arc::clone(&received);
+        let id_other = registry.connect(std::sync::Arc::new(move |frame| {
+            sink_received.lock().push(frame);
+        }));
+
+        let registry_bg = std::sync::Arc::clone(&registry);
+        let blocked = std::thread::spawn(move || {
+            registry_bg.broadcast(serde_json::json!({ "type": "pty-data" }));
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the blocked sink must be entered");
+        registry.send_to(&id_other, serde_json::json!({ "type": "ping" }));
+        // The broadcast may reach this connection before or after the blocked
+        // sink (the registry's iteration order is unspecified), so count the
+        // ping: it can only have been delivered if the blocked sink released
+        // the registry.
+        let pings = received
+            .lock()
+            .iter()
+            .filter(|frame| frame["type"] == "ping")
+            .count();
+        assert_eq!(
+            pings, 1,
+            "the other connection was served while the broadcast was blocked"
+        );
+        release.wait();
+        blocked.join().expect("the blocked broadcast returns");
+    }
+
+    #[test]
+    fn a_sink_may_reenter_the_registry_without_deadlocking() {
+        let registry = std::sync::Arc::new(ConnectionRegistry::new());
+        let received = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let sink_received = std::sync::Arc::clone(&received);
+        let id_inner = registry.connect(std::sync::Arc::new(move |frame| {
+            sink_received.lock().push(frame);
+        }));
+        let registry_inner = std::sync::Arc::clone(&registry);
+        let id_outer = registry.connect(std::sync::Arc::new(move |_| {
+            // Re-entering send_to from inside a sink must not deadlock: the
+            // connections lock is not held while sinks run.
+            registry_inner.send_to(&id_inner, serde_json::json!({ "type": "inner" }));
+        }));
+        registry.send_to(&id_outer, serde_json::json!({ "type": "outer" }));
+        assert_eq!(received.lock().len(), 1);
     }
 
     #[test]

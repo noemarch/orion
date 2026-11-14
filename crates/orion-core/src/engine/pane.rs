@@ -460,7 +460,7 @@ impl Pane {
 
     /// A chat read: the recent rows, with soft-wrapped rows optionally rejoined.
     pub fn read(&self, lines: usize, unwrapped: bool) -> (String, bool, u64) {
-        let state = self.state.lock();
+        let mut state = self.state.lock();
         let (text, truncated) = state.screen.read_recent(lines, unwrapped);
         (text, truncated, state.screen.revision())
     }
