@@ -187,7 +187,9 @@ impl RuntimeClient {
 
         match receiver.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(frame) => Ok(frame),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err("runtime did not answer in time".to_string()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err("runtime did not answer in time".to_string())
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err("connection closed".to_string()),
         }
     }
@@ -246,7 +248,10 @@ impl Runtime for RuntimeClient {
         let body = answer.get("body").cloned().unwrap_or(Value::Null);
 
         if method == "GET" {
-            self.inner.http_cache.lock().insert(cache_key, (status, body.clone(), std::time::Instant::now()));
+            self.inner
+                .http_cache
+                .lock()
+                .insert(cache_key, (status, body.clone(), std::time::Instant::now()));
         } else {
             // Mutations invalidate the cache.
             self.inner.http_cache.lock().clear();
