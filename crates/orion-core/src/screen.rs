@@ -10,6 +10,8 @@ use std::num::NonZeroU16;
 
 use serde_json::{json, Value};
 
+use crate::terminal_engine::FindMatch;
+
 /// History rows kept per pane. A busy agent can emit hundreds of thousands of rows; the ring
 /// keeps the recent ones and drops the oldest without touching the visible screen.
 pub const SCROLLBACK_ROWS: usize = 10_000;
@@ -104,8 +106,16 @@ impl ScreenState {
 
     /// Feeds decoded text to the grid. Returns the new revision.
     pub fn process(&mut self, text: &str) -> u64 {
+        self.process_bytes(text.as_bytes())
+    }
+
+    /// Feeds raw bytes from the PTY to the grid. Returns the new revision.
+    ///
+    /// The bytes go to the parser as they are: a multi-byte character split
+    /// across two reads is the parser's business, not the caller's.
+    pub fn process_bytes(&mut self, bytes: &[u8]) -> u64 {
         let at_capacity = self.scrollback_len() >= SCROLLBACK_ROWS;
-        self.parser.process(text.as_bytes());
+        self.parser.process(bytes);
         self.revision += 1;
         // Conservative: any mutation while the ring is full may have dropped rows. vt100 keeps
         // no public dropped-row counter, so callers must assume content coordinates shifted.
@@ -339,6 +349,20 @@ impl ScreenState {
     /// searched.
     // PERF: full-ring clone, O(scrollback); the cap truncates to the newest FIND_MAX_ROWS rows
     pub fn find(&mut self, query: &str, limit: usize) -> Vec<Value> {
+        self.find_matches(query, limit)
+            .into_iter()
+            .map(|found| {
+                json!({
+                    "start": { "row": found.start_row, "col": found.start_col },
+                    "end": { "row": found.end_row, "col": found.end_col },
+                })
+            })
+            .collect()
+    }
+
+    /// The same matches as [`ScreenState::find`], in typed content coordinates.
+    // PERF: full-ring clone, O(scrollback); the cap truncates to the newest FIND_MAX_ROWS rows
+    pub fn find_matches(&mut self, query: &str, limit: usize) -> Vec<FindMatch> {
         if query.is_empty() {
             return Vec::new();
         }
@@ -410,16 +434,18 @@ fn collect_matches(
     query: &str,
     row: usize,
     limit: usize,
-    matches: &mut Vec<Value>,
+    matches: &mut Vec<FindMatch>,
 ) {
     let mut from = 0usize;
     while let Some(found) = haystack[from..].find(query) {
         let start = from + found;
         let end = start + query.len();
-        matches.push(json!({
-            "start": { "row": row, "col": start },
-            "end": { "row": row, "col": end.saturating_sub(1) },
-        }));
+        matches.push(FindMatch {
+            start_row: row,
+            start_col: start,
+            end_row: row,
+            end_col: end.saturating_sub(1),
+        });
         if matches.len() >= limit {
             return;
         }

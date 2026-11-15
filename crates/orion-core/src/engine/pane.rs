@@ -654,110 +654,11 @@ fn status_after_exit(code: i32) -> AgentStatus {
 }
 
 /// Encodes one logical key chord into the bytes a terminal receives.
+///
+/// The encoding lives with the emulator, so the shell and the pane agree on
+/// what a chord means.
 fn encode_key(key: &str) -> String {
-    let mut ctrl = false;
-    let mut alt = false;
-    let mut shift = false;
-    let mut name = key;
-    loop {
-        let lowered = name.to_ascii_lowercase();
-        if let Some(rest) = lowered.strip_prefix("ctrl+") {
-            ctrl = true;
-            name = &name[name.len() - rest.len()..];
-        } else if let Some(rest) = lowered.strip_prefix("alt+") {
-            alt = true;
-            name = &name[name.len() - rest.len()..];
-        } else if let Some(rest) = lowered.strip_prefix("shift+") {
-            shift = true;
-            name = &name[name.len() - rest.len()..];
-        } else {
-            break;
-        }
-    }
-
-    let modifier = 1 + i32::from(shift) + 2 * i32::from(alt) + 4 * i32::from(ctrl);
-    let lowered = name.to_ascii_lowercase();
-    // Shift+Tab is its own sequence (CSI Z), not a modified Tab.
-    if lowered == "tab" && shift && !ctrl && !alt {
-        return "\x1b[Z".to_string();
-    }
-    let special = match lowered.as_str() {
-        "up" => Some("\x1b[A".to_string()),
-        "down" => Some("\x1b[B".to_string()),
-        "right" => Some("\x1b[C".to_string()),
-        "left" => Some("\x1b[D".to_string()),
-        "home" => Some("\x1b[H".to_string()),
-        "end" => Some("\x1b[F".to_string()),
-        "pageup" => Some("\x1b[5~".to_string()),
-        "pagedown" => Some("\x1b[6~".to_string()),
-        "insert" => Some("\x1b[2~".to_string()),
-        "delete" => Some("\x1b[3~".to_string()),
-        "backtab" => Some("\x1b[Z".to_string()),
-        "backspace" => Some("\x7f".to_string()),
-        "enter" | "return" => Some("\r".to_string()),
-        "tab" => Some("\t".to_string()),
-        "esc" | "escape" => Some("\x1b".to_string()),
-        "space" => Some(" ".to_string()),
-        "plus" => Some("+".to_string()),
-        _ => {
-            if let Some(digit) = lowered.strip_prefix('f') {
-                if let Ok(number) = digit.parse::<u8>() {
-                    if (1..=12).contains(&number) {
-                        let code = match number {
-                            1..=4 => format!("\x1b[{}~", 10 + number),
-                            5 => "\x1b[15~".to_string(),
-                            6..=10 => format!("\x1b[{}~", 16 + number),
-                            _ => format!("\x1b[{}~", 22 + number),
-                        };
-                        Some(code)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-    };
-
-    if let Some(sequence) = special {
-        if modifier == 1 {
-            return sequence;
-        }
-        if sequence.starts_with("\x1b[") && sequence.ends_with('~') {
-            let inner = &sequence[2..sequence.len() - 1];
-            return format!("\x1b[{inner};{modifier}~");
-        }
-        if sequence.len() == 3 && sequence.starts_with("\x1b[") {
-            let final_byte = &sequence[2..];
-            return format!("\x1b[1;{modifier}{final_byte}");
-        }
-        if alt && sequence.len() == 1 {
-            return format!("\x1b{sequence}");
-        }
-        return sequence;
-    }
-
-    // A literal character.
-    if name.chars().count() == 1 {
-        let ch = name.chars().next().unwrap_or(' ');
-        if ctrl {
-            let upper = ch.to_ascii_uppercase();
-            if upper.is_ascii_alphabetic() || "@[\\]^_".contains(upper) {
-                let code = (upper as u8) & 0x1f;
-                let text = char::from(code).to_string();
-                return if alt { format!("\x1b{text}") } else { text };
-            }
-        }
-        return if alt {
-            format!("\x1b{name}")
-        } else {
-            name.to_string()
-        };
-    }
-    String::new()
+    crate::terminal_engine::encode_chord(key).unwrap_or_default()
 }
 
 /// The path a pane was started in, for a caller that kept only the pane id.

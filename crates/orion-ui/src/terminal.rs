@@ -25,7 +25,8 @@ use gpui::{
     UnderlineStyle, WhiteSpace, Window,
 };
 use orion_core::runtime::PaneHandle;
-use orion_core::screen::{ScreenState, TermCell, TermColor};
+use orion_core::screen::ScreenState;
+use orion_core::terminal_engine::{new_engine, Key, TerminalEngine, TermCell, TermColor};
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -443,7 +444,7 @@ const FIND_DEBOUNCE_MS: u64 = 150;
 const PLACEHOLDER_TICK_MS: u64 = 100;
 
 pub struct TerminalPane {
-    screen: ScreenState,
+    screen: Box<dyn TerminalEngine>,
     focus_handle: FocusHandle,
     pane: Option<Arc<dyn PaneHandle>>,
     // Sticky modifiers (web key-bar semantics: consumed by the next key press).
@@ -544,7 +545,7 @@ impl TerminalPane {
     pub fn new(cx: &mut Context<Self>) -> Self {
         orion_core::trace::record(orion_core::trace::Event::TerminalViewCreated);
         Self {
-            screen: ScreenState::new(32, 120),
+            screen: new_engine(32, 120),
             focus_handle: cx.focus_handle(),
             pane: None,
             sticky_ctrl: false,
@@ -602,7 +603,7 @@ impl TerminalPane {
             .as_ref()
             .is_none_or(|current| current.id() != pane.id());
         if changed {
-            self.screen = ScreenState::new(self.last_rows, self.last_cols);
+            self.screen = new_engine(self.last_rows, self.last_cols);
             self.cached_viewport_revision = 0;
             self.cached_viewport_offset = 0;
             self.cached_viewport_cells.clear();
@@ -764,7 +765,7 @@ impl TerminalPane {
         if !self.saw_output && text.chars().any(|character| !character.is_whitespace()) {
             self.saw_output = true;
         }
-        self.screen.process(text);
+        self.screen.write_output(text.as_bytes());
         adjust_selection_after_feed(
             &mut self.sel_anchor,
             &mut self.sel_cursor,
@@ -805,8 +806,17 @@ impl TerminalPane {
     }
 
     fn send_chord(&self, chord: &str) {
+        // The chord is encoded by the engine, not by the pane: the emulator
+        // owns what a key means, and the bytes go to the PTY as they are.
+        let bytes = self.screen.encode_key(&Key::Chord(chord.to_string()));
+        if bytes.is_empty() {
+            return;
+        }
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return;
+        };
         if let Some(pane) = &self.pane {
-            let _ = pane.keys(&[chord.to_string()]);
+            let _ = pane.write(text);
         }
     }
 
@@ -957,12 +967,12 @@ impl TerminalPane {
             .screen
             .find(&self.find_query, 1024)
             .iter()
-            .map(|m| {
+            .map(|found| {
                 (
-                    m["start"]["row"].as_u64().unwrap_or(0) as usize,
-                    m["start"]["col"].as_u64().unwrap_or(0) as usize,
-                    m["end"]["row"].as_u64().unwrap_or(0) as usize,
-                    m["end"]["col"].as_u64().unwrap_or(0) as usize,
+                    found.start_row,
+                    found.start_col,
+                    found.end_row,
+                    found.end_col,
                 )
             })
             .collect();
@@ -1042,7 +1052,8 @@ impl TerminalPane {
         let base = self.screen.scrollback_len().saturating_sub(offset);
         self.cached_viewport_cells = self
             .screen
-            .viewport_cells(offset)
+            .snapshot(offset)
+            .rows
             .into_iter()
             .enumerate()
             .map(|(index, cells)| (base + index, cells))
@@ -1302,7 +1313,7 @@ impl Render for TerminalPane {
             self.last_rows = rows;
             // The grid follows the box at once; the agent is told after the
             // debounce, so a drag does not flood it with resizes.
-            self.screen.resize(rows, cols);
+            self.screen.resize(cols, rows);
             // An observing view follows its own box but never resizes the PTY
             // it shares: the agent keeps the size the owning view gave it.
             // An observing view follows its own box but never resizes the PTY
