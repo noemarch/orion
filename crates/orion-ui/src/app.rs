@@ -178,12 +178,33 @@ const SPLIT_CONNECTION: &str = "gpu-terminal-split";
 /// How often the status line is refreshed from the pane.
 const STATUS_POLL_MS: u64 = 500;
 
+/// The sink the terminal lens attaches a pane with, and the channel it feeds.
+///
+/// The sink runs on the PTY reader thread, so it can only push into a
+/// channel; the pump drains that channel, feeds the grid, and notifies the
+/// view so GPUI repaints. The sender blocks when the pump falls behind: that
+/// is the intended backpressure on the reader thread, and it never touches the
+/// UI thread.
+pub fn pty_sink() -> (flume::Receiver<String>, FrameSink) {
+    let (pty_tx, pty_rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
+    let sink: FrameSink = Arc::new(move |frame: Value| {
+        if frame["type"] == "pty-data" {
+            if let Some(data) = frame["data"].as_str() {
+                // Blocks the PTY reader thread when the pump falls behind;
+                // that is the intended backpressure.
+                let _ = pty_tx.send(data.to_string());
+            }
+        }
+    });
+    (pty_rx, sink)
+}
+
 /// The PTY output pump shared by the main pane attach and the focused
 /// runtime terminal. Drains the channel in 64 KiB ticks so a flood of output
 /// does not block the UI thread for the whole chunk, feeds the grid, and
 /// notifies only when the screen revision changed. A newer attach bumps
 /// `attach_generation`, which stops this pump from feeding.
-fn spawn_pty_pump(
+pub fn spawn_pty_pump(
     terminal_pane: Entity<TerminalPane>,
     pty_rx: flume::Receiver<String>,
     generation: Arc<AtomicU64>,
@@ -250,16 +271,7 @@ fn attach_split_terminal(
     // The split's own channel and pump: the split's output must not reach
     // the main pane's grid, and its backpressure must not stall the main
     // pane's reader.
-    let (pty_tx, pty_rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
-    let sink: FrameSink = Arc::new(move |frame: Value| {
-        if frame["type"] == "pty-data" {
-            if let Some(data) = frame["data"].as_str() {
-                // Blocks the PTY reader thread when the pump falls behind;
-                // that is the intended backpressure.
-                let _ = pty_tx.send(data.to_string());
-            }
-        }
-    });
+    let (pty_rx, sink) = pty_sink();
     if pane
         .attach(SPLIT_CONNECTION, sink, Role::Interact, 120, 32, true)
         .is_err()
@@ -362,7 +374,10 @@ impl OrionApp {
         // Without a runtime of its own the shell keeps the engine in this
         // process, and the reader is told the terminals will not survive it.
         let (engine, notice) = match runtime {
-            Some(engine) => (engine, None),
+            Some(engine) => {
+                orion_core::trace::record(orion_core::trace::Event::BackendConnected);
+                (engine, None)
+            }
             None => (
                 Arc::new(Engine::new()) as Arc<dyn Runtime>,
                 Some(
@@ -487,6 +502,11 @@ impl OrionApp {
     fn open_default_workspace(&mut self, cx: &mut App) {
         let cwd = std::env::current_dir().unwrap_or_default();
         let body = json!({ "cwd": cwd.to_string_lossy(), "agent": { "kind": "claude" } });
+        orion_core::trace::begin();
+        orion_core::trace::record_with(
+            orion_core::trace::Event::WorkspaceOpenClicked,
+            Some(format!("claude in {}", cwd.to_string_lossy())),
+        );
         let response = self.call_route("/api/workspace/create", &body);
         self.workspace_sidebar
             .update(cx, |view, _cx| view.refresh());
@@ -524,16 +544,7 @@ impl OrionApp {
         // The attach sink runs on the PTY reader thread, so it can only push
         // into a channel; the async task below drains that channel, feeds the
         // grid, and notifies the view so GPUI repaints.
-        let (pty_tx, pty_rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
-        let sink: FrameSink = Arc::new(move |frame: Value| {
-            if frame["type"] == "pty-data" {
-                if let Some(data) = frame["data"].as_str() {
-                    // Blocks the PTY reader thread when the pump falls
-                    // behind; that is the intended backpressure.
-                    let _ = pty_tx.send(data.to_string());
-                }
-            }
-        });
+        let (pty_rx, sink) = pty_sink();
         if pane
             .attach("gpu-terminal", sink, Role::Interact, 120, 32, false)
             .is_err()
@@ -638,6 +649,7 @@ impl OrionApp {
             // The terminal takes the keyboard too: the reader's keystrokes go
             // to the agent without a click first.
             Lens::Terminal => {
+                orion_core::trace::record(orion_core::trace::Event::TerminalTabSelected);
                 self.terminal_pane.update(cx, |view, _cx| view.take_focus());
             }
             Lens::Changes => {}
@@ -664,16 +676,7 @@ impl OrionApp {
                 // id. The Terminal Lens takes it; the chat keeps its own pane,
                 // because a runtime terminal has no conversation to read.
                 if let Some(pane) = self.engine.pane_by_id(id.as_str()) {
-                    let (pty_tx, pty_rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
-                    let sink: FrameSink = Arc::new(move |frame: Value| {
-                        if frame["type"] == "pty-data" {
-                            if let Some(data) = frame["data"].as_str() {
-                                // Blocks the PTY reader thread when the pump
-                                // falls behind; intended backpressure.
-                                let _ = pty_tx.send(data.to_string());
-                            }
-                        }
-                    });
+                    let (pty_rx, sink) = pty_sink();
                     if pane
                         .attach("gpu-terminal", sink, Role::Interact, 120, 32, false)
                         .is_ok()
@@ -905,7 +908,10 @@ impl OrionApp {
             .gap(px(8.0))
             .h(px(40.0))
             .px_3()
-            .max_w(px(420.0))
+            // The row is as wide as the column: a capped width left the rest
+            // of the line unpainted, which showed the window's own background
+            // as a black strip beside the buttons.
+            .w_full()
             .bg(theme.surface_panel)
             .child(
                 div()
@@ -999,24 +1005,22 @@ impl OrionApp {
                     })),
             )
             .child(
-                div().flex_1().flex().flex_row().justify_end().child(
-                    div()
-                        .id("settings-button")
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .bg(theme.surface_elevated)
-                        .text_color(theme.text)
-                        .child("Settings")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let settings = this.settings.clone();
-                            settings.update(cx, |view, cx| {
-                                view.set_open(true);
-                                cx.notify();
-                            });
+                div()
+                    .id("settings-button")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme.surface_elevated)
+                    .text_color(theme.text)
+                    .child("Settings")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let settings = this.settings.clone();
+                        settings.update(cx, |view, cx| {
+                            view.set_open(true);
                             cx.notify();
-                        })),
-                ),
+                        });
+                        cx.notify();
+                    })),
             )
     }
 
@@ -1235,6 +1239,26 @@ impl Render for OrionApp {
         self.focused_pane = focused_pane;
         if let Some(pane_id) = self.focused_pane.clone() {
             self.attach_pane(cx, &pane_id);
+            // The terminal's placeholder names the agent: "Starting Claude
+            // Code… (2.4s)" says far more than a blank grid.
+            let agent_label = self.workspace_sidebar.update(cx, |view, _cx| {
+                view.snapshot()
+                    .and_then(|snapshot| {
+                        snapshot
+                            .get("panes")
+                            .and_then(Value::as_array)
+                            .and_then(|panes| {
+                                panes.iter().find(|pane| {
+                                    pane.get("pane_id").and_then(Value::as_str) == Some(&pane_id)
+                                })
+                            })
+                            .and_then(|pane| pane.get("display_agent").and_then(Value::as_str))
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "the agent".to_string())
+            });
+            self.terminal_pane
+                .update(cx, |view, _cx| view.set_agent_label(&agent_label));
         }
 
         // The Changes lens' 2s polls run only while it is active; views are
@@ -1528,6 +1552,9 @@ impl Render for OrionApp {
                             .id("command-notice")
                             .px_3()
                             .py_1()
+                            // The notice sits on the column's own background:
+                            // without one it shows the window's black.
+                            .bg(Theme::current().surface_panel)
                             .text_size(px(11.0))
                             .text_color(Theme::current().indicator_blocked)
                             .child(message)
@@ -1570,6 +1597,8 @@ pub fn run() {
         )
         .unwrap();
     });
+    // The startup timeline, when the reader asked for one.
+    orion_core::trace::print_report();
 }
 
 #[cfg(test)]

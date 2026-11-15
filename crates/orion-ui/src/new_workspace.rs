@@ -245,6 +245,11 @@ impl NewWorkspaceModal {
             return;
         }
         let body = json!({ "cwd": self.cwd, "agent": { "kind": kind } });
+        orion_core::trace::begin();
+        orion_core::trace::record_with(
+            orion_core::trace::Event::WorkspaceOpenClicked,
+            Some(format!("{kind} in {}", self.cwd)),
+        );
         let (status, response) = engine.http("POST", "/api/workspace/create", &body);
         if status != 200 {
             self.error = Some(error_message(

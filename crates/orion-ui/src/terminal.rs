@@ -439,6 +439,9 @@ impl FindDebouncer {
 
 const FIND_DEBOUNCE_MS: u64 = 150;
 
+/// How often the "Starting …" placeholder redraws its elapsed seconds.
+const PLACEHOLDER_TICK_MS: u64 = 100;
+
 pub struct TerminalPane {
     screen: ScreenState,
     focus_handle: FocusHandle,
@@ -515,10 +518,31 @@ pub struct TerminalPane {
     /// Per-row scratch for `cell_runs`, reused across rows and frames so a
     /// steady-state frame does not rebuild the column-span or run buffers.
     cell_scratch: CellScratch,
+    /// Whether the child has written anything the reader could see. The
+    /// placeholder uses it to tell "still starting" from "running".
+    saw_output: bool,
+    /// Whether the grid showed readable content on the last frame. The
+    /// placeholder uses it, and the startup timeline marks the first frame
+    /// that had something on it.
+    grid_has_content: bool,
+    /// The agent the grid belongs to, in the reader's words ("Claude Code").
+    /// The placeholder names it, so a slow agent reads as starting rather
+    /// than as a frozen window.
+    agent_label: String,
+    /// When the pane was attached: the placeholder counts from here.
+    started_at: Instant,
+    /// Whether the placeholder's ticker is already running.
+    placeholder_ticking: bool,
+    /// Whether the startup timeline already marked the first frame with
+    /// content.
+    nonempty_traced: bool,
+    /// Whether the startup timeline already marked the first resize.
+    resize_traced: bool,
 }
 
 impl TerminalPane {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        orion_core::trace::record(orion_core::trace::Event::TerminalViewCreated);
         Self {
             screen: ScreenState::new(32, 120),
             focus_handle: cx.focus_handle(),
@@ -559,6 +583,13 @@ impl TerminalPane {
             cell_runs_calls: 0,
             status_line: "starting agent…".to_string(),
             cell_scratch: CellScratch::default(),
+            saw_output: false,
+            grid_has_content: false,
+            nonempty_traced: false,
+            agent_label: "the agent".to_string(),
+            started_at: Instant::now(),
+            placeholder_ticking: false,
+            resize_traced: false,
         }
     }
 
@@ -581,8 +612,18 @@ impl TerminalPane {
             self.sel_anchor = None;
             self.sel_cursor = None;
             self.status_line = "starting agent…".to_string();
+            // A new pane is a new agent: the placeholder counts from here.
+            self.started_at = Instant::now();
+            self.grid_has_content = false;
         }
         self.pane = Some(pane);
+    }
+
+    /// The agent's name, in the reader's words. The placeholder names it.
+    pub fn set_agent_label(&mut self, label: &str) {
+        if self.agent_label != label {
+            self.agent_label = label.to_string();
+        }
     }
     /// Drive the key bar from saved settings (P4: replaces the static bar
     /// layout with `Preferences.keyBarExtras`).
@@ -654,12 +695,21 @@ impl TerminalPane {
     }
 
     /// Send a size to the agent's PTY.
-    fn send_resize(&self, cols: u16, rows: u16) {
+    fn send_resize(&mut self, cols: u16, rows: u16) {
         if let Some(pane) = &self.pane {
             let _ = pane.resize(cols, rows);
         }
+        if !self.resize_traced {
+            self.resize_traced = true;
+            let (grid_rows, grid_cols) = self.screen.size();
+            orion_core::trace::record_with(
+                orion_core::trace::Event::FirstResizeApplied,
+                Some(format!(
+                    "pty {cols}x{rows}, grid {grid_cols}x{grid_rows}"
+                )),
+            );
+        }
     }
-
     /// The cell the grid draws with, when the font has been measured.
     fn cell(&self) -> Option<CellSize> {
         self.font.as_ref().map(|font| font.cell)
@@ -671,10 +721,49 @@ impl TerminalPane {
         self.focus_wanted = true;
     }
 
+    /// Keep the placeholder's clock moving.
+    ///
+    /// The elapsed seconds are drawn from the clock, so the frame has to come
+    /// again while the placeholder is up. One ticker runs at a time and stops
+    /// as soon as the grid has something on it.
+    fn keep_placeholder_ticking(&mut self, cx: &mut Context<Self>) {
+        if self.placeholder_ticking {
+            return;
+        }
+        self.placeholder_ticking = true;
+        cx.spawn(async move |weak, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(PLACEHOLDER_TICK_MS))
+                    .await;
+                let keep_ticking = cx
+                    .update(|app| {
+                        weak.update(app, |view, cx| {
+                            if view.grid_has_content {
+                                view.placeholder_ticking = false;
+                                return false;
+                            }
+                            cx.notify();
+                            true
+                        })
+                        .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if !keep_ticking {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Feed a chunk of PTY text into the grid.
     pub fn feed(&mut self, text: &str) {
         #[cfg(debug_assertions)]
         let feed_started = Instant::now();
+        if !self.saw_output && text.chars().any(|character| !character.is_whitespace()) {
+            self.saw_output = true;
+        }
         self.screen.process(text);
         adjust_selection_after_feed(
             &mut self.sel_anchor,
@@ -685,6 +774,13 @@ impl TerminalPane {
         crate::perf::record_feed(feed_started.elapsed());
         // The reader's scroll position is theirs: the parser always reads the
         // live screen, and only the live bottom follows the new output.
+    }
+
+    /// Whether the grid shows anything the reader can read. Bytes alone do
+    /// not count: the attachment replays the screen as escape sequences, so
+    /// "something arrived" says nothing about "something is there".
+    pub fn has_content(&self) -> bool {
+        !self.screen.visible_text().trim().is_empty()
     }
 
     /// The current screen revision, so callers can tell whether feeding changed anything.
@@ -1242,6 +1338,11 @@ impl Render for TerminalPane {
         let revision = self.screen.revision();
         let find_revision = self.find_revision;
         let rows_v = self.viewport_cells();
+        // Whether the grid shows anything the reader can read. The rows are
+        // already in hand, so this costs nothing.
+        let grid_has_content = rows_v
+            .iter()
+            .any(|(_, cells)| cells.iter().any(|cell| !cell.text.trim().is_empty()));
 
         // The reader's selection, in content coordinates.
         let sel = match (self.sel_anchor, self.sel_cursor) {
@@ -1315,6 +1416,7 @@ impl Render for TerminalPane {
         self.cell_scratch = scratch;
         self.row_cache = row_cache;
         self.cell_runs_calls += cell_runs_calls;
+        self.grid_has_content = grid_has_content;
 
         // Scrollbar thumb geometry (visual; wheel is the primary control).
         let grid_height = bounds
@@ -1571,6 +1673,7 @@ impl Render for TerminalPane {
             .flex_col()
             .w_full()
             .overflow_hidden()
+            .relative()
             .on_children_prepainted(move |bounds, _window, _cx| {
                 if let Some(bounds) = bounds.first() {
                     grid_bounds.set(Some(*bounds));
@@ -1579,6 +1682,34 @@ impl Render for TerminalPane {
             .id("grid")
             .debug_selector(|| "grid".to_string())
             .child(rows_column);
+        // The placeholder: an agent that is slow to say anything must not look
+        // like a frozen window. It counts the seconds since the pane was
+        // attached and goes away with the first real output.
+        let starting = self.pane.is_some() && !self.grid_has_content;
+        let grid = if starting {
+            let elapsed = self.started_at.elapsed().as_secs_f32();
+            grid.child(
+                div()
+                    .id("terminal-starting")
+                    .debug_selector(|| "terminal-starting".to_string())
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme.text_dim)
+                    .text_size(px(13.0))
+                    .child(format!(
+                        "Starting {}… ({elapsed:.1}s)",
+                        self.agent_label
+                    )),
+            )
+        } else {
+            grid
+        };
+        if starting {
+            self.keep_placeholder_ticking(cx);
+        }
         let grid = match cursor {
             Some(cursor) => grid.child(cursor),
             None => grid,
@@ -1669,6 +1800,11 @@ impl Render for TerminalPane {
             .child(find_bar)
             .child(key_bar)
             .child(status_bar);
+        orion_core::trace::count_repaint();
+        if self.grid_has_content && !self.nonempty_traced {
+            self.nonempty_traced = true;
+            orion_core::trace::record(orion_core::trace::Event::FirstNonemptyFramePainted);
+        }
         #[cfg(debug_assertions)]
         crate::perf::record_frame(frame_started.elapsed());
         pane
