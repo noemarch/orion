@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-666666?labelColor=333333" alt="MIT license"></a>
-  <a href="#desktop-app"><img src="https://img.shields.io/badge/Tauri-v2-blue?logo=tauri&labelColor=222222" alt="Tauri v2"></a>
+  <a href="#desktop-app"><img src="https://img.shields.io/badge/desktop-GPUI%20%7C%20pure%20Rust-blue?labelColor=222222" alt="GPUI, pure Rust"></a>
   <a href="#supported-agents"><img src="https://img.shields.io/badge/agents-Claude%20%7C%20Codex%20%7C%20Agy%20%7C%20OpenCode-emerald?labelColor=222222" alt="Supported Agents"></a>
   <a href="#mobile-remote"><img src="https://img.shields.io/badge/companion-PWA%20%2B%20Tailscale-purple?labelColor=222222" alt="Mobile PWA"></a>
 </p>
@@ -20,7 +20,7 @@ Orion is a standalone, local-first control center for autonomous and interactive
 
 Orion brings the best concepts of modern agent tooling together into an independent, high-performance architecture:
 - **Zero Daemon Dependencies:** Does not depend on external terminal multiplexers. Orion natively allocates PTYs and supervises processes using Rust.
-- **Tauri v2 Desktop App:** Lightweight native desktop application for macOS, Windows, and Linux.
+- **Native GPUI Desktop App:** A pure-Rust desktop application for macOS, Windows, and Linux. No web view, no JavaScript, no bundler.
 - **Mobile Companion PWA:** Zero-install mobile client served over your private Tailscale tailnet (`tailscale serve`) or local Wi-Fi with instant QR code pairing.
 - **Bring Your Own Subscriptions:** Works directly with the agent CLIs you already have authenticated (`claude`, `codex`, `opencode`, `cursor`, `grok`, etc.). No extra tokens or subscription markups.
 - **Private & Telemetry-Free:** Your code, transcripts, and credentials never touch a remote SaaS server.
@@ -33,7 +33,7 @@ Orion brings the best concepts of modern agent tooling together into an independ
   <tr>
     <td width="50%" valign="top">
       <b>Dual-Lens: Chat Clarity &amp; Live Terminal</b><br>
-      Reads native agent session records (Claude Code JSONL, Codex rollout, OpenCode SQLite) to render formatted Markdown, syntax-highlighted code, diffs, and math. One click toggles to the raw xterm.js PTY terminal.
+      Reads native agent session records (Claude Code JSONL, Codex rollout, OpenCode SQLite) to render formatted Markdown, syntax-highlighted code, diffs, and math. One click toggles to the live PTY terminal, drawn by the same Rust engine that runs the agents.
     </td>
     <td width="50%" valign="top">
       <b>One-Tap Prompt Approvals</b><br>
@@ -89,10 +89,8 @@ graph LR
     end
 
     subgraph Desktop ["Desktop App"]
-        Tauri["Tauri v2 Shell"]
-        ReactUI1["React 19 + xterm.js"]
-        Tauri --> ReactUI1
-        Tauri <--> Core
+        Gpui["orion-ui (GPUI)"]
+        Gpui <--> Core
     end
 
     subgraph Mobile ["Phone Companion"]
@@ -126,20 +124,19 @@ Orion discovers and orchestrates any installed agent CLI on your `PATH`:
 
 ### 1. Prerequisites
 - **Rust 1.80+** (installed via [rustup](https://rustup.rs))
-- **Bun 1.2+** or **Node.js 20+**
 - At least one authenticated agent CLI on your `PATH` (e.g. `claude`, `codex`, `opencode`)
 
 ### 2. Development Setup
 
-Clone and install dependencies:
+Clone and build:
 ```bash
 cd C:\rust-projects\orion
-bun install
+cargo build --workspace
 ```
 
-Run in Desktop mode (Tauri v2):
+Run the desktop app:
 ```bash
-bun run tauri dev
+cargo run --bin orion-ui
 ```
 
 Run in Headless Server mode (for remote devboxes or Tailscale):
@@ -159,12 +156,11 @@ cargo run --bin orion -- serve --port 7317
 
 ```
 orion/
-├── crates/orion-core/       # Core Rust engine: PTY, processes, transcripts, Axum
-├── src-tauri/               # Tauri v2 desktop application wrapper
-├── src/                     # React 19 UI: components, xterm.js, chat, diff viewer
+├── crates/orion-core/       # Core Rust engine: PTY, runtime daemon, transcripts, Axum
+├── crates/orion-ui/         # Native GPUI shell: workspace, chat, terminal, diff
+├── docs/                    # Architecture decisions, ADRs, performance records
 ├── PLAN.md                  # Comprehensive engineering roadmap & implementation plan
-├── AGENTS.md                # System invariants, security rules, and contributor guidelines
-└── package.json             # Frontend workspace dependencies and scripts
+└── AGENTS.md                # System invariants, security rules, and contributor guidelines
 ```
 
 ---

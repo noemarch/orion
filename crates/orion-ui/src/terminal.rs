@@ -25,7 +25,6 @@ use gpui::{
     UnderlineStyle, WhiteSpace, Window,
 };
 use orion_core::runtime::PaneHandle;
-use orion_core::screen::ScreenState;
 use orion_core::terminal_engine::{new_engine, Key, TerminalEngine, TermCell, TermColor};
 use std::cell::Cell;
 use std::ops::Range;
@@ -1826,6 +1825,7 @@ impl Render for TerminalPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orion_core::screen::ScreenState;
     use gpui::Entity;
     use gpui::{Keystroke, Modifiers};
 
