@@ -126,7 +126,10 @@ pub trait TerminalEngine {
 }
 
 /// A new engine with an empty grid.
-pub fn new_engine(rows: u16, cols: u16) -> Box<dyn TerminalEngine> {
+///
+/// The order is columns first, rows second: the same order
+/// [`TerminalEngine::resize`] speaks in.
+pub fn new_engine(cols: u16, rows: u16) -> Box<dyn TerminalEngine> {
     Box::new(ScreenState::new(rows, cols))
 }
 
@@ -348,8 +351,9 @@ mod tests {
     #[test]
     fn the_trait_resizes_in_columns_then_rows() {
         let mut engine: Box<dyn TerminalEngine> = Box::new(ScreenState::new(6, 40));
+        // `resize` takes columns first; `size` reports rows first.
         engine.resize(20, 4);
-        assert_eq!(engine.size(), (4, 20), "rows first, then columns");
+        assert_eq!(engine.size(), (4, 20), "the grid is 20 columns by 4 rows");
     }
 
     #[test]

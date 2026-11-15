@@ -518,9 +518,6 @@ pub struct TerminalPane {
     /// Per-row scratch for `cell_runs`, reused across rows and frames so a
     /// steady-state frame does not rebuild the column-span or run buffers.
     cell_scratch: CellScratch,
-    /// Whether the child has written anything the reader could see. The
-    /// placeholder uses it to tell "still starting" from "running".
-    saw_output: bool,
     /// Whether the grid showed readable content on the last frame. The
     /// placeholder uses it, and the startup timeline marks the first frame
     /// that had something on it.
@@ -544,7 +541,7 @@ impl TerminalPane {
     pub fn new(cx: &mut Context<Self>) -> Self {
         orion_core::trace::record(orion_core::trace::Event::TerminalViewCreated);
         Self {
-            screen: new_engine(32, 120),
+            screen: new_engine(120, 32),
             focus_handle: cx.focus_handle(),
             pane: None,
             sticky_ctrl: false,
@@ -583,7 +580,6 @@ impl TerminalPane {
             cell_runs_calls: 0,
             status_line: "starting agent…".to_string(),
             cell_scratch: CellScratch::default(),
-            saw_output: false,
             grid_has_content: false,
             nonempty_traced: false,
             agent_label: "the agent".to_string(),
@@ -602,7 +598,7 @@ impl TerminalPane {
             .as_ref()
             .is_none_or(|current| current.id() != pane.id());
         if changed {
-            self.screen = new_engine(self.last_rows, self.last_cols);
+            self.screen = new_engine(self.last_cols, self.last_rows);
             self.cached_viewport_revision = 0;
             self.cached_viewport_offset = 0;
             self.cached_viewport_cells.clear();
@@ -757,9 +753,6 @@ impl TerminalPane {
     pub fn feed(&mut self, text: &str) {
         #[cfg(debug_assertions)]
         let feed_started = Instant::now();
-        if !self.saw_output && text.chars().any(|character| !character.is_whitespace()) {
-            self.saw_output = true;
-        }
         self.screen.write_output(text.as_bytes());
         adjust_selection_after_feed(
             &mut self.sel_anchor,

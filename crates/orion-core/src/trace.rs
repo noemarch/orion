@@ -1,8 +1,8 @@
 //! The startup timeline, recorded on one monotonic clock.
 //!
-//! Off by default. `ORION_TRACE=1` turns it on; every other value (including
-//! an unset variable) leaves it off, and an off trace costs one atomic load
-//! per call.
+//! Off by default. `ORION_TRACE=1` turns it on; any other value that is not
+//! a "no" (`0`, `false`, `off`, `no`, empty) turns it on too, and an unset
+//! variable leaves it off. An off trace costs one atomic load per call.
 //!
 //! The timeline answers one question: where did the time go between "the
 //! reader asked for a workspace" and "the terminal painted something"? Every
@@ -89,6 +89,9 @@ pub struct Timeline {
     records: Vec<Record>,
     reads: Vec<ReadSample>,
     repaints: u64,
+    /// When the first frame was painted: the repaint rate is counted from
+    /// there.
+    first_repaint: Option<Instant>,
     /// Bytes read in total, including the reads past the sample cap.
     read_bytes: u64,
 }
@@ -121,6 +124,9 @@ impl Timeline {
     /// Counts one painted frame.
     pub fn count_repaint(&mut self) {
         self.repaints += 1;
+        if self.repaints == 1 {
+            self.first_repaint = Some(Instant::now());
+        }
     }
 
     /// The records, oldest first.
@@ -194,6 +200,15 @@ impl Timeline {
             );
         }
         let _ = writeln!(out, "- frames painted: {}", self.repaints);
+        // The repaint rate: how many frames a second the renderer was asked
+        // for, counted from the first frame.
+        if let Some(first) = self.first_repaint {
+            let elapsed = first.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                let rate = (self.repaints as f64 - 1.0) / elapsed;
+                let _ = writeln!(out, "- repaint rate: {rate:.1} frames/s");
+            }
+        }
         out
     }
 
