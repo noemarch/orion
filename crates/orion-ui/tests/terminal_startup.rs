@@ -152,9 +152,7 @@ fn measure(
     // paint, which is what the shell does: the terminal element is not in the
     // tree while another lens is on screen.
     trace::record(Event::TerminalTabSelected);
-    let (_root, vcx) = cx.add_window_view(move |_, _cx| TerminalRoot {
-        view: view.clone(),
-    });
+    let (_root, vcx) = cx.add_window_view(move |_, _cx| TerminalRoot { view: view.clone() });
     vcx.update(|window, cx| window.draw(cx).clear());
 
     let timeline = trace::snapshot();
@@ -181,7 +179,10 @@ fn measure(
 fn report(measurement: &Measurement) {
     println!("\n=== {} ===", measurement.label);
     println!("{}", measurement.timeline.report());
-    println!("- PTY open + child start: {:.1} ms", measurement.pty_open_ms);
+    println!(
+        "- PTY open + child start: {:.1} ms",
+        measurement.pty_open_ms
+    );
     println!(
         "- the child's own startup (spawn returned -> first byte): {:.1} ms",
         measurement.child_startup_ms
@@ -218,9 +219,7 @@ fn agent_spec() -> Option<(LaunchSpec, &'static str, AgentKind)> {
 }
 
 #[gpui::test]
-fn the_terminal_startup_timeline_separates_the_agent_from_the_app(
-    cx: &mut gpui::TestAppContext,
-) {
+fn the_terminal_startup_timeline_separates_the_agent_from_the_app(cx: &mut gpui::TestAppContext) {
     // The timeline is on whether or not the reader set the variable.
     trace::force_enabled();
     // The pump waits on the channel, so the executor always has a task
@@ -231,7 +230,8 @@ fn the_terminal_startup_timeline_separates_the_agent_from_the_app(
 
     // A throwaway store: the measurement must not disturb the reader's own
     // saved session.
-    let data_dir = std::env::temp_dir().join(format!("orion-startup-timeline-{}", std::process::id()));
+    let data_dir =
+        std::env::temp_dir().join(format!("orion-startup-timeline-{}", std::process::id()));
     std::fs::create_dir_all(&data_dir).expect("a temp data dir");
     let engine = Engine::with_store(orion_core::engine::store::Store::at(data_dir.clone()));
 
@@ -263,7 +263,10 @@ fn the_terminal_startup_timeline_separates_the_agent_from_the_app(
 
     let _ = std::fs::remove_dir_all(&data_dir);
 
-    assert!(!measurements.is_empty(), "at least the control shell must run");
+    assert!(
+        !measurements.is_empty(),
+        "at least the control shell must run"
+    );
     for measurement in &measurements {
         report(measurement);
     }

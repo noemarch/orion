@@ -228,9 +228,7 @@ pub fn spawn_pty_pump(
             }
             let since = last_notify.elapsed();
             if since < FRAME_BUDGET {
-                cx.background_executor()
-                    .timer(FRAME_BUDGET - since)
-                    .await;
+                cx.background_executor().timer(FRAME_BUDGET - since).await;
             }
             let generation = Arc::clone(&generation);
             let _ = cx.update(|cx| {

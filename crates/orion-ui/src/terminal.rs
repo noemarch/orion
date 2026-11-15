@@ -25,7 +25,7 @@ use gpui::{
     UnderlineStyle, WhiteSpace, Window,
 };
 use orion_core::runtime::PaneHandle;
-use orion_core::terminal_engine::{new_engine, Key, TerminalEngine, TermCell, TermColor};
+use orion_core::terminal_engine::{new_engine, Key, TermCell, TermColor, TerminalEngine};
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -704,9 +704,7 @@ impl TerminalPane {
             let (grid_rows, grid_cols) = self.screen.size();
             orion_core::trace::record_with(
                 orion_core::trace::Event::FirstResizeApplied,
-                Some(format!(
-                    "pty {cols}x{rows}, grid {grid_cols}x{grid_rows}"
-                )),
+                Some(format!("pty {cols}x{rows}, grid {grid_cols}x{grid_rows}")),
             );
         }
     }
@@ -731,27 +729,25 @@ impl TerminalPane {
             return;
         }
         self.placeholder_ticking = true;
-        cx.spawn(async move |weak, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(PLACEHOLDER_TICK_MS))
-                    .await;
-                let keep_ticking = cx
-                    .update(|app| {
-                        weak.update(app, |view, cx| {
-                            if view.grid_has_content {
-                                view.placeholder_ticking = false;
-                                return false;
-                            }
-                            cx.notify();
-                            true
-                        })
-                        .unwrap_or(false)
+        cx.spawn(async move |weak, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(PLACEHOLDER_TICK_MS))
+                .await;
+            let keep_ticking = cx
+                .update(|app| {
+                    weak.update(app, |view, cx| {
+                        if view.grid_has_content {
+                            view.placeholder_ticking = false;
+                            return false;
+                        }
+                        cx.notify();
+                        true
                     })
-                    .unwrap_or(false);
-                if !keep_ticking {
-                    break;
-                }
+                    .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if !keep_ticking {
+                break;
             }
         })
         .detach();
@@ -1709,10 +1705,7 @@ impl Render for TerminalPane {
                     .justify_center()
                     .text_color(theme.text_dim)
                     .text_size(px(13.0))
-                    .child(format!(
-                        "Starting {}… ({elapsed:.1}s)",
-                        self.agent_label
-                    )),
+                    .child(format!("Starting {}… ({elapsed:.1}s)", self.agent_label)),
             )
         } else {
             grid
@@ -1825,9 +1818,9 @@ impl Render for TerminalPane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orion_core::screen::ScreenState;
     use gpui::Entity;
     use gpui::{Keystroke, Modifiers};
+    use orion_core::screen::ScreenState;
 
     /// Run `cell_runs` with a fresh scratch and hand back the owned text and
     /// runs, mirroring what the render path moves out of the scratch.

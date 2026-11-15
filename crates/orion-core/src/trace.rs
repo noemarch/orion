@@ -83,7 +83,7 @@ pub struct ReadSample {
 }
 
 /// Everything one timeline holds.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Timeline {
     origin: Option<Instant>,
     records: Vec<Record>,
@@ -158,7 +158,13 @@ impl Timeline {
         out.push_str("|---|---:|---|\n");
         for record in &self.records {
             let detail = record.detail.as_deref().unwrap_or("");
-            let _ = writeln!(out, "| {} | {:.1} | {} |", record.event.name(), record.at, detail);
+            let _ = writeln!(
+                out,
+                "| {} | {:.1} | {} |",
+                record.event.name(),
+                record.at,
+                detail
+            );
         }
         out
     }
@@ -275,15 +281,7 @@ pub fn begin() {
 pub fn snapshot() -> Timeline {
     timeline()
         .lock()
-        .map(|timeline| {
-            let mut copy = Timeline::default();
-            copy.origin = timeline.origin;
-            copy.records = timeline.records.clone();
-            copy.reads = timeline.reads.clone();
-            copy.repaints = timeline.repaints;
-            copy.read_bytes = timeline.read_bytes;
-            copy
-        })
+        .map(|timeline| timeline.clone())
         .unwrap_or_default()
 }
 
@@ -338,7 +336,11 @@ mod tests {
             Event::FirstResizeApplied,
             Event::FirstNonemptyFramePainted,
         ] {
-            assert!(table.contains(event.name()), "{} missing from the table", event.name());
+            assert!(
+                table.contains(event.name()),
+                "{} missing from the table",
+                event.name()
+            );
         }
     }
 
