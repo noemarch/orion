@@ -3,16 +3,20 @@
 //! Compiled out of release builds entirely: every item here is gated on
 //! `debug_assertions`, and the module itself is only registered under the
 //! same cfg in `lib.rs`. Nothing in this file may change behavior — it only
-//! observes `Instant` deltas around `feed()` and `render()`.
+//! observes `Instant` deltas around `feed()`, `render()` and the grid's
+//! `paint()`.
 
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// Per-feed and per-frame deltas, in the order they were recorded.
+/// Per-feed, per-frame and per-paint deltas, in the order they were recorded.
 #[derive(Default)]
 pub struct PerfStats {
     pub feeds: Vec<Duration>,
     pub frames: Vec<Duration>,
+    /// The grid element's `paint()`, the first number that includes real paint
+    /// work rather than only element construction.
+    pub paints: Vec<Duration>,
 }
 
 impl PerfStats {
@@ -20,6 +24,7 @@ impl PerfStats {
         Self {
             feeds: Vec::new(),
             frames: Vec::new(),
+            paints: Vec::new(),
         }
     }
 }
@@ -41,6 +46,15 @@ pub fn record_frame(delta: Duration) {
     }
 }
 
+/// Record one grid `paint()` call's wall time: the background quads, the
+/// shaped text lines and the cursor. The equivalent of Zed's
+/// `Terminal paint: …` debug line.
+pub fn record_paint(delta: Duration) {
+    if let Ok(mut stats) = STATS.lock() {
+        stats.paints.push(delta);
+    }
+}
+
 /// A copy of everything recorded so far.
 pub fn snapshot() -> PerfStats {
     STATS
@@ -48,6 +62,7 @@ pub fn snapshot() -> PerfStats {
         .map(|stats| PerfStats {
             feeds: stats.feeds.clone(),
             frames: stats.frames.clone(),
+            paints: stats.paints.clone(),
         })
         .unwrap_or_default()
 }
@@ -57,6 +72,7 @@ pub fn reset() {
     if let Ok(mut stats) = STATS.lock() {
         stats.feeds.clear();
         stats.frames.clear();
+        stats.paints.clear();
     }
 }
 

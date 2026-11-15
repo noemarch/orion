@@ -16,18 +16,19 @@
 use crate::settings::KeyBarExtras;
 use crate::shell_model::ShellLayout;
 use crate::terminal_font::terminal_font_families;
+use crate::terminal_grid::{
+    build_row, CellScratch, CellSize, GridRow, GridSnapshot, RowCacheKey, RowOverlays, TerminalGrid,
+};
 use crate::theme::Theme;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rems, white, Bounds, ClipboardItem, Context, FocusHandle, FontStyle, FontWeight,
-    HighlightStyle, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Render, Rgba, ScrollWheelEvent, StyledText, TextStyle, TextSystem,
-    UnderlineStyle, WhiteSpace, Window,
+    div, px, rems, white, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent,
+    StyledText, TextStyle, TextSystem, Window,
 };
 use orion_core::runtime::PaneHandle;
-use orion_core::terminal_engine::{new_engine, Key, TermCell, TermColor, TerminalEngine};
+use orion_core::terminal_engine::{new_engine, Key, TermCell, TerminalEngine};
 use std::cell::Cell;
-use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,13 +41,6 @@ const DEFAULT_FONT_PX: f32 = 13.0;
 const TARGET_PX: f32 = 44.0;
 /// Resize requests are debounced this long before reaching the PTY.
 pub const RESIZE_DEBOUNCE_MS: u64 = 50;
-
-/// The size of one character cell, measured from the font that draws it.
-#[derive(Debug, Clone, Copy)]
-struct CellSize {
-    width: f32,
-    height: f32,
-}
 
 /// The terminal's font: the monospace family the grid draws with, and the cell
 /// it measures from that family's real metrics.
@@ -134,274 +128,6 @@ fn measure_terminal_font(
         });
     }
     None
-}
-
-/// The style the grid's rows are drawn in: the measured font, the terminal's
-/// foreground, and no wrapping (a terminal clips a row at its last column, it
-/// does not fold it onto the next line).
-fn grid_style(font: Option<&TerminalFont>, theme: &Theme, font_size: f32) -> TextStyle {
-    TextStyle {
-        color: theme.term_fg.into(),
-        font_family: font
-            .map(|font| font.family.clone())
-            .unwrap_or_default()
-            .into(),
-        font_size: px(font_size).into(),
-        line_height: px(font.map(|font| font.cell.height).unwrap_or(font_size)).into(),
-        white_space: WhiteSpace::Nowrap,
-        ..Default::default()
-    }
-}
-
-/// One line of grid content plus its highlight ranges (byte offsets).
-fn grid_line(
-    text: String,
-    highlights: &[(std::ops::Range<usize>, HighlightStyle)],
-    style: &TextStyle,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .w_full()
-        .overflow_hidden()
-        .child(StyledText::new(text).with_default_highlights(style, highlights.iter().cloned()))
-}
-
-/// How much of the foreground a dim cell keeps: gpui's `fade_out` factor, so
-/// `0.5` paints the foreground half-opaque over the background — a dim the
-/// reader can still read.
-const DIM_FADE: f32 = 0.5;
-
-/// The resolved visual style of one grid cell: the colours the program asked
-/// for, resolved against the theme, with inverse already applied.
-#[derive(Clone, Copy, PartialEq)]
-struct CellStyle {
-    fg: Rgba,
-    bg: Rgba,
-    bold: bool,
-    dim: bool,
-    italic: bool,
-    underline: bool,
-}
-
-/// The colour a cell asked for, as the theme paints it.
-fn term_color(color: TermColor, default: Rgba) -> Rgba {
-    match color {
-        TermColor::Default => default,
-        TermColor::Indexed(index) => crate::theme::xterm_256(index),
-        TermColor::Rgb(red, green, blue) => crate::theme::rgb_color(red, green, blue),
-    }
-}
-
-impl CellStyle {
-    /// The style one cell draws with. Inverse exchanges the two colours after
-    /// they are resolved, so an inverse of the defaults is visible too: the
-    /// cell paints the foreground colour as its background.
-    fn of_cell(cell: &TermCell, theme: &Theme) -> Self {
-        let mut fg = term_color(cell.fg, theme.term_fg);
-        let mut bg = term_color(cell.bg, theme.term_bg);
-        if cell.inverse {
-            std::mem::swap(&mut fg, &mut bg);
-        }
-        Self {
-            fg,
-            bg,
-            bold: cell.bold,
-            dim: cell.dim,
-            italic: cell.italic,
-            underline: cell.underline,
-        }
-    }
-
-    /// Whether the cell draws exactly what the base grid style already paints:
-    /// such cells need no highlight run at all.
-    fn is_plain(&self, theme: &Theme) -> bool {
-        self.fg == theme.term_fg
-            && self.bg == theme.term_bg
-            && !self.bold
-            && !self.dim
-            && !self.italic
-            && !self.underline
-    }
-
-    /// The highlight that paints this style over the base grid style.
-    fn highlight(&self, theme: &Theme) -> HighlightStyle {
-        let mut style = HighlightStyle::default();
-        if self.fg != theme.term_fg {
-            style.color = Some(self.fg.into());
-        }
-        if self.bg != theme.term_bg {
-            style.background_color = Some(self.bg.into());
-        }
-        if self.bold {
-            style.font_weight = Some(FontWeight::BOLD);
-        }
-        if self.italic {
-            style.font_style = Some(FontStyle::Italic);
-        }
-        if self.underline {
-            style.underline = Some(UnderlineStyle {
-                thickness: px(1.0),
-                color: Some(self.fg.into()),
-                wavy: false,
-            });
-        }
-        if self.dim {
-            style.fade_out = Some(DIM_FADE);
-        }
-        style
-    }
-}
-
-/// Per-row scratch reused across rows and frames: the byte span each grid
-/// column occupies in the row's text, the highlight runs, and the text
-/// buffer itself. Cleared and refilled per row; the capacities persist.
-#[derive(Default)]
-struct CellScratch {
-    col_bytes: Vec<(usize, usize)>,
-    runs: Vec<(Range<usize>, HighlightStyle)>,
-    text: String,
-}
-
-/// The overlays a row's cells can carry, in the row's own coordinates: the
-/// reader's selection as an inclusive grid-column span, and the find matches
-/// as byte spans into the row's text.
-#[derive(Default)]
-struct RowOverlays {
-    selection: Option<(usize, usize)>,
-    find: Vec<Range<usize>>,
-}
-
-/// The key a cached row is valid for: the content it was built from, the
-/// scroll offset it was built at, the row's own content coordinates, the
-/// overlays painted on it (the selection span in the row's columns and the
-/// find revision - a counter, not the match count, so same-count-different-
-/// spans still invalidates), and the theme colours the runs were resolved
-/// against.
-#[derive(Clone, PartialEq)]
-struct RowCacheKey {
-    revision: u64,
-    offset: usize,
-    content_row: usize,
-    selection: Option<(usize, usize)>,
-    find_revision: u64,
-    theme_fg: Rgba,
-    theme_bg: Rgba,
-    theme_selection: Rgba,
-    theme_accent: Rgba,
-}
-
-/// One row's rendered text and highlight runs, shared by reference so a
-/// cache hit clones neither the cells nor the runs.
-struct CachedRow {
-    key: RowCacheKey,
-    text: String,
-    runs: Vec<(Range<usize>, HighlightStyle)>,
-}
-
-/// Build one row's text and its highlight runs from the row's cells.
-///
-/// The text is column-aligned: every cell contributes exactly one character (a
-/// space when the cell is empty), except the empty second half of a wide
-/// character, which contributes nothing — the wide character before it already
-/// occupies both columns. Consecutive cells that draw the same way batch into
-/// one run; cells that draw exactly like the base grid style get no run.
-/// The overlays repaint the cells they cover: the selection replaces the
-/// background and keeps the cell's own colours, a find match repaints the
-/// background with the accent and the text with the terminal background, and a
-/// cell under both is painted by the find match (applied last).
-///
-/// The row's text, column spans and runs are written into `scratch`, which
-/// the caller reuses across rows and frames; the capacities persist.
-fn cell_runs(cells: &[TermCell], theme: &Theme, overlays: &RowOverlays, scratch: &mut CellScratch) {
-    scratch.text.clear();
-    scratch.col_bytes.clear();
-    scratch.runs.clear();
-    let text = &mut scratch.text;
-    let col_bytes = &mut scratch.col_bytes;
-    for cell in cells {
-        if cell.wide_continuation {
-            match col_bytes.last().copied() {
-                Some(span) => col_bytes.push(span),
-                // Malformed content: a continuation with no wide character
-                // before it. Render a space rather than panic.
-                None => {
-                    let start = text.len();
-                    text.push(' ');
-                    col_bytes.push((start, text.len()));
-                }
-            }
-            continue;
-        }
-        let start = text.len();
-        if cell.text.is_empty() {
-            text.push(' ');
-        } else {
-            text.push_str(&cell.text);
-        }
-        col_bytes.push((start, text.len()));
-    }
-
-    // The selection's byte span: from the first column's first byte to the
-    // last column's last.
-    let selection = overlays.selection.and_then(|(first, last)| {
-        let last = last.min(col_bytes.len().saturating_sub(1));
-        let first = first.min(last);
-        let start = col_bytes.get(first)?.0;
-        let end = col_bytes.get(last)?.1;
-        (start < end).then_some(start..end)
-    });
-    let runs = &mut scratch.runs;
-    let mut group_start: Option<usize> = None;
-    let mut group_style = CellStyle {
-        fg: theme.term_fg,
-        bg: theme.term_bg,
-        bold: false,
-        dim: false,
-        italic: false,
-        underline: false,
-    };
-    for (cell, (start, _)) in cells.iter().zip(col_bytes.iter()) {
-        let start = *start;
-        if cell.wide_continuation {
-            continue; // no bytes of its own; the wide character's run covers it
-        }
-        let mut style = CellStyle::of_cell(cell, theme);
-        if let Some(span) = &selection {
-            if start >= span.start && start < span.end {
-                style.bg = theme.term_selection;
-            }
-        }
-        // The find matches, clamped to the row's own bytes.
-        for span in overlays.find.iter().filter_map(|span| {
-            let end = span.end.min(text.len());
-            (span.start < end).then_some(span.start..end)
-        }) {
-            if start >= span.start && start < span.end {
-                style.bg = theme.accent;
-                style.fg = theme.term_bg;
-            }
-        }
-        match group_start {
-            Some(_) if style == group_style => {}
-            Some(current) => {
-                if current < start && !group_style.is_plain(theme) {
-                    runs.push((current..start, group_style.highlight(theme)));
-                }
-                group_start = Some(start);
-                group_style = style;
-            }
-            None => {
-                group_start = Some(start);
-                group_style = style;
-            }
-        }
-    }
-    if let Some(group_start) = group_start {
-        if group_start < text.len() && !group_style.is_plain(theme) {
-            runs.push((group_start..text.len(), group_style.highlight(theme)));
-        }
-    }
 }
 
 /// Debounce state for the find bar: a search fires only after `delay` has elapsed since the
@@ -495,27 +221,28 @@ pub struct TerminalPane {
     focus_wanted: bool,
     /// Cached viewport cells, keyed by (revision, scroll offset) so a frame
     /// that paints the same content reuses the allocation instead of walking
-    /// the grid again.
+    /// the grid again. Shared by reference: the grid element holds the same
+    /// allocation, so a frame clones no cells.
     cached_viewport_revision: u64,
     cached_viewport_offset: usize,
-    cached_viewport_cells: Vec<(usize, Vec<TermCell>)>,
+    cached_viewport_cells: Rc<[(usize, Vec<TermCell>)]>,
     /// Bumped on every find-match refresh (and on the empty-query clear), so
     /// the row cache can tell "same match count, different spans" apart.
     find_revision: u64,
     /// Per-row render cache, indexed by visible row. A row whose key matches
     /// (content revision, offset, content row, selection span, find revision,
-    /// theme fingerprint) reuses its text and highlight runs instead of
-    /// re-running `cell_runs`.
-    row_cache: Vec<Option<Rc<CachedRow>>>,
-    /// How many times `cell_runs` ran during renders. Read by tests to prove
-    /// the cache-hit path does not rebuild rows.
-    cell_runs_calls: u64,
+    /// theme fingerprint) reuses its text, styled spans and background spans
+    /// instead of re-running `build_row`.
+    row_cache: Vec<Option<Rc<GridRow>>>,
+    /// How many rows were rebuilt during renders. Read by tests to prove the
+    /// cache-hit path does not rebuild rows.
+    rows_built: u64,
     /// The status line the render path draws. `pane.status()` is a
     /// synchronous socket round-trip on the daemon path (30s timeout), so
     /// render never calls it: the status poller (app.rs) refreshes this
     /// cache off the UI thread and render reads only the cache.
     status_line: String,
-    /// Per-row scratch for `cell_runs`, reused across rows and frames so a
+    /// Per-row scratch for `build_row`, reused across rows and frames so a
     /// steady-state frame does not rebuild the column-span or run buffers.
     cell_scratch: CellScratch,
     /// Whether the grid showed readable content on the last frame. The
@@ -574,10 +301,10 @@ impl TerminalPane {
             focus_wanted: false,
             cached_viewport_revision: 0,
             cached_viewport_offset: 0,
-            cached_viewport_cells: Vec::new(),
+            cached_viewport_cells: Rc::from(Vec::new()),
             find_revision: 0,
             row_cache: Vec::new(),
-            cell_runs_calls: 0,
+            rows_built: 0,
             status_line: "starting agent…".to_string(),
             cell_scratch: CellScratch::default(),
             grid_has_content: false,
@@ -601,7 +328,7 @@ impl TerminalPane {
             self.screen = new_engine(self.last_cols, self.last_rows);
             self.cached_viewport_revision = 0;
             self.cached_viewport_offset = 0;
-            self.cached_viewport_cells.clear();
+            self.cached_viewport_cells = Rc::from(Vec::new());
             self.row_cache.clear();
             self.find_matches.clear();
             self.find_current = None;
@@ -1038,7 +765,7 @@ impl TerminalPane {
             return;
         }
         let base = self.screen.scrollback_len().saturating_sub(offset);
-        self.cached_viewport_cells = self
+        let rows: Vec<(usize, Vec<TermCell>)> = self
             .screen
             .snapshot(offset)
             .rows
@@ -1046,27 +773,154 @@ impl TerminalPane {
             .enumerate()
             .map(|(index, cells)| (base + index, cells))
             .collect();
+        self.cached_viewport_cells = Rc::from(rows);
         self.cached_viewport_revision = revision;
         self.cached_viewport_offset = offset;
     }
 
-    /// Viewport rows of the current content as cells: (content_row, cells) for
-    /// the visible window.
+    /// A handle on the cached viewport rows: (content_row, cells) for the
+    /// visible window. Cloning it clones no cells.
     ///
     /// The rows come from the core's cheap viewport read: it does not clone the
     /// screen or walk the ten-thousand row ring, so the grid can be drawn every
     /// frame. Same rows the plain read gives, with every cell's styling.
     ///
-    /// The returned slice borrows the cache: call `refresh_viewport_cache`
-    /// first, and the frame paints the cached allocation without cloning it.
+    /// Call `refresh_viewport_cache` first; the returned allocation is the one
+    /// the frame paints, and it is only rebuilt when the content or the scroll
+    /// offset changes.
+    fn viewport_rows(&self) -> Rc<[(usize, Vec<TermCell>)]> {
+        Rc::clone(&self.cached_viewport_cells)
+    }
+
+    /// Viewport rows of the current content as cells: (content_row, cells) for
+    /// the visible window.
+    #[cfg(test)]
     fn viewport_cells(&self) -> &[(usize, Vec<TermCell>)] {
         &self.cached_viewport_cells
     }
 
-    /// How many times `cell_runs` has run during renders. Tests use this to
-    /// prove a cache-hit frame does not rebuild rows.
-    pub fn cell_runs_calls(&self) -> u64 {
-        self.cell_runs_calls
+    /// The snapshot the grid element paints this frame: the visible rows with
+    /// their styled runs and background spans, plus the cursor. Built from the
+    /// cached viewport rows; rows whose content, overlays, offset, revision or
+    /// theme fingerprint are unchanged reuse their cached text and runs.
+    fn grid_snapshot(&mut self, theme: Theme, cell: Option<CellSize>, rows: u16) -> GridSnapshot {
+        self.refresh_viewport_cache();
+        // The cached rows are shared, not borrowed: the snapshot the grid
+        // element draws holds the same allocation, so a frame clones no cells.
+        let rows_v = self.viewport_rows();
+        // Whether the grid shows anything the reader can read. The rows are
+        // already in hand, so this costs nothing.
+        let grid_has_content = rows_v
+            .iter()
+            .any(|(_, cells)| cells.iter().any(|cell| !cell.text.trim().is_empty()));
+        // The reader's selection, in content coordinates.
+        let sel = match (self.sel_anchor, self.sel_cursor) {
+            (Some(a), Some(b)) => Some(ordered_selection(a, b)),
+            _ => None,
+        };
+        let offset = self.screen.offset_from_bottom();
+        // Taken out of `self` so the rows can be built while the scratch is
+        // reused across rows; put back after the grid is built.
+        let mut scratch = std::mem::take(&mut self.cell_scratch);
+        let mut row_cache = std::mem::take(&mut self.row_cache);
+        let revision = self.screen.revision();
+        let find_revision = self.find_revision;
+        let mut rows_built = 0u64;
+        let mut grid_rows: Vec<Rc<GridRow>> = Vec::with_capacity(rows_v.len());
+        for (vis_row, (content_row, cells)) in rows_v.iter().enumerate() {
+            let mut overlays = RowOverlays::default();
+            if let Some((a, b)) = sel {
+                if *content_row >= a.0 && *content_row <= b.0 {
+                    let first = if *content_row == a.0 { a.1 } else { 0 };
+                    let last = if *content_row == b.0 {
+                        b.1
+                    } else {
+                        cells.len().saturating_sub(1)
+                    };
+                    overlays.selection = Some((first, last));
+                }
+            }
+            for m in &self.find_matches {
+                if m.0 == *content_row && m.2 == *content_row {
+                    overlays.find.push(m.1..m.3 + 1);
+                }
+            }
+            let key = RowCacheKey {
+                revision,
+                offset,
+                content_row: *content_row,
+                selection: overlays.selection,
+                find_revision,
+                theme_fg: theme.term_fg,
+                theme_bg: theme.term_bg,
+                theme_selection: theme.term_selection,
+                theme_accent: theme.accent,
+            };
+            let cached = row_cache
+                .get(vis_row)
+                .and_then(|slot| slot.as_ref())
+                .filter(|row| row.key == key)
+                .cloned();
+            let row = match cached {
+                Some(row) => row,
+                None => {
+                    rows_built += 1;
+                    let row = Rc::new(build_row(cells, &theme, &overlays, key, &mut scratch));
+                    if row_cache.len() <= vis_row {
+                        row_cache.resize_with(vis_row + 1, || None);
+                    }
+                    row_cache[vis_row] = Some(Rc::clone(&row));
+                    row
+                }
+            };
+            grid_rows.push(row);
+        }
+        self.cell_scratch = scratch;
+        self.row_cache = row_cache;
+        self.rows_built += rows_built;
+        self.grid_has_content = grid_has_content;
+
+        let cursor = match cell {
+            Some(_) => cursor_in_view(offset, self.screen.cursor_position(), rows),
+            None => None,
+        };
+        // The cursor cell's text and style, for the paint pass: a block
+        // cursor is a quad plus the glyph sitting on it, not a bare quad.
+        let cursor_glyph = match cursor {
+            Some((vis_row, col)) => rows_v
+                .get(vis_row)
+                .and_then(|(_, cells)| cells.get(col))
+                .filter(|cell| !cell.text.trim().is_empty())
+                .map(|cell| {
+                    (
+                        cell.text.clone(),
+                        crate::terminal_grid::CellStyle::of_cell(cell, &theme),
+                    )
+                }),
+            None => None,
+        };
+        GridSnapshot {
+            rows: grid_rows,
+            cursor,
+            cursor_glyph,
+            cell: cell.unwrap_or(CellSize {
+                width: self.char_w,
+                height: self.font_size,
+            }),
+            font_family: self
+                .font
+                .as_ref()
+                .map(|font| font.family.clone())
+                .unwrap_or_default(),
+            font_size: self.font_size,
+            theme,
+        }
+    }
+
+    /// How many rows were rebuilt during renders. Tests use this to prove a
+    /// cache-hit frame does not rebuild rows.
+    pub fn rows_built(&self) -> u64 {
+        self.rows_built
     }
 
     /// Map a window-relative position onto a visible (row, col) cell.
@@ -1191,6 +1045,16 @@ fn ordered_selection(
     } else {
         (cursor, anchor)
     }
+}
+
+/// Where the cursor sits in the viewport, when it is on screen.
+///
+/// The engine reports the cursor in live-screen coordinates; the reader may be
+/// scrolled back, which pushes it down the viewport, and a scroll far enough
+/// takes it off the top.
+fn cursor_in_view(offset: usize, cursor: (u16, u16), rows: u16) -> Option<(usize, usize)> {
+    let visible_row = offset + cursor.0 as usize;
+    (visible_row < rows as usize).then_some((visible_row, cursor.1 as usize))
 }
 
 /// Map a GPUI keystroke to the logical chord `engine::pane::encode_key` accepts.
@@ -1328,94 +1192,7 @@ impl Render for TerminalPane {
         let max_offset = self.screen.scrollback_len();
         let offset = self.screen.offset_from_bottom();
         let (visible_rows, _) = self.screen.size();
-        self.refresh_viewport_cache();
-        // Taken out of `self` so the render path can borrow the cached rows
-        // while the scratch is reused across rows; put back after the grid
-        // is built.
-        let mut scratch = std::mem::take(&mut self.cell_scratch);
-        let mut row_cache = std::mem::take(&mut self.row_cache);
-        let revision = self.screen.revision();
-        let find_revision = self.find_revision;
-        let rows_v = self.viewport_cells();
-        // Whether the grid shows anything the reader can read. The rows are
-        // already in hand, so this costs nothing.
-        let grid_has_content = rows_v
-            .iter()
-            .any(|(_, cells)| cells.iter().any(|cell| !cell.text.trim().is_empty()));
-
-        // The reader's selection, in content coordinates.
-        let sel = match (self.sel_anchor, self.sel_cursor) {
-            (Some(a), Some(b)) => Some(ordered_selection(a, b)),
-            _ => None,
-        };
         let theme = Theme::current();
-        let style = grid_style(self.font.as_ref(), &theme, self.font_size);
-
-        let mut cell_runs_calls = 0u64;
-        let grid_rows = rows_v
-            .iter()
-            .enumerate()
-            .map(|(vis_row, (content_row, cells))| {
-                let mut overlays = RowOverlays::default();
-                if let Some((a, b)) = sel {
-                    if *content_row >= a.0 && *content_row <= b.0 {
-                        let first = if *content_row == a.0 { a.1 } else { 0 };
-                        let last = if *content_row == b.0 {
-                            b.1
-                        } else {
-                            cells.len().saturating_sub(1)
-                        };
-                        overlays.selection = Some((first, last));
-                    }
-                }
-                for m in &self.find_matches {
-                    if m.0 == *content_row && m.2 == *content_row {
-                        overlays.find.push(m.1..m.3 + 1);
-                    }
-                }
-                let key = RowCacheKey {
-                    revision,
-                    offset,
-                    content_row: *content_row,
-                    selection: overlays.selection,
-                    find_revision,
-                    theme_fg: theme.term_fg,
-                    theme_bg: theme.term_bg,
-                    theme_selection: theme.term_selection,
-                    theme_accent: theme.accent,
-                };
-                let cached = row_cache
-                    .get(vis_row)
-                    .and_then(|slot| slot.as_ref())
-                    .filter(|row| row.key == key)
-                    .cloned();
-                match cached {
-                    Some(row) => grid_line(row.text.clone(), &row.runs, &style),
-                    None => {
-                        cell_runs_calls += 1;
-                        cell_runs(cells, &theme, &overlays, &mut scratch);
-                        // The element owns the text ('static), so the buffer moves
-                        // out; the column spans and runs stay in the scratch.
-                        let text = std::mem::take(&mut scratch.text);
-                        scratch.text = String::with_capacity(cells.len());
-                        let row = Rc::new(CachedRow {
-                            key,
-                            text,
-                            runs: scratch.runs.clone(),
-                        });
-                        if row_cache.len() <= vis_row {
-                            row_cache.resize_with(vis_row + 1, || None);
-                        }
-                        row_cache[vis_row] = Some(row.clone());
-                        grid_line(row.text.clone(), &row.runs, &style)
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
-        self.cell_scratch = scratch;
-        self.row_cache = row_cache;
-        self.cell_runs_calls += cell_runs_calls;
-        self.grid_has_content = grid_has_content;
 
         // Scrollbar thumb geometry (visual; wheel is the primary control).
         let grid_height = bounds
@@ -1506,7 +1283,6 @@ impl Render for TerminalPane {
             div().h_0().into_any_element()
         };
 
-        let theme = Theme::current();
         // The key bar is a touch affordance: it shows on a device that has
         // shown a touch, or on a layout narrow enough to be a phone. Its keys
         // never take the focus, so the grid keeps the keyboard.
@@ -1626,50 +1402,14 @@ impl Render for TerminalPane {
             .text_color(theme.text_dim)
             .child(status_line);
 
-        // The cursor cell, on the live screen. It is drawn over the row, in
-        // the terminal's cursor token.
-        let cursor = match (cell, self.screen.cursor_position(), bounds) {
-            (Some(cell), (cursor_row, cursor_col), Some(bounds)) => {
-                let visible_row = offset + cursor_row as usize;
-                if visible_row < rows as usize {
-                    Some(
-                        div()
-                            .id("terminal-cursor")
-                            .debug_selector(|| "terminal-cursor".to_string())
-                            .absolute()
-                            .left(px(
-                                f32::from(bounds.origin.x) + cursor_col as f32 * cell.width
-                            ))
-                            .top(px(
-                                f32::from(bounds.origin.y) + visible_row as f32 * cell.height
-                            ))
-                            .w(px(cell.width))
-                            .h(px(cell.height))
-                            .bg(theme.term_cursor),
-                    )
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-
-        // The rows, in a column that fills the grid: its bounds ARE the
-        // grid's box, which is how the view learns the size to draw at.
-        let rows_column = div()
-            .id("grid-rows")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .w_full()
-            .overflow_hidden()
-            .children(grid_rows);
-
+        // The grid: one custom element paints the rows; it takes its own
+        // snapshot from the engine and draws it, cell for cell.
+        let snapshot = self.grid_snapshot(theme, cell, rows);
         let grid_bounds = Rc::clone(&self.grid_bounds);
         let grid = div()
-            .flex_1()
             .flex()
             .flex_col()
+            .flex_1()
             .w_full()
             .overflow_hidden()
             .relative()
@@ -1680,7 +1420,7 @@ impl Render for TerminalPane {
             })
             .id("grid")
             .debug_selector(|| "grid".to_string())
-            .child(rows_column);
+            .child(TerminalGrid::new(snapshot).flex_1().w_full());
         // The placeholder: an agent that is slow to say anything must not look
         // like a frozen window. It counts the seconds since the pane was
         // attached and goes away with the first real output.
@@ -1706,10 +1446,6 @@ impl Render for TerminalPane {
         if starting {
             self.keep_placeholder_ticking(cx);
         }
-        let grid = match cursor {
-            Some(cursor) => grid.child(cursor),
-            None => grid,
-        };
 
         let pane = div()
             .id("terminal-pane")
@@ -1806,26 +1542,12 @@ impl Render for TerminalPane {
         pane
     }
 }
-/// GPUI keystroke → logical chord name for `PaneHandle::keys` (the same names the
-/// web client's `terminalChord` produces).
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::Entity;
     use gpui::{Keystroke, Modifiers};
     use orion_core::screen::ScreenState;
-
-    /// Run `cell_runs` with a fresh scratch and hand back the owned text and
-    /// runs, mirroring what the render path moves out of the scratch.
-    fn run_cell_runs(
-        cells: &[TermCell],
-        theme: &Theme,
-        overlays: &RowOverlays,
-    ) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
-        let mut scratch = CellScratch::default();
-        cell_runs(cells, theme, overlays, &mut scratch);
-        (scratch.text, scratch.runs)
-    }
 
     fn ev(key: &str, shift: bool, control: bool, alt: bool) -> KeyDownEvent {
         KeyDownEvent {
@@ -2032,278 +1754,6 @@ mod tests {
             "the drag direction must not change the copied text"
         );
         assert!(!upward.is_empty(), "the selection has text: {upward:?}");
-    }
-
-    /// A plain cell carrying exactly the text and colours given.
-    fn cell(text: &str, fg: TermColor, bg: TermColor) -> TermCell {
-        TermCell {
-            text: text.to_string(),
-            fg,
-            bg,
-            bold: false,
-            dim: false,
-            italic: false,
-            underline: false,
-            inverse: false,
-            wide: false,
-            wide_continuation: false,
-        }
-    }
-
-    #[test]
-    fn same_styled_cells_batch_into_one_run_with_the_requested_colour_and_weight() {
-        let theme = Theme::dark();
-        let red = TermColor::Indexed(1);
-        let mut cells = vec![
-            cell("r", red, TermColor::Default),
-            cell("e", red, TermColor::Default),
-            cell("d", red, TermColor::Default),
-            cell(" ", TermColor::Default, TermColor::Default),
-            cell("!", TermColor::Rgb(10, 20, 30), TermColor::Default),
-        ];
-        for cell in &mut cells[..3] {
-            cell.bold = true;
-        }
-
-        let (text, ranges) = run_cell_runs(&cells, &theme, &RowOverlays::default());
-
-        assert_eq!(text, "red !", "every cell contributes one character");
-        assert_eq!(
-            ranges.len(),
-            2,
-            "three red cells batch into one run: {ranges:?}"
-        );
-        let (span, bold_red) = &ranges[0];
-        assert_eq!(span, &(0..3));
-        assert_eq!(
-            bold_red.color,
-            Some(crate::theme::xterm_256(1).into()),
-            "indexed 1 is the theme's red"
-        );
-        assert_eq!(bold_red.font_weight, Some(FontWeight::BOLD));
-        let (span, truecolor) = &ranges[1];
-        assert_eq!(span, &(4..5));
-        assert_eq!(
-            truecolor.color,
-            Some(crate::theme::rgb_color(10, 20, 30).into())
-        );
-    }
-
-    #[test]
-    fn an_inverse_cell_swaps_the_colours_the_program_asked_for() {
-        let theme = Theme::dark();
-        let mut inverse = cell("x", TermColor::Indexed(1), TermColor::Indexed(4));
-        inverse.inverse = true;
-
-        let (text, ranges) = run_cell_runs(&[inverse], &theme, &RowOverlays::default());
-
-        assert_eq!(text, "x");
-        assert_eq!(ranges.len(), 1);
-        assert_eq!(
-            ranges[0].1.color,
-            Some(crate::theme::xterm_256(4).into()),
-            "the background colour became the foreground"
-        );
-        assert_eq!(
-            ranges[0].1.background_color,
-            Some(crate::theme::xterm_256(1).into()),
-            "the foreground colour became the background"
-        );
-    }
-
-    #[test]
-    fn a_wide_character_and_its_continuation_keep_the_columns_aligned() {
-        let theme = Theme::dark();
-        let mut wide = cell("漢", TermColor::Default, TermColor::Default);
-        wide.wide = true;
-        let continuation = TermCell {
-            text: String::new(),
-            wide_continuation: true,
-            ..cell("", TermColor::Default, TermColor::Default)
-        };
-        let cells = vec![
-            wide,
-            continuation,
-            cell("x", TermColor::Default, TermColor::Default),
-        ];
-
-        let (text, ranges) = run_cell_runs(&cells, &theme, &RowOverlays::default());
-        assert_eq!(text, "漢x", "the continuation contributes no character");
-        assert!(ranges.is_empty(), "plain cells get no runs: {ranges:?}");
-
-        // Selecting the continuation half selects the wide character itself.
-        let overlays = RowOverlays {
-            selection: Some((1, 1)),
-            find: Vec::new(),
-        };
-        let (_, ranges) = run_cell_runs(&cells, &theme, &overlays);
-        assert_eq!(
-            ranges.len(),
-            1,
-            "the selection covers the wide char: {ranges:?}"
-        );
-        assert_eq!(ranges[0].0, 0..3, "漢 is three bytes");
-        assert_eq!(
-            ranges[0].1.background_color,
-            Some(theme.term_selection.into())
-        );
-    }
-
-    #[test]
-    fn a_dim_cell_fades_the_foreground_and_an_underlined_cell_underlines() {
-        let theme = Theme::dark();
-        let mut dim = cell("d", TermColor::Default, TermColor::Default);
-        dim.dim = true;
-        let mut underlined = cell("u", TermColor::Indexed(2), TermColor::Default);
-        underlined.underline = true;
-
-        let (text, ranges) = run_cell_runs(&[dim, underlined], &theme, &RowOverlays::default());
-
-        assert_eq!(text, "du");
-        assert_eq!(ranges.len(), 2, "the dim cell is not plain: {ranges:?}");
-        assert_eq!(ranges[0].1.fade_out, Some(DIM_FADE));
-        assert_eq!(
-            ranges[0].1.color, None,
-            "the dim fades the base foreground, it does not replace it"
-        );
-        assert!(ranges[1].1.underline.is_some(), "the underline is set");
-        assert_eq!(ranges[1].1.color, Some(crate::theme::xterm_256(2).into()));
-    }
-
-    #[test]
-    fn the_selection_keeps_the_cells_colours_and_a_find_match_repaints_them() {
-        let theme = Theme::dark();
-        let cells = vec![
-            cell("a", TermColor::Indexed(1), TermColor::Default),
-            cell("b", TermColor::Default, TermColor::Default),
-            cell("c", TermColor::Default, TermColor::Default),
-        ];
-        let mut overlays = RowOverlays {
-            selection: Some((0, 2)),
-            find: Vec::new(),
-        };
-        overlays.find.push(0..2);
-
-        let (text, ranges) = run_cell_runs(&cells, &theme, &overlays);
-
-        assert_eq!(text, "abc");
-        assert_eq!(
-            ranges.len(),
-            2,
-            "cells 0 and 1 share the find style: {ranges:?}"
-        );
-        // Under both overlays, the find match wins (applied last); cells 0 and
-        // 1 draw the same way, so they batch into one run.
-        assert_eq!(ranges[0].0, 0..2);
-        assert_eq!(ranges[0].1.background_color, Some(theme.accent.into()));
-        assert_eq!(ranges[0].1.color, Some(theme.term_bg.into()));
-        // Selected only: the cell keeps its own foreground.
-        assert_eq!(ranges[1].0, 2..3);
-        assert_eq!(
-            ranges[1].1.background_color,
-            Some(theme.term_selection.into())
-        );
-        assert_eq!(ranges[1].1.color, None, "the selection keeps the fg");
-    }
-
-    #[test]
-    fn an_ansi_coloured_feed_reaches_the_highlight_runs() {
-        // The exact sequence the manual-QA script prints: red, bold green and
-        // a 24-bit colour, each reset before the next.
-        let mut screen = ScreenState::new(4, 80);
-        screen.process(
-            "\x1b[31mRED\x1b[0m \x1b[1;32mBOLD GREEN\x1b[0m \x1b[38;2;255;100;0mTRUECOLOR\x1b[0m\n",
-        );
-        let rows = screen.viewport_cells(0);
-
-        let (text, ranges) = run_cell_runs(&rows[0], &Theme::dark(), &RowOverlays::default());
-
-        assert!(text.starts_with("RED BOLD GREEN TRUECOLOR"), "{text:?}");
-        assert_eq!(ranges.len(), 3, "the plain gaps get no runs: {ranges:?}");
-        let (span, red) = &ranges[0];
-        assert_eq!(span, &(0..3));
-        assert_eq!(red.color, Some(crate::theme::xterm_256(1).into()));
-        assert_eq!(red.font_weight, None);
-        let (span, bold_green) = &ranges[1];
-        assert_eq!(span, &(4..14));
-        assert_eq!(bold_green.color, Some(crate::theme::xterm_256(2).into()));
-        assert_eq!(bold_green.font_weight, Some(FontWeight::BOLD));
-        let (span, truecolor) = &ranges[2];
-        assert_eq!(span, &(15..24));
-        assert_eq!(
-            truecolor.color,
-            Some(crate::theme::rgb_color(255, 100, 0).into())
-        );
-    }
-
-    #[test]
-    fn a_wide_char_row_with_selection_and_find_match_produces_stable_output() {
-        // Wide char + selection + find match on the same row: the exact
-        // (text, ranges) the pre-scratch implementation produced.
-        let theme = Theme::dark();
-        let mut wide = cell("漢", TermColor::Default, TermColor::Default);
-        wide.wide = true;
-        let continuation = TermCell {
-            text: String::new(),
-            wide_continuation: true,
-            ..cell("", TermColor::Default, TermColor::Default)
-        };
-        let cells = vec![
-            wide,
-            continuation,
-            cell("a", TermColor::Indexed(1), TermColor::Default),
-            cell("b", TermColor::Default, TermColor::Default),
-        ];
-        let overlays = RowOverlays {
-            selection: Some((0, 2)),
-            find: std::iter::once(3..4).collect(),
-        };
-
-        let (text, ranges) = run_cell_runs(&cells, &theme, &overlays);
-
-        assert_eq!(text, "漢ab");
-        // 漢 is bytes 0..3, 'a' is 3..4, 'b' is 4..5. The selection covers
-        // columns 0..=2 (bytes 0..4); the find match covers byte 3..4 and
-        // wins on the overlap. Runs break at cell boundaries: 漢 paints the
-        // selection, 'a' paints the find match, 'b' is plain.
-        assert_eq!(
-            ranges,
-            vec![
-                (
-                    0..3,
-                    HighlightStyle {
-                        background_color: Some(theme.term_selection.into()),
-                        ..HighlightStyle::default()
-                    }
-                ),
-                (
-                    3..4,
-                    HighlightStyle {
-                        background_color: Some(theme.accent.into()),
-                        color: Some(theme.term_bg.into()),
-                        ..HighlightStyle::default()
-                    }
-                ),
-            ],
-            "selection first, find second, find wins on overlap: {ranges:?}"
-        );
-    }
-
-    #[test]
-    fn a_lone_wide_continuation_at_index_zero_renders_a_space() {
-        // Malformed content: a continuation cell with no wide character
-        // before it must not panic and renders a space.
-        let theme = Theme::dark();
-        let continuation = TermCell {
-            text: String::new(),
-            wide_continuation: true,
-            ..cell("", TermColor::Default, TermColor::Default)
-        };
-
-        let (text, ranges) = run_cell_runs(&[continuation], &theme, &RowOverlays::default());
-
-        assert_eq!(text, " ");
-        assert!(ranges.is_empty(), "a plain space gets no run: {ranges:?}");
     }
 
     /// The terminal the test drives.
@@ -2736,7 +2186,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_cache_hit_frame_does_not_call_cell_runs(cx: &mut gpui::TestAppContext) {
+    fn a_cache_hit_frame_does_not_rebuild_rows(cx: &mut gpui::TestAppContext) {
         let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
             view: cx.new(TerminalPane::new),
         });
@@ -2753,7 +2203,7 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear());
         let mut calls = 0;
         cx.update(|_window, app| {
-            calls = root.read(app).view.read(app).cell_runs_calls();
+            calls = root.read(app).view.read(app).rows_built();
         });
         assert!(calls > 0, "the warm-up draws built the rows");
 
@@ -2766,11 +2216,11 @@ mod tests {
 
         let mut after = 0;
         cx.update(|_window, app| {
-            after = root.read(app).view.read(app).cell_runs_calls();
+            after = root.read(app).view.read(app).rows_built();
         });
         assert_eq!(
             calls, after,
-            "an unchanged frame reuses the cached rows instead of re-running cell_runs"
+            "an unchanged frame reuses the cached rows instead of re-building them"
         );
         // The cached frame still paints the fed content.
         let mut text = String::new();
@@ -2809,7 +2259,7 @@ mod tests {
         // A feed bumps the content revision: every visible row rebuilds.
         let mut before = 0;
         cx.update(|_window, app| {
-            before = root.read(app).view.read(app).cell_runs_calls();
+            before = root.read(app).view.read(app).rows_built();
         });
         cx.update(|_window, app| {
             let view = root.read(app).view.clone();
@@ -2821,7 +2271,7 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear());
         let mut after_feed = 0;
         cx.update(|_window, app| {
-            after_feed = root.read(app).view.read(app).cell_runs_calls();
+            after_feed = root.read(app).view.read(app).rows_built();
         });
         assert!(after_feed > before, "a feed invalidates the cached rows");
 
@@ -2836,7 +2286,7 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear());
         let mut after_scroll = 0;
         cx.update(|_window, app| {
-            after_scroll = root.read(app).view.read(app).cell_runs_calls();
+            after_scroll = root.read(app).view.read(app).rows_built();
         });
         assert!(
             after_scroll > after_feed,
@@ -2852,13 +2302,13 @@ mod tests {
                 view.sel_anchor = Some((row, 0));
                 view.sel_cursor = Some((row, 4));
                 cx.notify();
-                before_selection = view.cell_runs_calls();
+                before_selection = view.rows_built();
             });
         });
         cx.update(|window, cx| window.draw(cx).clear());
         let mut after_selection = 0;
         cx.update(|_window, app| {
-            after_selection = root.read(app).view.read(app).cell_runs_calls();
+            after_selection = root.read(app).view.read(app).rows_built();
         });
         assert_eq!(
             after_selection - before_selection,
@@ -2877,13 +2327,13 @@ mod tests {
                 view.refresh_find_matches();
                 cx.notify();
                 rev = view.find_revision;
-                before_find = view.cell_runs_calls();
+                before_find = view.rows_built();
             });
         });
         cx.update(|window, cx| window.draw(cx).clear());
         let mut after_find = 0;
         cx.update(|_window, app| {
-            after_find = root.read(app).view.read(app).cell_runs_calls();
+            after_find = root.read(app).view.read(app).rows_built();
         });
         assert!(
             after_find > before_find,
@@ -2919,6 +2369,65 @@ mod tests {
             rev_cleared,
             rev + 2,
             "the empty-query clear bumps the find revision"
+        );
+    }
+    /// The snapshot the element paints for a fed grid contains the same
+    /// cells, cursor and selection the row-based path produced: the rows the
+    /// grid paints are the rows the engine puts on the screen, with the
+    /// selection painted as background spans across those cells.
+    #[gpui::test]
+    fn the_grid_snapshot_contains_the_content_the_engine_shows(cx: &mut gpui::TestAppContext) {
+        let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+            view: cx.new(TerminalPane::new),
+        });
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, _cx| {
+                view.feed("alpha[31m red[0m beta");
+                view.sel_anchor = Some((0, 0));
+                view.sel_cursor = Some((0, 5));
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let (lines, cursor, selection_row) = cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, _cx| {
+                let snapshot = view.grid_snapshot(
+                    Theme::dark(),
+                    Some(crate::terminal_grid::CellSize {
+                        width: 8.0,
+                        height: 16.0,
+                    }),
+                    32,
+                );
+                let lines: Vec<String> = snapshot
+                    .rows
+                    .iter()
+                    .take(1)
+                    .map(|row| row.text.trim_end().to_string())
+                    .collect();
+                let selection: Vec<crate::terminal_grid::BgSpan> =
+                    snapshot.rows[0].bgs.iter().copied().collect();
+                (lines, snapshot.cursor, selection)
+            })
+        });
+
+        assert_eq!(lines.len(), 1, "the snapshot holds the fed viewport rows");
+        assert!(
+            lines[0].contains("red"),
+            "the fed colour reaches the snapshot: {lines:?}"
+        );
+        assert_eq!(
+            cursor,
+            Some((0, 14)),
+            "the cursor sits after the fed text, on the live screen"
+        );
+        assert!(
+            selection_row.iter().any(|span| span.first_col == 0
+                && span.end_col == 6
+                && span.color == Theme::dark().term_selection),
+            "the fed selection lands on the snapshot row: {selection_row:?}"
         );
     }
 }
