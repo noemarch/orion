@@ -1,7 +1,7 @@
 # Terminal startup — after
 
 The same measurement as `docs/perf/terminal-startup-before.md`, taken after
-the fixes. Same harness, same machine, same three runs.
+the fixes. Same harness, same machine.
 
 ```bash
 cargo test -j 2 -p orion-ui --test terminal_startup -- --nocapture --test-threads=1
@@ -9,16 +9,22 @@ cargo test -j 2 -p orion-ui --test terminal_startup -- --nocapture --test-thread
 
 ## The timeline — control shell (`cmd.exe`)
 
+One representative run of three (the medians are further down):
+
 | event | ms | detail |
 |---|---:|---|
 | workspace_open_clicked | 0.0 | control: cmd.exe (C:\Windows\system32\cmd.exe) |
 | backend_connected | 0.0 | |
-| pty_spawn_requested | 0.3 | 120x32 |
-| pty_spawn_returned | 29.7 | pid Some(19952) |
-| terminal_view_created | 32.1 | |
-| child_first_byte | 145.8 | 16 bytes |
-| terminal_tab_selected | 228.7 | |
-| first_nonempty_frame_painted | 236.2 | |
+| pty_spawn_requested | 0.9 | 120x32 |
+| pty_spawn_returned | 65.1 | pid Some(12644) |
+| terminal_view_created | 67.3 | |
+| child_first_byte | 116.1 | 16 bytes |
+| terminal_tab_selected | 184.7 | |
+| first_nonempty_frame_painted | 196.6 | |
+
+- pty reads sampled: 2 (cap 50), bytes read in total: 207
+- frames painted: 2
+- repaint rate: 0.2 frames/s
 
 ## The timeline — agent CLI (`claude`)
 
@@ -27,11 +33,15 @@ cargo test -j 2 -p orion-ui --test terminal_startup -- --nocapture --test-thread
 | workspace_open_clicked | 0.0 | agent: claude (C:\Program Files\nodejs\node.exe) |
 | backend_connected | 0.0 | |
 | pty_spawn_requested | 0.2 | 120x32 |
-| pty_spawn_returned | 25.0 | pid Some(16440) |
-| terminal_view_created | 26.7 | |
-| child_first_byte | 111.7 | 16 bytes |
-| terminal_tab_selected | 8501.0 | |
-| first_nonempty_frame_painted | 8510.1 | |
+| pty_spawn_returned | 20.1 | pid Some(19132) |
+| terminal_view_created | 22.5 | |
+| child_first_byte | 65.6 | 16 bytes |
+| terminal_tab_selected | 5712.6 | |
+| first_nonempty_frame_painted | 5720.3 | |
+
+- pty reads sampled: 6 (cap 50), bytes read in total: 517
+- frames painted: 3
+- repaint rate: 13.5 frames/s
 
 The terminal timeline did not change, and that is the point: the terminal was
 never the slow part. What changed is the startup path around it, and what the
@@ -83,7 +93,7 @@ Read the table honestly:
 | Selecting the Terminal tab shows content (prompt, agent output, or the "Starting…" placeholder) in < 200 ms | **met** — 6–9 ms for the tab switch, and the placeholder is up from the first frame |
 | Switching Chat → Terminal → Chat → Terminal is instant and preserves the full output and scrollback | **met** — the view is built once and never rebuilt; the switch costs 6–9 ms and the grid keeps its scrollback |
 | Output that arrives while the Terminal tab is not visible is fully visible when the tab is opened | **met** — the pump feeds the grid continuously, so the content is already there when the tab is selected |
-| Resizing the window keeps PTY size and emulator grid in sync | **met** — `first_resize_applied` records both (`pty 120x32, grid 120x32`); the grid follows the box at once and the PTY after the 50 ms debounce |
+| Resizing the window keeps PTY size and emulator grid in sync | **met** — `first_resize_applied` records both (`pty 120x32, grid 120x32`). The grid follows the box every frame, so nothing tears mid-drag; the PTY is told the settled size after the 50 ms debounce, and the final size is always sent, so the two agree whenever the window is at rest. Unchanged by this work. |
 | A burst of output does not freeze the UI, and the repaint rate stays at or below the frame rate | **met** — the pump waits out the frame budget before it feeds; `a_flood_of_output_asks_for_one_frame_per_frame` fails if the repaint rate exceeds the frame rate |
 | The black strip glitch is fixed | **met** — the lens row's background spans the column |
 | `cargo build` and `cargo clippy` pass with no new warnings; existing tests pass | **met** — see the gates below |

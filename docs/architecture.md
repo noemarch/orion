@@ -1,15 +1,19 @@
 # Architecture
 
-Orion is a local-first orchestrator with a native Rust core and a React 19
-frontend, delivered both as a Tauri v2 desktop app and a headless `orion serve`.
+Orion is a local-first orchestrator with a native Rust core and a native GPUI
+desktop shell, delivered both as a desktop app (`orion-ui`) and a headless
+`orion serve`.
 
 ## Layers
 
-- `crates/orion-core` — domain logic: PTY allocation, agent supervision, screen
-  grid, introspection parsers, Axum gateway, persistence.
-- `src-tauri` — Tauri v2 shell: windows, tray, IPC handlers, capabilities.
-- `src` — React 19 frontend (chat lens, terminal lens, workspaces).
-- `shared/protocol.ts` — frozen wire contract; `engine-types.ts` mirrors it.
+- `crates/orion-core` — domain logic: PTY allocation, process supervision,
+  the screen grid (behind a `TerminalEngine` trait, implemented by `vt100`),
+  introspection parsers, the runtime daemon that owns every terminal, the
+  Axum gateway, persistence.
+- `crates/orion-ui` — native GPUI shell: workspaces, the chat lens, the
+  terminal lens, the changes lens. No web view, no JavaScript.
+- `docs/adr` — architecture decision records, including
+  `desktop-shell-ownership.md`, which is why the app is GPUI and pure Rust.
 
 ## Invariants
 
@@ -20,6 +24,9 @@ frontend, delivered both as a Tauri v2 desktop app and a headless `orion serve`.
   on Unix) with SIGINT → SIGTERM → SIGKILL escalation.
 - Agent state files are opened read-only (`SQLITE_OPEN_READONLY`).
 - No telemetry; no `tailscale funnel`.
+- Terminals live in the runtime daemon; the shell is only a viewer. A client
+  that attaches is replayed the screen as ANSI before the live stream, so a
+  view can come and go without losing what the agent drew.
 
 ## Design system
 
