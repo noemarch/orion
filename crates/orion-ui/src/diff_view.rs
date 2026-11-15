@@ -332,8 +332,13 @@ impl ChangesView {
         self.engine = Some(engine);
         self.pane_id = pane_id;
         let _ = pane;
-        self.refresh();
-        self.refresh_patch();
+        // The changed-file list is a git call: it takes hundreds of
+        // milliseconds and must not run while another lens is on screen. The
+        // Changes lens reads it when it comes back (`set_visible`).
+        if self.visible {
+            self.refresh();
+            self.refresh_patch();
+        }
     }
 
     /// Whether the 2s poll runs (the Changes lens is active).

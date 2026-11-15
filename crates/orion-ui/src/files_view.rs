@@ -138,7 +138,12 @@ impl FileTree {
         self.listings.clear();
         let reader = self.file_reader.clone();
         reader.update(cx, |reader, _cx| reader.attach(engine, pane_id));
-        self.refresh();
+        // The listing is a filesystem read: it must not run while another
+        // lens is on screen. The Changes lens reads it when it comes back
+        // (`set_visible`).
+        if self.visible {
+            self.refresh();
+        }
     }
 
     /// Whether the 2s poll runs (the Changes lens is active).
