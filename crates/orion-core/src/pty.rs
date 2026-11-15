@@ -21,6 +21,7 @@ use crate::agents::LaunchSpec;
 use crate::error::{OrionError, Result};
 use crate::process::ChildJob;
 use crate::protocol::TerminalSize;
+use crate::trace::Event;
 
 /// Decodes UTF-8 across chunk boundaries. Invalid bytes become U+FFFD rather than failing the
 /// pane: a terminal must keep showing the rest of the stream.
@@ -104,6 +105,10 @@ impl PtySession {
             pixel_width: size.pixel_width.max(8),
             pixel_height: size.pixel_height.max(16),
         };
+        crate::trace::record_with(
+            Event::PtySpawnRequested,
+            Some(format!("{}x{}", pty_size.cols, pty_size.rows)),
+        );
         let pair = pty_system
             .openpty(pty_size)
             .map_err(|e| OrionError::Pty(format!("failed to open a PTY: {e}")))?;
@@ -128,6 +133,10 @@ impl PtySession {
             ))
         })?;
         drop(pair.slave);
+        crate::trace::record_with(
+            Event::PtySpawnReturned,
+            Some(format!("pid {:?}", child.process_id())),
+        );
 
         let pid = child.process_id();
         let job = match pid.and_then(|pid| ChildJob::assign(pid).ok()) {
@@ -151,10 +160,19 @@ impl PtySession {
             .spawn(move || {
                 let mut decoder = Utf8Decoder::default();
                 let mut buf = [0u8; 16 * 1024];
+                let mut first_byte = true;
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(count) => {
+                            if first_byte {
+                                first_byte = false;
+                                crate::trace::record_with(
+                                    Event::ChildFirstByte,
+                                    Some(format!("{count} bytes")),
+                                );
+                            }
+                            crate::trace::record_read(count);
                             let text = decoder.push(&buf[..count]);
                             if !text.is_empty() {
                                 on_text(text);

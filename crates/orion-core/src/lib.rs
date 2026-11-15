@@ -7,6 +7,7 @@ pub mod protocol;
 pub mod pty;
 pub mod runtime;
 pub mod screen;
+pub mod trace;
 pub mod transcript;
 pub mod workspace;
 
