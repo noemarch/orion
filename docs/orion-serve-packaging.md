@@ -1,8 +1,9 @@
 # Packaging and running `orion serve`
 
-Orion's headless surface is the `orion` binary built from `orion-core`. It serves the exact same
-React 19 UI the Tauri desktop shell uses, over plain HTTP/WebSockets, so a phone, tablet, or any
-browser on the tailnet can open workspaces, read panes, and drive agents without a local desktop.
+Orion's headless surface is the `orion` binary built from `orion-core`. It exposes the same
+runtime over plain HTTP/WebSockets, so a phone, tablet, or any client on the tailnet can open
+workspaces, read panes, and drive agents without a local desktop. There is no web client in this
+repository; point `--dist` at one if you have one.
 
 ## Build the production binary
 
@@ -24,11 +25,11 @@ ORION_TOKEN=... orion serve --host 0.0.0.0 --port 7317 --state-dir /var/lib/orio
 
 | Flag | Purpose |
 |------|---------|
-| `ORION_TOKEN=...` | Device-pairing token the browser gateway checks. Set it to a strong secret; it is never echoed in responses or logs. |
+| `ORION_TOKEN=...` | Device-pairing token the gateway checks. Set it to a strong secret; it is never echoed in responses or logs. |
 | `--host 0.0.0.0` | Listen on all interfaces so LAN/Tailscale clients can reach it. |
 | `--port 7317` | The port Orion's HTTP/WebSocket gateway binds. |
 | `--state-dir /var/lib/orion` | Where saved sessions, preferences, and device pairings live. Make it writable by the service user. |
-| `--dist dist` | Directory holding the built React UI (`dist/` from the frontend build) served to browsers. |
+| `--dist dist` | Optional directory of static files served at `/`. Nothing in this repo builds one; the gateway answers the API and WebSocket requests without it. |
 
 ## systemd unit (headless host)
 
@@ -66,7 +67,7 @@ sudo systemctl enable --now orion
 
 ## Windows service note
 
-- **Desktop shell:** use Tauri's `tauri-plugin-autostart` so the Orion tray app starts with the user session. That is the graphical surface, not the headless gateway.
+- **Desktop shell:** `orion-ui` is a plain binary; start it from the user's session (a login item, a systemd user unit, or the desktop environment's autostart). That is the graphical surface, not the headless gateway.
 - **Headless on Windows:** there is no built-in Windows service wrapper. Run `orion serve` as a scheduled task set to "Run whether user is logged on or not", or install it as a service with NSSM pointing at `orion.exe serve --host 0.0.0.0 --port 7317 --state-dir <...> --dist <...>`, with `ORION_TOKEN` set in the task/service environment.
 
 ## Tailscale (remote and phone access)
@@ -77,8 +78,8 @@ On the headless host, expose the local gateway over the tailnet with HTTPS:
 tailscale serve --bg --https=443 http://127.0.0.1:7317
 ```
 
-Clients reach Orion at `https://<host>.ts.net/` (or the registered MagicDNS name). Browsers and the
-mobile PWA connect over the Tailscale mesh; no ports are opened to the public internet.
+Clients reach Orion at `https://<host>.ts.net/` (or the registered MagicDNS name). Any HTTP or
+WebSocket client connects over the Tailscale mesh; no ports are opened to the public internet.
 
 **Never run `tailscale funnel`** for Orion. `funnel` exposes a local port to the public internet,
 which would put an authenticated agent-control surface on the open web. `tailscale serve --https`

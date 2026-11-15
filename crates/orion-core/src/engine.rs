@@ -1,14 +1,14 @@
 //! The engine seam.
 //!
-//! Every client request — the Tauri IPC bridge on desktop, the HTTP/WS gateway for browsers —
-//! funnels through this module. The transport owns framing and authentication; the engine owns
-//! every answer. Two shapes reach it:
+//! Every client request — the GPUI shell's frames over its connection, or a browser through the
+//! HTTP/WS gateway — funnels through this module. The transport owns framing and authentication;
+//! the engine owns every answer. Two shapes reach it:
 //!
 //! - **Requests** ([`Engine::dispatch_from`]) carry a frame the client sent over its push
 //!   connection: `attach`, `input`, `submit`, `ping`, or the `http` envelope the desktop shell
 //!   uses to run the REST client unchanged.
 //! - **Routes** ([`Engine::http`]) are the REST surface itself: `/api/session`, `/api/pane/read`,
-//!   `/api/workspace/create` and the rest of `shared/protocol.ts`.
+//!   `/api/workspace/create` and the rest of the route table.
 //!
 //! State is one session: workspaces, their tabs, and the agent panes running in them. A pane is
 //! always an agent CLI; Orion has no shell panes. Output reaches connected clients as

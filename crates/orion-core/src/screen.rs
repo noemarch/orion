@@ -1,8 +1,8 @@
 //! The engine's terminal grid.
 //!
-//! PTY bytes are text, not a picture: the same bytes that feed a client's xterm.js feed this
-//! grid, so the server can read a pane (chat lens, prompt detection, assistant status) without a
-//! second process. `vt100` owns the escape-sequence state machine and the scrollback ring; this
+//! PTY bytes are text, not a picture: the same bytes the shell draws feed this grid, so the
+//! server can read a pane (chat lens, prompt detection, assistant status) without a second
+//! process. `vt100` owns the escape-sequence state machine and the scrollback ring; this
 //! module adds the revision counter, the plain-text views and the small selection/find surface the
 //! HTTP routes expose.
 
@@ -322,7 +322,7 @@ impl ScreenState {
         (text, truncated)
     }
 
-    /// A complete repaint for a client that just attached. xterm.js starts blank, so it needs the
+    /// A complete repaint for a client that just attached. A fresh view starts blank, so it needs the
     /// cursor, every visible cell and the terminal modes, not a diff against a screen it lacks.
     pub fn replay(&self) -> String {
         let screen = self.parser.screen();

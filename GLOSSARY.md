@@ -7,7 +7,7 @@ This document establishes the canonical domain vocabulary for the Orion project.
 ### Core Domain Entities
 
 #### Engine
-The central native Rust orchestrator (`orion-core::engine::Engine`) that coordinates workspaces, tabs, panes, agent process supervision, and client transports (Tauri IPC and Axum WebSocket/HTTP gateway). Every client request flows through the engine seam.
+The central native Rust orchestrator (`orion-core::engine::Engine`) that coordinates workspaces, tabs, panes, agent process supervision, and client transports (the GPUI shell's frames and the Axum WebSocket/HTTP gateway). Every client request flows through the engine seam.
 
 #### Workspace
 A top-level project container bound to a root working directory (`cwd`). A workspace contains one or more tabs, has an active tab, and tracks its own Git branch and worktree metadata.
@@ -24,7 +24,7 @@ An identified AI coding assistant CLI discovered on `PATH`. Orion manages creden
 #### Lens
 The presentation mode for inspecting an agent pane:
 - **Chat Lens:** Structured conversational turns, tool call cards, diff viewers, and prompt approvals.
-- **Terminal Lens:** The raw, live PTY terminal grid (rendered via xterm.js or native GPUI) with zero state loss.
+- **Terminal Lens:** The raw, live PTY terminal grid, drawn by the GPUI shell from the daemon's screen state, with zero state loss.
 
 #### Session
 The complete in-memory and persisted runtime state of open workspaces, tabs, panes, focused pane, split ratios, and zoom states.
