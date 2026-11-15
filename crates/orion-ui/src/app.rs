@@ -10,6 +10,7 @@ use orion_core::{Engine, FrameSink, Role};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::chat::{ChatEvent, ChatView};
 use crate::diff_view::ChangesView;
@@ -178,6 +179,10 @@ const SPLIT_CONNECTION: &str = "gpu-terminal-split";
 /// How often the status line is refreshed from the pane.
 const STATUS_POLL_MS: u64 = 500;
 
+/// The renderer's frame budget: the grid asks for one repaint per frame, not
+/// one per chunk of output.
+const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(16);
+
 /// The sink the terminal lens attaches a pane with, and the channel it feeds.
 ///
 /// The sink runs on the PTY reader thread, so it can only push into a
@@ -212,10 +217,20 @@ pub fn spawn_pty_pump(
 ) {
     let mine = generation.fetch_add(1, Ordering::SeqCst) + 1;
     cx.spawn(async move |cx| {
+        // The renderer gets at most one repaint per frame: a flood of output
+        // asks for a frame, not a frame per chunk. The wait happens before the
+        // feed, so the grid stays at most one frame behind the terminal.
+        let mut last_notify = Instant::now() - FRAME_BUDGET;
         while let Ok(first) = pty_rx.recv_async().await {
             // A newer attach owns the view now; stop feeding it.
             if generation.load(Ordering::SeqCst) != mine {
                 break;
+            }
+            let since = last_notify.elapsed();
+            if since < FRAME_BUDGET {
+                cx.background_executor()
+                    .timer(FRAME_BUDGET - since)
+                    .await;
             }
             let generation = Arc::clone(&generation);
             let _ = cx.update(|cx| {
@@ -243,6 +258,7 @@ pub fn spawn_pty_pump(
                     }
                 });
             });
+            last_notify = Instant::now();
         }
         // Final notify to flush any pending repaint.
         let _ = cx.update(|cx| {
@@ -1646,10 +1662,62 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn a_flood_of_output_asks_for_one_frame_per_frame(cx: &mut gpui::TestAppContext) {
+        // The pump waits out the frame budget, so it has a task outstanding:
+        // parking is allowed rather than a panic.
+        cx.background_executor.allow_parking();
+        let view = cx.update(|app| app.new(TerminalPane::new));
+        let (tx, rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
+        let generation = Arc::new(AtomicU64::new(0));
+        let notifies = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&notifies);
+        let _subscription = cx.update(|app| {
+            app.observe(&view, move |_view, _app| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+        cx.update(|app| {
+            spawn_pty_pump(view.clone(), rx, Arc::clone(&generation), app);
+        });
+
+        // A flood: chunks arrive over time, so the pump sees them one after
+        // another rather than as one batch.
+        let started = Instant::now();
+        for i in 0..40 {
+            tx.send(format!("chunk {i}\r\n"))
+                .expect("the pump is listening");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        drop(tx);
+        // The pump's last tick lands within a frame of the channel closing.
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while Instant::now() < deadline {
+            cx.run_until_parked();
+            let revision = cx.read(|app| view.read(app).revision());
+            if revision >= 40 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let elapsed = started.elapsed();
+        let notifies = notifies.load(Ordering::SeqCst);
+
+        assert!(
+            cx.read(|app| view.read(app).revision()) >= 40,
+            "every chunk reached the grid"
+        );
+        // One repaint per frame: the renderer is never asked for more frames
+        // than the frame rate allows.
+        let budget = (elapsed.as_millis() as usize / FRAME_BUDGET.as_millis() as usize) + 2;
+        assert!(
+            notifies <= budget,
+            "the pump asked for {notifies} frames in {elapsed:?}, the budget is {budget}"
+        );
+    }
+
     #[test]
     fn the_pty_channel_blocks_the_producer_at_capacity() {
-        // A paused consumer (the pump is not draining) must not grow the
-        // queue without bound: the producer blocks at the capacity bound.
         let (tx, _rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
         for i in 0..PTY_CHANNEL_CAPACITY {
             tx.try_send(format!("chunk {i}"))

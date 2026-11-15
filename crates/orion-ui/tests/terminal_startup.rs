@@ -252,7 +252,10 @@ fn the_terminal_startup_timeline_separates_the_agent_from_the_app(
             label,
             spec,
             kind,
-            Duration::from_secs(60),
+            // An agent CLI is slow to say anything, and slower still on a
+            // loaded machine. The bound is generous because the measurement
+            // is about the agent's own startup, not about a deadline.
+            Duration::from_secs(120),
         ));
     } else {
         println!("\n=== agent: claude ===\nnot on this machine's PATH; skipped");
@@ -359,14 +362,6 @@ fn the_startup_path_costs_the_ui_thread(cx: &mut gpui::TestAppContext) {
         );
         assert_eq!(status, 200);
     });
-    timed("list the changed files (the changes lens)", &mut || {
-        let (status, _) = engine.http(
-            "GET",
-            &format!("/api/workspace/diff/files?pane_id={pane_id}"),
-            &serde_json::Value::Null,
-        );
-        assert_eq!(status, 200);
-    });
 
     println!("\n=== the startup path, on the UI thread ===");
     let mut total = 0.0;
@@ -375,6 +370,22 @@ fn the_startup_path_costs_the_ui_thread(cx: &mut gpui::TestAppContext) {
         total += step.millis;
     }
     println!("- {:<44} {:>8.1} ms", "total", total);
+
+    // The changed-file list is a git call. It used to run while the reader
+    // was on the chat lens; it runs when the changes lens comes on screen
+    // now, so it is measured apart.
+    let started = Instant::now();
+    let (status, _) = engine.http(
+        "GET",
+        &format!("/api/workspace/diff/files?pane_id={pane_id}"),
+        &serde_json::Value::Null,
+    );
+    assert_eq!(status, 200);
+    println!(
+        "\n- {:<44} {:>8.1} ms",
+        "list the changed files (changes lens only)",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
 
     // The agent the workspace started must not outlive the measurement.
     if let Some(pane) = engine.pane_by_id(&pane_id) {
