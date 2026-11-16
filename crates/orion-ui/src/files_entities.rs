@@ -370,7 +370,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parses_directory_listing() {
         let value = json!({
             "path": "/home/u/proj",
@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(listing.file_entries()[0].size, 42);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parses_directory_listing_without_files_or_parent() {
         let value = json!({
             "path": "/", "parent": null, "home": "/home/u",
@@ -402,7 +402,7 @@ mod tests {
         assert!(listing.truncated);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parses_diff_file_list() {
         let value = json!({
             "repository": {"root": "/r", "branch": "main", "head": "abc", "detached": false, "unborn": false},
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(list.total, Some(4));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parses_diff_file_patch() {
         let value = json!({
             "repository": {"root": "/r", "branch": null, "head": null, "detached": true, "unborn": true},
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(patch.limits.max_patch_bytes, Some(262144));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parses_diff_file_patch_unavailable() {
         let value = json!({
             "repository": {"root": "/r", "branch": "main", "head": "h", "detached": false, "unborn": false},
@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(patch.unavailable.as_deref(), Some("binary"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parses_file_info() {
         let value = json!({
             "path": "/r/a.rs", "name": "a.rs", "size": 123,
@@ -473,7 +473,7 @@ mod tests {
         assert!(info.kind.is_textual());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parses_file_info_binary_and_unknown_kind() {
         let binary = FileInfo::parse(&json!({"path": "/r/b.bin", "name": "b.bin", "size": 9, "modified": "", "mime": "application/octet-stream", "kind": "binary"})).expect("parse");
         assert_eq!(binary.kind, FileKind::Binary);
@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(unknown.kind, FileKind::Other);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parses_unknown_status_as_unknown() {
         let value = json!({"path": "z", "old_path": null, "status": "conflicted", "additions": null, "deletions": null, "binary": null});
         let file: RepoDiffFile = serde_json::from_value(value).expect("parse");
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(file.status.mark(), "·");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn scope_wire_round_trip() {
         assert_eq!(RepoDiffScope::from_wire("staged"), RepoDiffScope::Staged);
         assert_eq!(RepoDiffScope::from_wire("commit"), RepoDiffScope::Commit);
@@ -502,13 +502,13 @@ mod tests {
         assert_eq!(RepoDiffScope::Workspace.as_str(), "workspace");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn join_path_handles_trailing_slash() {
         assert_eq!(join_path("/a/b", "c"), "/a/b/c");
         assert_eq!(join_path("/a/b/", "c"), "/a/b/c");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn url_encode_encodes_special_bytes() {
         assert_eq!(url_encode("a b/c?d&e"), "a%20b%2Fc%3Fd%26e");
         assert_eq!(url_encode("plain-1_2.3~"), "plain-1_2.3~");
