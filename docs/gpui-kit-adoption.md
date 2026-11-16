@@ -1,6 +1,7 @@
 # GPUI Kit Adoption Plan — Native Desktop UI
 
-> **Status:** Plan only — not started. Created 2026-11-08.
+> **Status:** In progress — `crates/orion-ui` is rebased on gpui-kit 0.9.1 (gpui-fast).
+> Created 2026-11-08.
 > **Scope:** `crates/orion-ui` — the native GPUI desktop shell that will eventually
 > replace the Tauri + React WebView UI (`src-tauri` + `src/`).
 > **Rule:** Every time a UI component is needed for the native desktop app, pick it
@@ -9,8 +10,9 @@
 
 ## 1. Why gpui-kit
 
-Orion's native UI already prototypes with raw [`gpui`](https://gpui.rs) 0.2 in
-`crates/orion-ui` (see `docs/p0-plan.md`, P0 complete). Raw GPUI gives layout and
+Orion's native UI was prototyped with raw [`gpui`](https://gpui.rs) 0.2 in
+`crates/orion-ui` (see `docs/p0-plan.md`, P0 complete) and has since been
+rebased onto gpui-kit 0.9.1 with the `gpui-fast` backend. Raw GPUI gives layout and
 rendering primitives but no styled component library. Every button, sidebar, dialog,
 table, and dropdown would have to be hand-styled and re-styled for light/dark themes.
 
