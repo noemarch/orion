@@ -10,8 +10,12 @@
 
 use crate::pane_seam::{PaneSeam, AGENT_GONE};
 use crate::theme::Theme;
-use gpui::prelude::*;
-use gpui::{div, px, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Render, Window};
+use gpui_kit::base::component_traits::Disableable;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::*;
+use gpui_kit::{
+    div, px, App, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Render, Window,
+};
 use std::sync::Arc;
 
 /// What the composer's send is doing.
@@ -359,8 +363,8 @@ impl Composer {
     }
 
     /// Give the box the focus.
-    pub fn focus(&self, window: &mut Window) {
-        self.focus_handle.focus(window);
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        self.focus_handle.focus(window, cx);
     }
 
     /// Whether the composer is waiting on a prompt card.
@@ -514,7 +518,7 @@ impl Composer {
 
     /// The note under the box: why a send failed, or what the box is waiting
     /// for.
-    fn render_note(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_note(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let theme = Theme::current();
         if let Some(failure) = self.model.failure() {
             let mut note = div()
@@ -623,11 +627,11 @@ impl Render for Composer {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, _cx| {
+                cx.listener(|this, _, window, cx| {
                     // While the agent waits for an answer the card owns the
                     // keyboard: the box must not take the focus away from it.
                     if !this.blocked {
-                        this.focus_handle.focus(window);
+                        this.focus_handle.focus(window, cx);
                     }
                 }),
             )
@@ -640,61 +644,40 @@ impl Render for Composer {
         let can_send = self.model.can_send() && !self.blocked;
         let can_stop = self.running && self.model.can_stop() && !self.blocked;
 
+        // The kit's primary button carries the send action; a disabled
+        // button states the same thing the old colour swap did, and the
+        // wrapper keeps the selector the tests look the control up by.
         let send = div()
             .id("composer-send")
             .debug_selector(|| "composer-send".to_string())
             .flex()
-            .items_center()
-            .justify_center()
-            .min_h(px(44.0))
-            .px_3()
-            .rounded_md()
-            .bg(if can_send {
-                theme.primary
-            } else {
-                theme.surface_hover
-            })
-            .text_color(if can_send {
-                theme.primary_text
-            } else {
-                theme.text_dim
-            })
-            .text_size(px(12.0 * theme.density_scale()))
-            .child("Send");
-        let send = if can_send {
-            send.on_click(cx.listener(|this, _, _, cx| {
-                this.send(cx);
-                cx.notify();
-            }))
-        } else {
-            send
-        };
+            .child(
+                Button::new("composer-send")
+                    .label("Send")
+                    .primary()
+                    .h(px(44.0))
+                    .disabled(!can_send)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.send(cx);
+                        cx.notify();
+                    })),
+            );
 
         let stop = div()
             .id("composer-stop")
             .debug_selector(|| "composer-stop".to_string())
             .flex()
-            .items_center()
-            .justify_center()
-            .min_h(px(44.0))
-            .px_3()
-            .rounded_md()
-            .bg(if can_stop {
-                theme.surface_hover
-            } else {
-                theme.surface_panel
-            })
-            .text_color(if can_stop { theme.text } else { theme.text_dim })
-            .text_size(px(12.0 * theme.density_scale()))
-            .child("Stop");
-        let stop = if can_stop {
-            stop.on_click(cx.listener(|this, _, _, cx| {
-                this.stop(cx);
-                cx.notify();
-            }))
-        } else {
-            stop
-        };
+            .child(
+                Button::new("composer-stop")
+                    .label("Stop")
+                    .secondary()
+                    .h(px(44.0))
+                    .disabled(!can_stop)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.stop(cx);
+                        cx.notify();
+                    })),
+            );
 
         let mut column = div()
             .id("chat-composer")
@@ -730,7 +713,7 @@ impl Render for Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[::core::prelude::v1::test]
     fn an_empty_draft_cannot_be_sent() {
         let mut model = ComposerModel::new();
         assert!(!model.can_send());
@@ -740,7 +723,7 @@ mod tests {
         assert!(model.can_send());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_send_leaves_the_draft_and_goes_on_its_way() {
         let mut model = ComposerModel::new();
         model.type_text("  hello  ");
@@ -752,7 +735,7 @@ mod tests {
         assert_eq!(model.sending(), Some("hello"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_failed_send_keeps_the_words_and_offers_a_retry() {
         let mut model = ComposerModel::new();
         model.type_text("hello");
@@ -771,7 +754,7 @@ mod tests {
         assert!(model.state().is_pending());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_retry_without_a_failed_send_does_nothing() {
         let mut model = ComposerModel::new();
         assert_eq!(model.retry(), None);
@@ -784,7 +767,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn enter_sends_and_shift_enter_writes_the_next_line() {
         let mut text = String::new();
         assert_eq!(
@@ -802,7 +785,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_composer_types_backspaces_and_ignores_chords() {
         let mut text = String::new();
         assert_eq!(
@@ -827,7 +810,7 @@ mod tests {
         assert_eq!(text, "a");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_composer_types_the_character_the_key_produced() {
         let mut text = String::new();
         // The platform reports the character a shifted key produced.
@@ -854,7 +837,7 @@ mod tests {
         assert_eq!(text, " ");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_send_that_reaches_the_agent_settles_the_box() {
         let mut model = ComposerModel::new();
         model.type_text("hello");
@@ -864,7 +847,7 @@ mod tests {
         assert_eq!(model.sending(), None);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_failed_send_says_so_and_keeps_the_words() {
         let mut model = ComposerModel::new();
         model.type_text("hello");
@@ -878,7 +861,7 @@ mod tests {
         assert_eq!(model.sending(), Some("hello"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_stop_that_goes_through_settles_the_box() {
         let mut model = ComposerModel::new();
         settle_stop(&mut model, Ok(()));
@@ -886,14 +869,14 @@ mod tests {
         assert!(!model.state().is_pending());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_stop_that_fails_says_so_in_plain_language() {
         let mut model = ComposerModel::new();
         settle_stop(&mut model, Err("pty closed".to_string()));
         assert_eq!(model.failure(), Some("Couldn't stop the agent."));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_failed_send_can_be_tried_again_and_a_failed_stop_cannot() {
         let mut model = ComposerModel::new();
         model.type_text("hello");
@@ -911,7 +894,7 @@ mod tests {
         assert_eq!(model.retry(), None);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_new_agent_takes_the_draft_with_it() {
         let mut model = ComposerModel::new();
         model.type_text("for the first agent");
