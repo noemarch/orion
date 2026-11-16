@@ -22,11 +22,11 @@
 //! cursor, the same selection. What changes is what a frame costs.
 
 use crate::theme::Theme;
-use gpui::{
+use gpui_kit::{
     fill, point, px, size, App, Bounds, ContentMask, Element, ElementId, Font, FontFeatures,
     FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId,
-    Pixels, Point, Refineable, Rgba, SharedString, Style, StyleRefinement, Styled, TextRun,
-    UnderlineStyle, Window,
+    Pixels, Point, Refineable, Rgba, SharedString, Style, StyleRefinement, Styled, TextAlign,
+    TextRun, UnderlineStyle, Window,
 };
 use orion_core::terminal_engine::TermCell;
 use std::ops::Range;
@@ -474,7 +474,9 @@ impl TerminalGrid {
                 x: bounds.origin.x,
                 y: bounds.origin.y + px(row_index as f32 * cell.height),
             };
-            if let Err(error) = line.paint(origin, px(cell.height), window, cx) {
+            if let Err(error) =
+                line.paint(origin, px(cell.height), TextAlign::Left, None, window, cx)
+            {
                 tracing::warn!(%error, "terminal row failed to paint");
             }
         }
@@ -538,7 +540,7 @@ impl TerminalGrid {
             x: bounds.origin.x + px(col as f32 * cell.width),
             y: bounds.origin.y + px(row as f32 * cell.height),
         };
-        if let Err(error) = line.paint(origin, px(cell.height), window, cx) {
+        if let Err(error) = line.paint(origin, px(cell.height), TextAlign::Left, None, window, cx) {
             tracing::warn!(%error, "cursor glyph failed to paint");
         }
     }
@@ -709,7 +711,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn same_styled_cells_batch_into_one_run_with_the_requested_colour_and_weight() {
         let theme = Theme::dark();
         let red = TermColor::Indexed(1);
@@ -759,7 +761,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_run_a_cell_paints_carries_its_colour_weight_and_slant() {
         let theme = Theme::dark();
         let mut cells = vec![cell("b", TermColor::Indexed(1), TermColor::Default)];
@@ -782,7 +784,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn an_inverse_cell_swaps_the_colours_the_program_asked_for() {
         let theme = Theme::dark();
         let mut inverse = cell("x", TermColor::Indexed(1), TermColor::Indexed(4));
@@ -812,7 +814,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_wide_character_and_its_continuation_keep_the_columns_aligned() {
         let theme = Theme::dark();
         let mut wide = cell("漢", TermColor::Default, TermColor::Default);
@@ -860,7 +862,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_dim_cell_fades_the_foreground_and_an_underlined_cell_underlines() {
         let theme = Theme::dark();
         let mut dim = cell("d", TermColor::Default, TermColor::Default);
@@ -892,7 +894,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_selection_keeps_the_cells_colours_and_a_find_match_repaints_them() {
         let theme = Theme::dark();
         let cells = vec![
@@ -941,7 +943,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn an_ansi_coloured_feed_reaches_the_runs() {
         // The exact sequence the manual-QA script prints: red, bold green and
         // a 24-bit colour, each reset before the next.
@@ -976,7 +978,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_wide_char_row_with_selection_and_find_match_produces_stable_output() {
         // Wide char + selection + find match on the same row.
         let theme = Theme::dark();
@@ -1043,7 +1045,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_lone_wide_continuation_at_index_zero_renders_a_space() {
         // Malformed content: a continuation cell with no wide character
         // before it must not panic and renders a space.
@@ -1067,7 +1069,7 @@ mod tests {
         assert!(row.bgs.is_empty(), "the terminal background is not painted");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_terminal_background_is_never_painted() {
         let theme = Theme::dark();
         let cells = vec![
@@ -1084,7 +1086,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_background_batches_over_the_foregrounds_it_covers() {
         let theme = Theme::dark();
         let cells = vec![
@@ -1124,7 +1126,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_span_that_continues_from_the_row_above_extends_one_rectangle() {
         let red = crate::theme::xterm_256(1);
         let grid = TerminalGrid::new(snapshot_of(vec![
@@ -1142,7 +1144,7 @@ mod tests {
         assert_eq!(rects[0].y, 0.0, "it starts at the first row");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_span_that_stops_does_not_extend_the_rectangle_below_it() {
         let red = crate::theme::xterm_256(1);
         let blue = crate::theme::xterm_256(4);
@@ -1168,7 +1170,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn two_spans_side_by_side_on_one_row_stay_two_rectangles() {
         let red = crate::theme::xterm_256(1);
         let blue = crate::theme::xterm_256(4);
@@ -1194,7 +1196,7 @@ mod tests {
         assert_eq!(rects[1].span.first_col, 4);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_cursor_is_painted_in_the_cell_the_terminal_put_it_in() {
         let mut snap = snapshot_of(Vec::new());
         snap.cursor = Some((3, 7));
@@ -1209,7 +1211,7 @@ mod tests {
         assert_eq!(row as f32 * cell.height, 48.0);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_grid_with_no_rows_paints_nothing() {
         let grid = TerminalGrid::new(snapshot_of(Vec::new()));
 
