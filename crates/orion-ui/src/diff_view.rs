@@ -29,9 +29,12 @@ use crate::files_entities::{
 };
 use crate::shell_model::SPLITTER_WIDTH_PX;
 use crate::theme::Theme;
-use gpui::prelude::*;
-use gpui::{
-    div, px, white, Context, FontWeight, HighlightStyle, KeyDownEvent, MouseButton, MouseDownEvent,
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::*;
+use gpui_kit::{
+    div, px, Context, FontWeight, HighlightStyle, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Render, ScrollHandle, StyledText, TextAlign, TextStyle, Window,
 };
 use orion_core::runtime::{PaneHandle, Runtime};
@@ -233,7 +236,7 @@ pub const LIST_ERROR_MESSAGE: &str = "Couldn't load the changed files. Try again
 pub const PATCH_ERROR_MESSAGE: &str = "Couldn't load this file's diff. Try again.";
 
 /// Color for a patch line kind.
-fn patch_color(kind: PatchKind) -> gpui::Hsla {
+fn patch_color(kind: PatchKind) -> gpui_kit::Hsla {
     let theme = Theme::current();
     match kind {
         PatchKind::Add => theme.status_done.into(),
@@ -272,7 +275,7 @@ pub struct ChangesView {
     patch: Option<RepoDiffFilePatch>,
     error: Option<String>,
     visible: bool,
-    focus_handle: gpui::FocusHandle,
+    focus_handle: gpui_kit::FocusHandle,
     list_scroll: ScrollHandle,
     patch_scroll: ScrollHandle,
     row_seq: usize,
@@ -553,34 +556,42 @@ impl ChangesView {
         .detach();
     }
 
-    fn scope_button(
-        &mut self,
-        label: &'static str,
-        scope: RepoDiffScope,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let active = self.scope == scope;
-        div()
-            .id(self.next_row_id())
-            .px_3()
-            .py_1()
-            .rounded_md()
-            .bg(if active {
-                Theme::current().accent
-            } else {
-                Theme::current().surface_hover
-            })
-            .text_size(px(12.0 * Theme::current().density_scale()))
-            .text_color(white())
-            .child(label)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.set_scope(scope);
-                cx.notify();
-            }))
-    }
-
     fn render_scope_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut bar = div()
+        // The scope pills are the kit's segmented tab bar: the same three-way
+        // switch, drawn by the kit so it reads like the lens switch in `app.rs`.
+        let selected = match self.scope {
+            RepoDiffScope::Workspace => 0,
+            RepoDiffScope::Staged => 1,
+            RepoDiffScope::Commit => 2,
+        };
+        let bar = TabBar::new("changes-scope")
+            .segmented()
+            .selected_index(selected)
+            .child(
+                Tab::new()
+                    .label("Workspace")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_scope(RepoDiffScope::Workspace);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Tab::new()
+                    .label("Staged")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_scope(RepoDiffScope::Staged);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Tab::new()
+                    .label("Commit")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_scope(RepoDiffScope::Commit);
+                        cx.notify();
+                    })),
+            );
+        let mut row = div()
             .id(self.next_row_id())
             .flex()
             .flex_row()
@@ -588,15 +599,13 @@ impl ChangesView {
             .gap(px(4.0))
             .px_3()
             .py_1()
-            .child(self.scope_button("Workspace", RepoDiffScope::Workspace, cx))
-            .child(self.scope_button("Staged", RepoDiffScope::Staged, cx))
-            .child(self.scope_button("Commit", RepoDiffScope::Commit, cx));
+            .child(bar);
         if self.scope == RepoDiffScope::Commit {
-            bar = bar
+            row = row
                 .child(self.render_field("base", EditTarget::Base, &self.base.clone(), cx))
                 .child(self.render_field("head", EditTarget::Head, &self.head.clone(), cx));
         }
-        bar
+        row
     }
 
     fn render_field(
@@ -710,6 +719,8 @@ impl Render for ChangesView {
 
         // A failed fetch speaks plain language and offers a Retry (the chat
         // lens's voice); the raw status or error body never reaches the reader.
+        // The kit's alert carries the danger tint and icon; the row only places
+        // it beside the Retry.
         if let Some(message) = self.error.clone() {
             root = root.child(
                 div()
@@ -718,31 +729,15 @@ impl Render for ChangesView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .justify_between()
                     .gap(px(12.0))
                     .px_3()
                     .py_2()
-                    .bg(theme.danger_tint)
+                    .child(div().flex_1().child(Alert::error("changes-alert", message)))
                     .child(
-                        div()
-                            .text_size(px(12.0 * theme.density_scale()))
-                            .text_color(theme.danger_text)
-                            .child(message),
-                    )
-                    .child(
-                        div()
-                            .id("changes-retry")
+                        Button::new("changes-retry")
                             .debug_selector(|| "changes-retry".to_string())
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .min_h(px(44.0))
-                            .px_3()
-                            .rounded_md()
-                            .bg(theme.primary)
-                            .text_color(theme.primary_text)
-                            .text_size(px(12.0 * theme.density_scale()))
-                            .child("Retry")
+                            .primary()
+                            .label("Retry")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.retry();
                                 cx.notify();
@@ -834,14 +829,15 @@ impl Render for ChangesView {
                     path.clone()
                 };
                 let file_clone = file.clone();
+                // A changed file is a control, so it is the kit's text button:
+                // the row's own padding, tint and 8px content gap are kept, and
+                // the mark/label/counts sit in one full-width child so they stay
+                // left-packed the way the hand-rolled row laid them out.
                 file_rows = file_rows.child(
-                    div()
-                        .id(self.next_row_id())
+                    Button::new(self.next_row_id())
                         .debug_selector(|| "changes-row".to_string())
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
+                        .text()
+                        .w_full()
                         .px_2()
                         .py_1()
                         .rounded_md()
@@ -850,24 +846,32 @@ impl Render for ChangesView {
                         } else {
                             Theme::current().surface_panel
                         })
-                        .text_size(px(12.0 * Theme::current().density_scale()))
                         .child(
                             div()
-                                .id(self.next_row_id())
-                                .text_color(mark_color)
-                                .child(mark.to_string()),
-                        )
-                        .child(
-                            div()
-                                .id(self.next_row_id())
-                                .text_color(Theme::current().text)
-                                .child(label),
-                        )
-                        .child(
-                            div()
-                                .id(self.next_row_id())
-                                .text_color(Theme::current().text_dim)
-                                .child(counts),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .w_full()
+                                .text_size(px(12.0 * Theme::current().density_scale()))
+                                .child(
+                                    div()
+                                        .id(self.next_row_id())
+                                        .text_color(mark_color)
+                                        .child(mark.to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .id(self.next_row_id())
+                                        .text_color(Theme::current().text)
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .id(self.next_row_id())
+                                        .text_color(Theme::current().text_dim)
+                                        .child(counts),
+                                ),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.select_file(&file_clone);
@@ -1069,10 +1073,11 @@ impl Render for ChangesView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{point, size, Entity};
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{point, size, Entity};
     use serde_json::json;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn classifies_unified_lines() {
         assert_eq!(classify_patch_line("+new"), PatchKind::Add);
         assert_eq!(classify_patch_line("-old"), PatchKind::Delete);
@@ -1081,7 +1086,7 @@ mod tests {
         assert_eq!(classify_patch_line(" context"), PatchKind::Context);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn patch_colors_differ_by_kind() {
         assert_ne!(patch_color(PatchKind::Add), patch_color(PatchKind::Delete));
         assert_ne!(
@@ -1090,7 +1095,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn highlight_uses_field_names() {
         // Compiles only with HighlightStyle field names (color/font_weight/…).
         let header = patch_highlight(PatchKind::Header);
@@ -1100,7 +1105,7 @@ mod tests {
         assert!(add.color.is_some());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn commit_query_passes_base_head_only_in_commit_scope() {
         let mut view_scope = RepoDiffScope::Workspace;
         assert_eq!(view_scope.as_str(), "workspace");
@@ -1108,7 +1113,7 @@ mod tests {
         assert_eq!(view_scope.as_str(), "commit");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn diff_line_numbers_assigns_old_and_new_numbers() {
         let patch = concat!(
             "diff --git a/x b/x\n",
@@ -1215,7 +1220,7 @@ mod tests {
         assert_eq!(lines[4].new_no, None);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn clamp_list_width_keeps_the_diff_usable() {
         // Plenty of room: the default passes through (1280px window, sidebar
         // 280, tree and reader 360 → 640px for this view).
@@ -1257,269 +1262,292 @@ mod tests {
         })
     }
 
-    #[gpui::test]
-    fn the_changes_lens_shows_the_file_list_and_diff_surface(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(ChangesView::new));
-        cx.draw(
-            point(px(0.), px(0.)),
-            size(px(1280.), px(800.)),
-            |_, _cx| view.clone(),
-        );
-        assert!(
-            cx.debug_bounds("changes-file-list").is_some(),
-            "the file list is on screen"
-        );
-        assert!(
-            cx.debug_bounds("changes-diff").is_some(),
-            "the diff surface is on screen even with no file selected"
-        );
+    crate::orion_test!(
+        fn the_changes_lens_shows_the_file_list_and_diff_surface(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(1280.), px(800.)),
+                |_, _cx| view.clone().into_any_element(),
+            );
+            assert!(
+                cx.debug_bounds("changes-file-list").is_some(),
+                "the file list is on screen"
+            );
+            assert!(
+                cx.debug_bounds("changes-diff").is_some(),
+                "the diff surface is on screen even with no file selected"
+            );
 
-        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
-            view.update(cx, |v, _cx| {
-                v.apply_list(
-                    RepoDiffFileList::parse(&file_list_json(json!([
-                        {"path": "a.rs", "old_path": null, "status": "modified",
-                         "additions": 3, "deletions": 1, "binary": null},
-                        {"path": "b.rs", "old_path": null, "status": "added",
-                         "additions": 5, "deletions": 0, "binary": null},
-                    ])))
-                    .expect("parse"),
+            cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
+                view.update(cx, |v, _cx| {
+                    v.apply_list(
+                        RepoDiffFileList::parse(&file_list_json(json!([
+                            {"path": "a.rs", "old_path": null, "status": "modified",
+                             "additions": 3, "deletions": 1, "binary": null},
+                            {"path": "b.rs", "old_path": null, "status": "added",
+                             "additions": 5, "deletions": 0, "binary": null},
+                        ])))
+                        .expect("parse"),
+                    );
+                });
+                view.clone().into_any_element()
+            });
+            assert!(
+                cx.debug_bounds("changes-row").is_some(),
+                "the changed files are on screen"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn the_changes_lens_offers_a_retry_when_a_fetch_fails(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChangesRoot {
+                view: cx.new(ChangesView::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |v, _cx| v.fail_list("boom".to_string()));
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.debug_bounds("changes-error").is_some(),
+                "the failure is on screen"
+            );
+            assert!(
+                cx.debug_bounds("changes-retry").is_some(),
+                "a Retry is offered"
+            );
+
+            let bounds = cx.debug_bounds("changes-retry").expect("the Retry");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                assert_eq!(
+                    view.read(app).error(),
+                    None,
+                    "the Retry cleared the failure"
                 );
             });
-            view.clone()
-        });
-        assert!(
-            cx.debug_bounds("changes-row").is_some(),
-            "the changed files are on screen"
-        );
-    }
+        }
+    );
 
-    #[gpui::test]
-    fn the_changes_lens_offers_a_retry_when_a_fetch_fails(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChangesRoot {
-            view: cx.new(ChangesView::new),
-        });
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |v, _cx| v.fail_list("boom".to_string()));
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(
-            cx.debug_bounds("changes-error").is_some(),
-            "the failure is on screen"
-        );
-        assert!(
-            cx.debug_bounds("changes-retry").is_some(),
-            "a Retry is offered"
-        );
-
-        let bounds = cx.debug_bounds("changes-retry").expect("the Retry");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            assert_eq!(
-                view.read(app).error(),
-                None,
-                "the Retry cleared the failure"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn a_clean_repository_shows_an_empty_state(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(ChangesView::new));
-        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
-            view.update(cx, |v, _cx| {
-                v.apply_list(RepoDiffFileList::parse(&file_list_json(json!([]))).expect("parse"));
+    crate::orion_test!(
+        fn a_clean_repository_shows_an_empty_state(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
+                view.update(cx, |v, _cx| {
+                    v.apply_list(
+                        RepoDiffFileList::parse(&file_list_json(json!([]))).expect("parse"),
+                    );
+                });
+                view.clone().into_any_element()
             });
-            view.clone()
-        });
-        assert!(
-            cx.debug_bounds("changes-empty").is_some(),
-            "the clean-tree empty state is on screen"
-        );
-        assert!(
-            cx.debug_bounds("changes-row").is_none(),
-            "a clean tree lists no files"
-        );
-    }
+            assert!(
+                cx.debug_bounds("changes-empty").is_some(),
+                "the clean-tree empty state is on screen"
+            );
+            assert!(
+                cx.debug_bounds("changes-row").is_none(),
+                "a clean tree lists no files"
+            );
+        }
+    );
 
-    #[gpui::test]
-    fn the_file_list_and_diff_split_stays_usable_at_1280_and_narrow(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(ChangesView::new));
+    crate::orion_test!(
+        fn the_file_list_and_diff_split_stays_usable_at_1280_and_narrow(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChangesView::new));
 
-        // 1280px window, sidebar 280, tree 220 + reader 140 = 360 → the app
-        // gives this view 640px.
-        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
-            view.update(cx, |v, _cx| v.set_available_width(640.0));
-            div().w(px(640.0)).h_full().child(view.clone())
-        });
-        let list = cx
-            .debug_bounds("changes-file-list")
-            .expect("the file list at 1280");
-        assert_eq!(list.size.width, px(320.0), "the default list width holds");
-        let diff = cx.debug_bounds("changes-diff").expect("the diff at 1280");
-        assert_eq!(
-            diff.size.width,
-            px(312.0),
-            "the diff takes the room the list does not need"
-        );
-        assert!(
-            diff.size.width >= px(DIFF_WIDTH_MIN),
-            "the diff keeps its minimum at 1280 (got {})",
-            diff.size.width
-        );
+            // 1280px window, sidebar 280, tree 220 + reader 140 = 360 → the app
+            // gives this view 640px.
+            cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
+                view.update(cx, |v, _cx| v.set_available_width(640.0));
+                div().w(px(640.0)).h_full().child(view.clone())
+            });
+            let list = cx
+                .debug_bounds("changes-file-list")
+                .expect("the file list at 1280");
+            assert_eq!(list.size.width, px(320.0), "the default list width holds");
+            let diff = cx.debug_bounds("changes-diff").expect("the diff at 1280");
+            assert_eq!(
+                diff.size.width,
+                px(312.0),
+                "the diff takes the room the list does not need"
+            );
+            assert!(
+                diff.size.width >= px(DIFF_WIDTH_MIN),
+                "the diff keeps its minimum at 1280 (got {})",
+                diff.size.width
+            );
 
-        // 800px window, rail 64, tree 140 → the app gives this view 596px.
-        cx.draw(point(px(0.), px(0.)), size(px(800.), px(600.)), |_, cx| {
-            view.update(cx, |v, _cx| v.set_available_width(596.0));
-            div().w(px(596.0)).h_full().child(view.clone())
-        });
-        let list = cx
-            .debug_bounds("changes-file-list")
-            .expect("the file list at 800");
-        assert_eq!(
-            list.size.width,
-            px(308.0),
-            "the list yields before the diff does"
-        );
-        let diff = cx.debug_bounds("changes-diff").expect("the diff at 800");
-        assert!(
-            diff.size.width >= px(DIFF_WIDTH_MIN),
-            "the diff keeps its minimum at the narrow breakpoint (got {})",
-            diff.size.width
-        );
-    }
+            // 800px window, rail 64, tree 140 → the app gives this view 596px.
+            cx.draw(point(px(0.), px(0.)), size(px(800.), px(600.)), |_, cx| {
+                view.update(cx, |v, _cx| v.set_available_width(596.0));
+                div()
+                    .w(px(596.0))
+                    .h_full()
+                    .child(view.clone().into_any_element())
+            });
+            let list = cx
+                .debug_bounds("changes-file-list")
+                .expect("the file list at 800");
+            assert_eq!(
+                list.size.width,
+                px(308.0),
+                "the list yields before the diff does"
+            );
+            let diff = cx.debug_bounds("changes-diff").expect("the diff at 800");
+            assert!(
+                diff.size.width >= px(DIFF_WIDTH_MIN),
+                "the diff keeps its minimum at the narrow breakpoint (got {})",
+                diff.size.width
+            );
+        }
+    );
 
-    #[gpui::test]
-    fn the_splitter_drag_resizes_the_file_list(cx: &mut gpui::TestAppContext) {
-        use gpui::{point, size};
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(ChangesView::new));
+    crate::orion_test!(
+        fn the_splitter_drag_resizes_the_file_list(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::{point, size};
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChangesView::new));
 
-        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
-            view.update(cx, |v, _cx| {
-                v.set_available_width(640.0);
-                v.apply_list(
-                    RepoDiffFileList::parse(&file_list_json(json!([
-                        {"path": "a.rs", "old_path": null, "status": "modified",
-                         "additions": 3, "deletions": 1, "binary": null},
-                    ])))
-                    .expect("parse"),
+            cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
+                view.update(cx, |v, _cx| {
+                    v.set_available_width(640.0);
+                    v.apply_list(
+                        RepoDiffFileList::parse(&file_list_json(json!([
+                            {"path": "a.rs", "old_path": null, "status": "modified",
+                             "additions": 3, "deletions": 1, "binary": null},
+                        ])))
+                        .expect("parse"),
+                    );
+                });
+                div().w(px(640.0)).h_full().child(view.clone())
+            });
+
+            let before = cx.debug_bounds("changes-file-list").expect("the file list");
+            assert_eq!(
+                before.size.width,
+                px(320.0),
+                "the list starts at its default"
+            );
+
+            // Grab the splitter and drag it 60px to the left, across the list.
+            let splitter = cx.debug_bounds("changes-splitter").expect("the splitter");
+            let grip = splitter.center();
+            let target = point(px(f32::from(grip.x) - 60.0), grip.y);
+            cx.simulate_mouse_down(
+                grip,
+                gpui_kit::MouseButton::Left,
+                gpui_kit::Modifiers::none(),
+            );
+            // The drag layer is on screen from the next frame on.
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(1280.), px(800.)),
+                |_, _cx| div().w(px(640.0)).h_full().child(view.clone()),
+            );
+            assert!(
+                cx.debug_bounds("changes-drag-layer").is_some(),
+                "the drag layer is on screen while the handle is held"
+            );
+            cx.simulate_mouse_move(
+                target,
+                Some(gpui_kit::MouseButton::Left),
+                gpui_kit::Modifiers::none(),
+            );
+            cx.simulate_mouse_up(
+                target,
+                gpui_kit::MouseButton::Left,
+                gpui_kit::Modifiers::none(),
+            );
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(1280.), px(800.)),
+                |_, _cx| div().w(px(640.0)).h_full().child(view.clone()),
+            );
+
+            let after = cx.debug_bounds("changes-file-list").expect("the file list");
+            assert_eq!(
+                after.size.width,
+                px(260.0),
+                "the drag made the list 60px narrower"
+            );
+            let diff = cx.debug_bounds("changes-diff").expect("the diff");
+            assert_eq!(diff.size.width, px(372.0), "the diff took the room");
+        }
+    );
+
+    crate::orion_test!(
+        fn switching_the_lens_away_and_back_keeps_the_selection_and_scroll(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChangesRoot {
+                view: cx.new(ChangesView::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |v, _cx| {
+                    v.apply_list(
+                        RepoDiffFileList::parse(&file_list_json(json!([
+                            {"path": "a.rs", "old_path": null, "status": "modified",
+                             "additions": 3, "deletions": 1, "binary": null},
+                        ])))
+                        .expect("parse"),
+                    );
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            let (selected, list_offset, patch_offset) = cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |v, _cx| {
+                    let file = v.list.as_ref().expect("list").files[0].clone();
+                    v.select_file(&file);
+                    v.list_scroll.set_offset(point(px(0.), px(-40.0)));
+                    v.patch_scroll.set_offset(point(px(0.), px(-120.0)));
+                });
+                (
+                    view.read(app).selected_path.clone(),
+                    view.read(app).list_scroll.offset(),
+                    view.read(app).patch_scroll.offset(),
+                )
+            });
+            assert!(selected.is_some(), "a file is selected");
+
+            // Away and back: the lens switch must not reset the view's state.
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |v, _cx| v.set_visible(false));
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |v, _cx| v.set_visible(true));
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                assert_eq!(
+                    view.read(app).selected_path,
+                    selected,
+                    "the selection survives the lens switch"
+                );
+                assert_eq!(
+                    view.read(app).list_scroll.offset(),
+                    list_offset,
+                    "the list scroll survives the lens switch"
+                );
+                assert_eq!(
+                    view.read(app).patch_scroll.offset(),
+                    patch_offset,
+                    "the diff scroll survives the lens switch"
                 );
             });
-            div().w(px(640.0)).h_full().child(view.clone())
-        });
-
-        let before = cx.debug_bounds("changes-file-list").expect("the file list");
-        assert_eq!(
-            before.size.width,
-            px(320.0),
-            "the list starts at its default"
-        );
-
-        // Grab the splitter and drag it 60px to the left, across the list.
-        let splitter = cx.debug_bounds("changes-splitter").expect("the splitter");
-        let grip = splitter.center();
-        let target = point(px(f32::from(grip.x) - 60.0), grip.y);
-        cx.simulate_mouse_down(grip, gpui::MouseButton::Left, gpui::Modifiers::none());
-        // The drag layer is on screen from the next frame on.
-        cx.draw(
-            point(px(0.), px(0.)),
-            size(px(1280.), px(800.)),
-            |_, _cx| div().w(px(640.0)).h_full().child(view.clone()),
-        );
-        assert!(
-            cx.debug_bounds("changes-drag-layer").is_some(),
-            "the drag layer is on screen while the handle is held"
-        );
-        cx.simulate_mouse_move(
-            target,
-            Some(gpui::MouseButton::Left),
-            gpui::Modifiers::none(),
-        );
-        cx.simulate_mouse_up(target, gpui::MouseButton::Left, gpui::Modifiers::none());
-        cx.draw(
-            point(px(0.), px(0.)),
-            size(px(1280.), px(800.)),
-            |_, _cx| div().w(px(640.0)).h_full().child(view.clone()),
-        );
-
-        let after = cx.debug_bounds("changes-file-list").expect("the file list");
-        assert_eq!(
-            after.size.width,
-            px(260.0),
-            "the drag made the list 60px narrower"
-        );
-        let diff = cx.debug_bounds("changes-diff").expect("the diff");
-        assert_eq!(diff.size.width, px(372.0), "the diff took the room");
-    }
-
-    #[gpui::test]
-    fn switching_the_lens_away_and_back_keeps_the_selection_and_scroll(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChangesRoot {
-            view: cx.new(ChangesView::new),
-        });
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |v, _cx| {
-                v.apply_list(
-                    RepoDiffFileList::parse(&file_list_json(json!([
-                        {"path": "a.rs", "old_path": null, "status": "modified",
-                         "additions": 3, "deletions": 1, "binary": null},
-                    ])))
-                    .expect("parse"),
-                );
-            });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        let (selected, list_offset, patch_offset) = cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |v, _cx| {
-                let file = v.list.as_ref().expect("list").files[0].clone();
-                v.select_file(&file);
-                v.list_scroll.set_offset(point(px(0.), px(-40.0)));
-                v.patch_scroll.set_offset(point(px(0.), px(-120.0)));
-            });
-            (
-                view.read(app).selected_path.clone(),
-                view.read(app).list_scroll.offset(),
-                view.read(app).patch_scroll.offset(),
-            )
-        });
-        assert!(selected.is_some(), "a file is selected");
-
-        // Away and back: the lens switch must not reset the view's state.
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |v, _cx| v.set_visible(false));
-        });
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |v, _cx| v.set_visible(true));
-        });
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            assert_eq!(
-                view.read(app).selected_path,
-                selected,
-                "the selection survives the lens switch"
-            );
-            assert_eq!(
-                view.read(app).list_scroll.offset(),
-                list_offset,
-                "the list scroll survives the lens switch"
-            );
-            assert_eq!(
-                view.read(app).patch_scroll.offset(),
-                patch_offset,
-                "the diff scroll survives the lens switch"
-            );
-        });
-    }
+        }
+    );
 }
