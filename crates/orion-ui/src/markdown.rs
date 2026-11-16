@@ -484,7 +484,7 @@ pub fn opens_in_browser(target: &str) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn heading_and_paragraph() {
         let lines = parse_markdown("# Title\n\nHello world.\n");
         assert!(lines
@@ -495,7 +495,7 @@ mod tests {
             .any(|l| l.style == BlockKind::Paragraph && l.text == "Hello world."));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn inline_runs_bold_code_link() {
         let lines = parse_markdown("A **bold** and `code` and [link](https://example.com).\n");
         assert_eq!(lines.len(), 1);
@@ -517,7 +517,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn list_and_code_block() {
         let lines = parse_markdown("- one\n- two\n\n```\nlet x = 1;\n```\n");
         assert!(lines
@@ -528,20 +528,20 @@ mod tests {
             .any(|l| l.style == BlockKind::Code && l.text.contains("let x = 1;")));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn quote_and_rule() {
         let lines = parse_markdown("> quoted\n\n---\n");
         assert!(lines.iter().any(|l| l.style == BlockKind::Quote));
         assert!(lines.iter().any(|l| l.style == BlockKind::Rule));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn empty_input_yields_no_lines() {
         assert!(parse_markdown("").is_empty());
         assert!(parse_markdown("\n\n").is_empty());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn headings_are_bold_and_prose_is_not() {
         let h1 = block_style(&BlockKind::Heading(1));
         let body = block_style(&BlockKind::Paragraph);
@@ -550,13 +550,13 @@ mod tests {
         assert!(!h1.mono && !body.mono, "prose is not monospaced");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn code_blocks_are_mono() {
         let code = block_style(&BlockKind::Code);
         assert!(code.mono, "code is monospaced");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn list_items_indent_with_their_depth() {
         let shallow = block_style(&BlockKind::ListItem(0));
         let deep = block_style(&BlockKind::ListItem(2));
@@ -564,7 +564,7 @@ mod tests {
         assert_eq!(shallow.indent, 0.0);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_block_kind_says_what_it_is() {
         assert!(BlockKind::Code.is_code());
         assert!(!BlockKind::Paragraph.is_code());
@@ -573,14 +573,14 @@ mod tests {
         assert_eq!(BlockKind::Paragraph.list_depth(), None);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn quotes_and_rules_are_marked_as_such() {
         assert!(block_style(&BlockKind::Quote).quote);
         assert!(block_style(&BlockKind::Rule).rule);
         assert!(!block_style(&BlockKind::Paragraph).quote);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_link_keeps_its_target() {
         let lines = parse_markdown("See [the docs](https://example.com/docs).");
         let link = lines[0].links.first().expect("the link keeps a target");
@@ -588,7 +588,7 @@ mod tests {
         assert_eq!(&lines[0].text[link.0.clone()], "the docs");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn only_web_targets_are_opened() {
         assert!(opens_in_browser("https://example.com/docs"));
         assert!(opens_in_browser("mailto:me@example.com"));
@@ -602,7 +602,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_list_item_loses_its_marker() {
         let (body, shift) = list_item_parts("- one");
         assert_eq!(body, "one");
@@ -615,7 +615,7 @@ mod tests {
         assert_eq!(shift, 0);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_line_splits_into_its_styled_spans() {
         let lines = parse_markdown("A **bold** and `code` and [link](https://example.com).");
         let line = &lines[0];
@@ -646,7 +646,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_link_span_keeps_its_target() {
         let lines = parse_markdown("[docs](https://example.com/docs)");
         let link = spans(&lines[0])
@@ -656,7 +656,7 @@ mod tests {
         assert_eq!(link.target.as_deref(), Some("https://example.com/docs"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn no_span_ends_in_whitespace() {
         let lines = parse_markdown("word **bold** more");
         let line = &lines[0];
