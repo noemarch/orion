@@ -195,7 +195,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_terminal_with_no_parent_is_a_root() {
         let terminals = json!([
             { "id": "a", "name": "shell", "cwd": "/tmp", "program": "claude" },
@@ -208,7 +208,7 @@ mod tests {
         assert!(!rows[0].has_children);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_child_sits_under_its_parent() {
         let terminals = json!([
             { "id": "a", "program": "claude" },
@@ -224,7 +224,7 @@ mod tests {
         assert!(!rows[1].has_children);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_terminal_whose_parent_is_missing_is_a_root() {
         let terminals = json!([
             { "id": "b", "parent_id": "gone", "program": "omp" },
@@ -236,7 +236,7 @@ mod tests {
         assert!(!rows[0].has_children);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_terminal_that_has_not_reported_has_no_status() {
         let terminals = json!([{ "id": "a", "program": "claude" }]);
         let rows = terminal_rows(&terminals);
@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(status_token(rows[0].status.as_deref()), None);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_status_token_names_the_reported_state() {
         assert_eq!(status_token(Some("working")), Some("working"));
         assert_eq!(status_token(Some("done")), Some("done"));
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(status_token(Some("compacting")), None);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_cycle_in_the_parents_does_not_hang() {
         let terminals = json!([
             { "id": "a", "parent_id": "b", "program": "claude" },
@@ -269,7 +269,7 @@ mod tests {
         assert!(ids.contains(&"b"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_list_is_read_from_either_shape() {
         let bare = json!([
             { "id": "a", "program": "claude" },
@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(terminal_rows(&bare), terminal_rows(&wrapped));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_terminal_missing_its_fields_is_not_invented() {
         let terminals = json!([{ "id": "a" }]);
         let rows = terminal_rows(&terminals);
