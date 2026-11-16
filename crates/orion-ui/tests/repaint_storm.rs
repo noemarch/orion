@@ -64,7 +64,7 @@ fn big_log() -> String {
     log
 }
 
-#[test]
+#[::core::prelude::v1::test]
 fn the_fixture_replays_through_the_grid_with_monotonic_revisions() {
     let text = fixture_text();
     let mut screen = ScreenState::new(32, 120);
@@ -95,7 +95,7 @@ fn the_fixture_replays_through_the_grid_with_monotonic_revisions() {
     );
 }
 
-#[test]
+#[::core::prelude::v1::test]
 fn the_fixture_is_byte_stable() {
     // Same input, same grid: two replays must produce identical cells.
     let text = fixture_text();
@@ -110,7 +110,7 @@ fn the_fixture_is_byte_stable() {
     assert_eq!(first.viewport_cells(0), second.viewport_cells(0));
 }
 
-#[test]
+#[::core::prelude::v1::test]
 fn truncated_and_corrupt_sequences_are_absorbed() {
     let text = fixture_text();
     // Cut the fixture at points that land inside escape sequences and inside
@@ -149,7 +149,7 @@ fn truncated_and_corrupt_sequences_are_absorbed() {
     assert!(screen.revision() >= 5);
 }
 
-#[test]
+#[::core::prelude::v1::test]
 fn the_big_log_replays_through_the_grid() {
     let log = big_log();
     assert!(
@@ -175,7 +175,7 @@ fn the_big_log_replays_through_the_grid() {
 
 /// The live-cat workload: a real ConPTY running `type`/`cat` on a ≥ 2 MiB
 /// file, drained and fed into the grid as the bytes arrive.
-#[test]
+#[::core::prelude::v1::test]
 fn live_cat_through_a_pty() {
     use std::io::Read;
 
@@ -279,7 +279,8 @@ fn live_cat_through_a_pty() {
 #[cfg(debug_assertions)]
 mod frame_times {
     use super::*;
-    use gpui::{AppContext, Context, Entity, IntoElement, Render, Window};
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{AppContext, Context, Entity, IntoElement, Render, Window};
 
     struct TerminalRoot {
         view: Entity<orion_ui::terminal::TerminalPane>,
@@ -292,7 +293,7 @@ mod frame_times {
     }
 
     fn replay_with_draws(
-        cx: &mut gpui::TestAppContext,
+        cx: &mut gpui_kit::TestAppContext,
         text: &str,
         chunk_size: usize,
     ) -> (Duration, orion_ui::perf::PerfStats) {
@@ -309,7 +310,7 @@ mod frame_times {
                     cx.notify();
                 });
             });
-            cx.update(|window, cx| window.draw(cx).clear());
+            cx.update(|window, cx| window.render_frame(cx));
         }
         let wall = started.elapsed();
         (wall, orion_ui::perf::snapshot())
@@ -330,21 +331,23 @@ mod frame_times {
         }
     }
 
-    #[gpui::test]
-    fn fixture_replay_frame_times(cx: &mut gpui::TestAppContext) {
-        let text = fixture_text();
-        let (wall, stats) = replay_with_draws(cx, &text, 4 * 1024);
-        report("fixture replay", wall, &stats);
-        assert!(!stats.frames.is_empty(), "the replay drew frames");
-        assert!(!stats.feeds.is_empty(), "the replay fed the grid");
-    }
+    orion_ui::orion_test!(
+        fn fixture_replay_frame_times(cx: &mut gpui_kit::TestAppContext) {
+            let text = fixture_text();
+            let (wall, stats) = replay_with_draws(cx, &text, 4 * 1024);
+            report("fixture replay", wall, &stats);
+            assert!(!stats.frames.is_empty(), "the replay drew frames");
+            assert!(!stats.feeds.is_empty(), "the replay fed the grid");
+        }
+    );
 
-    #[gpui::test]
-    fn big_log_replay_frame_times(cx: &mut gpui::TestAppContext) {
-        let log = big_log();
-        let (wall, stats) = replay_with_draws(cx, &log, 16 * 1024);
-        report("big log replay", wall, &stats);
-        assert!(!stats.frames.is_empty(), "the replay drew frames");
-        assert!(!stats.feeds.is_empty(), "the replay fed the grid");
-    }
+    orion_ui::orion_test!(
+        fn big_log_replay_frame_times(cx: &mut gpui_kit::TestAppContext) {
+            let log = big_log();
+            let (wall, stats) = replay_with_draws(cx, &log, 16 * 1024);
+            report("big log replay", wall, &stats);
+            assert!(!stats.frames.is_empty(), "the replay drew frames");
+            assert!(!stats.feeds.is_empty(), "the replay fed the grid");
+        }
+    );
 }
