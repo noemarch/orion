@@ -9,8 +9,12 @@
 use serde_json::Value;
 
 use crate::theme::Theme;
-use gpui::prelude::*;
-use gpui::{div, px, Context, FocusHandle, Render, Styled, Window};
+use gpui_kit::base::component_traits::Disableable;
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::radio::{Radio, RadioGroup};
+use gpui_kit::*;
+use gpui_kit::{div, px, Context, FocusHandle, Render, Styled, Window};
 use orion_core::runtime::Runtime;
 use serde_json::json;
 use std::sync::Arc;
@@ -93,7 +97,7 @@ pub enum NewWorkspaceEvent {
     Created(String),
 }
 
-impl gpui::EventEmitter<NewWorkspaceEvent> for NewWorkspaceModal {}
+impl gpui_kit::EventEmitter<NewWorkspaceEvent> for NewWorkspaceModal {}
 
 /// The folder-browser + agent-picker modal behind `POST /api/workspace/create`.
 ///
@@ -290,11 +294,11 @@ impl Render for NewWorkspaceModal {
         // The modal owns the keyboard while it is open, so Escape closes it
         // regardless of which pane had focus.
         if !self.focus_handle.is_focused(window) {
-            self.focus_handle.focus(window);
+            self.focus_handle.focus(window, cx);
         }
         let theme = Theme::current();
         let scale = theme.density_scale();
-        let row_h = theme.row_height() * scale;
+        let _row_h = theme.row_height() * scale;
         let can_create = self.selected_agent.is_some() && !self.cwd.trim().is_empty();
         let cwd = self.cwd.clone();
         let parent = self.parent.clone();
@@ -303,23 +307,16 @@ impl Render for NewWorkspaceModal {
         let agents = self.agents.clone();
         let selected = self.selected_agent.clone();
 
+        // A folder is a button: the row opens the folder, and the kit's
+        // text button carries the chevron and the name in one label.
         let directory_rows = directories
             .iter()
             .map(|name| {
                 let name_for_click = name.clone();
-                div()
-                    .id(self.next_row_id())
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0 * scale))
-                    .min_h(px(row_h.max(32.0)))
-                    .px_2()
-                    .rounded_md()
-                    .text_size(px(12.0 * scale))
-                    .text_color(theme.text)
-                    .child("▸")
-                    .child(name.clone())
+                let row_id = self.next_row_id();
+                Button::new(format!("new-workspace-dir-{row_id}"))
+                    .label(format!("▸ {name}"))
+                    .text()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.navigate(&name_for_click);
                         cx.notify();
@@ -327,52 +324,25 @@ impl Render for NewWorkspaceModal {
             })
             .collect::<Vec<_>>();
 
-        let agent_rows = agents
+        // The agent list is one choice out of many: the kit's radio group
+        // owns the selection, and an agent that is not installed stays
+        // unselectable — the handler ignores the change, so the group's
+        // selected index keeps pointing at the agent that can be used.
+        let selected_index = agents
             .iter()
-            .map(|agent| {
-                let active = selected.as_deref() == Some(agent.kind.as_str());
-                let installed = agent.installed;
-                let kind = agent.kind.clone();
-                div()
-                    .id(self.next_row_id())
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0 * scale))
-                    .min_h(px(row_h.max(32.0)))
-                    .px_2()
-                    .rounded_md()
-                    .bg(if active {
-                        theme.accent_tint
-                    } else {
-                        Theme::transparent()
-                    })
-                    .text_size(px(12.0 * scale))
-                    .text_color(if installed {
-                        theme.text
-                    } else {
-                        theme.text_dim
-                    })
-                    .child(if active { "●" } else { "○" })
-                    .child(agent.label.clone())
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .text_size(px(11.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child(agent.hint()),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if installed {
-                            this.selected_agent = Some(kind.clone());
-                            cx.notify();
-                        }
-                    }))
-            })
-            .collect::<Vec<_>>();
+            .position(|agent| selected.as_deref() == Some(agent.kind.as_str()));
+        let agent_choices = agents.iter().map(|agent| {
+            let kind = agent.kind.clone();
+            let label = if agent.installed {
+                agent.label.clone()
+            } else {
+                format!("{} — {}", agent.label, agent.hint())
+            };
+            Radio::new(format!("new-workspace-agent-{kind}"))
+                .label(label)
+                .checked(selected.as_deref() == Some(kind.as_str()))
+                .disabled(!agent.installed)
+        });
 
         div()
             .id("new-workspace-modal")
@@ -395,7 +365,7 @@ impl Render for NewWorkspaceModal {
                     .border_1()
                     .border_color(theme.border)
                     .track_focus(&self.focus_handle)
-                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                    .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
                         if ev.keystroke.key == "escape" {
                             this.close();
                             cx.notify();
@@ -414,16 +384,9 @@ impl Render for NewWorkspaceModal {
                                     .child("New Workspace"),
                             )
                             .child(
-                                div()
-                                    .id("new-workspace-close")
-                                    .flex()
-                                    .size(px(32.0 * scale))
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_md()
-                                    .bg(theme.surface_hover)
-                                    .text_color(theme.text)
-                                    .child("✕")
+                                Button::new("new-workspace-close")
+                                    .label("✕")
+                                    .text()
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.close();
                                         cx.notify();
@@ -447,30 +410,19 @@ impl Render for NewWorkspaceModal {
                                     .justify_end()
                                     .gap(px(8.0 * scale))
                                     .child(
-                                        div()
-                                            .id("new-workspace-home")
-                                            .px_2()
-                                            .rounded_md()
-                                            .bg(theme.surface_elevated)
-                                            .text_color(theme.text)
-                                            .child("Home")
+                                        Button::new("new-workspace-home")
+                                            .label("Home")
+                                            .secondary()
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.go_home();
                                                 cx.notify();
                                             })),
                                     )
                                     .child(
-                                        div()
-                                            .id("new-workspace-up")
-                                            .px_2()
-                                            .rounded_md()
-                                            .bg(theme.surface_elevated)
-                                            .text_color(if parent.is_some() {
-                                                theme.text
-                                            } else {
-                                                theme.text_dim
-                                            })
-                                            .child("Up")
+                                        Button::new("new-workspace-up")
+                                            .label("Up")
+                                            .secondary()
+                                            .disabled(parent.is_none())
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.go_up();
                                                 cx.notify();
@@ -510,21 +462,23 @@ impl Render for NewWorkspaceModal {
                             .min_h(px(0.0))
                             .overflow_y_scroll()
                             .child(
-                                div()
-                                    .id("new-workspace-agents")
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .children(agent_rows),
+                                RadioGroup::new("new-workspace-agents")
+                                    .children(agent_choices)
+                                    .selected_index(selected_index)
+                                    .on_change(cx.listener(|this, index: &usize, _, cx| {
+                                        if let Some(agent) = this.agents.get(*index) {
+                                            if agent.installed {
+                                                this.selected_agent = Some(agent.kind.clone());
+                                                cx.notify();
+                                            }
+                                        }
+                                    })),
                             ),
                     )
                     .child(if let Some(error) = error {
-                        div()
-                            .text_size(px(11.0 * scale))
-                            .text_color(theme.danger_text)
-                            .child(error)
+                        Alert::error("new-workspace-error", error).into_any_element()
                     } else {
-                        div()
+                        div().into_any_element()
                     })
                     .child(
                         div()
@@ -533,36 +487,19 @@ impl Render for NewWorkspaceModal {
                             .justify_end()
                             .gap(px(8.0 * scale))
                             .child(
-                                div()
-                                    .id("new-workspace-cancel")
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(theme.surface_elevated)
-                                    .text_color(theme.text)
-                                    .child("Cancel")
+                                Button::new("new-workspace-cancel")
+                                    .label("Cancel")
+                                    .secondary()
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.close();
                                         cx.notify();
                                     })),
                             )
                             .child(
-                                div()
-                                    .id("new-workspace-create")
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(if can_create {
-                                        theme.primary
-                                    } else {
-                                        theme.surface_elevated
-                                    })
-                                    .text_color(if can_create {
-                                        theme.primary_text
-                                    } else {
-                                        theme.text_dim
-                                    })
-                                    .child("Open Workspace")
+                                Button::new("new-workspace-create")
+                                    .label("Open Workspace")
+                                    .primary()
+                                    .disabled(!can_create)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.create(cx);
                                     })),
@@ -578,7 +515,7 @@ mod tests {
     use orion_core::Engine;
     use serde_json::json;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn agent_choices_read_the_agents_route() {
         let body = json!({
             "agents": [
@@ -596,7 +533,7 @@ mod tests {
         assert_eq!(choices[1].hint(), "Not on PATH");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn agent_choices_ignore_malformed_rows() {
         let body = json!({
             "agents": [
@@ -610,12 +547,12 @@ mod tests {
         assert!(!choices[0].installed);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn agent_choices_are_empty_without_the_key() {
         assert!(agent_choices(&json!({})).is_empty());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn recent_directory_prefers_the_explicit_value() {
         let start = recent_directory(
             Some("C:/work/explicit"),
@@ -626,7 +563,7 @@ mod tests {
         assert_eq!(start, "C:/work/explicit");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn recent_directory_prefers_the_focused_workspace() {
         let start = recent_directory(
             None,
@@ -637,7 +574,7 @@ mod tests {
         assert_eq!(start, "C:/work/focused");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn recent_directory_falls_back_to_any_workspace_then_home() {
         assert_eq!(
             recent_directory(None, None, Some("C:/work/any"), "C:/home"),
@@ -646,7 +583,7 @@ mod tests {
         assert_eq!(recent_directory(None, None, None, "C:/home"), "C:/home");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn recent_directory_ignores_blank_entries() {
         assert_eq!(
             recent_directory(Some("   "), Some(""), Some("C:/work/any"), "C:/home"),
@@ -654,76 +591,82 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn modal_draws_the_folder_browser_at_the_recent_directory(cx: &mut gpui::TestAppContext) {
-        use gpui::{point, size};
-        let unique = format!(
-            "orion-modal-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
-        );
-        let dir = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(dir.join("project")).expect("project directory");
-        let engine = Arc::new(Engine::with_store(orion_core::engine::store::Store::at(
-            dir.join("state"),
-        )));
-        let start = dir.to_string_lossy().to_string();
-        let cx = cx.add_empty_window();
-        cx.draw(point(px(0.), px(0.)), size(px(640.), px(560.)), |_, cx| {
-            let modal = cx.new(NewWorkspaceModal::new);
-            modal.update(cx, |view, _cx| {
-                view.attach(engine);
-                view.open_at(Some(start));
-            });
-            modal
-        });
-    }
-
-    #[gpui::test]
-    fn reopening_the_picker_recovers_from_a_missing_recent_folder(cx: &mut gpui::TestAppContext) {
-        use gpui::{point, size};
-        let unique = format!(
-            "orion-modal-recover-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
-        );
-        let dir = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(dir.join("project")).expect("project directory");
-        let engine = Arc::new(Engine::with_store(orion_core::engine::store::Store::at(
-            dir.join("state"),
-        )));
-        let valid = dir.to_string_lossy().to_string();
-        let missing = dir.join("gone").to_string_lossy().to_string();
-        let cx = cx.add_empty_window();
-        cx.draw(
-            point(px(0.), px(0.)),
-            size(px(640.), px(560.)),
-            move |_, cx| {
+    crate::orion_test!(
+        fn modal_draws_the_folder_browser_at_the_recent_directory(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            use gpui_kit::{point, size};
+            let unique = format!(
+                "orion-modal-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_nanos())
+                    .unwrap_or_default()
+            );
+            let dir = std::env::temp_dir().join(unique);
+            std::fs::create_dir_all(dir.join("project")).expect("project directory");
+            let engine = Arc::new(Engine::with_store(orion_core::engine::store::Store::at(
+                dir.join("state"),
+            )));
+            let start = dir.to_string_lossy().to_string();
+            let cx = cx.add_empty_window();
+            cx.draw(point(px(0.), px(0.)), size(px(640.), px(560.)), |_, cx| {
                 let modal = cx.new(NewWorkspaceModal::new);
                 modal.update(cx, |view, _cx| {
                     view.attach(engine);
-                    view.open_at(Some(valid.clone()));
-                    let first = view.cwd.clone();
-                    assert!(!first.is_empty(), "the first folder loads");
-                    assert!(view.error.is_none());
-
-                    view.open_at(Some(missing.clone()));
-                    assert!(
-                        view.error.is_none(),
-                        "a deleted recent folder falls back home: {:?}",
-                        view.error
-                    );
-                    assert!(!view.cwd.is_empty(), "the picker still points somewhere");
-                    assert_ne!(view.cwd, first, "it does not keep the stale listing");
+                    view.open_at(Some(start));
                 });
-                modal
-            },
-        );
-    }
+                modal.into_any_element()
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn reopening_the_picker_recovers_from_a_missing_recent_folder(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            use gpui_kit::{point, size};
+            let unique = format!(
+                "orion-modal-recover-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_nanos())
+                    .unwrap_or_default()
+            );
+            let dir = std::env::temp_dir().join(unique);
+            std::fs::create_dir_all(dir.join("project")).expect("project directory");
+            let engine = Arc::new(Engine::with_store(orion_core::engine::store::Store::at(
+                dir.join("state"),
+            )));
+            let valid = dir.to_string_lossy().to_string();
+            let missing = dir.join("gone").to_string_lossy().to_string();
+            let cx = cx.add_empty_window();
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(640.), px(560.)),
+                move |_, cx| {
+                    let modal = cx.new(NewWorkspaceModal::new);
+                    modal.update(cx, |view, _cx| {
+                        view.attach(engine);
+                        view.open_at(Some(valid.clone()));
+                        let first = view.cwd.clone();
+                        assert!(!first.is_empty(), "the first folder loads");
+                        assert!(view.error.is_none());
+
+                        view.open_at(Some(missing.clone()));
+                        assert!(
+                            view.error.is_none(),
+                            "a deleted recent folder falls back home: {:?}",
+                            view.error
+                        );
+                        assert!(!view.cwd.is_empty(), "the picker still points somewhere");
+                        assert_ne!(view.cwd, first, "it does not keep the stale listing");
+                    });
+                    modal.into_any_element()
+                },
+            );
+        }
+    );
 }
