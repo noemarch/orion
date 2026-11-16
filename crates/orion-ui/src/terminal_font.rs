@@ -164,29 +164,29 @@ pub fn terminal_font_families(chosen: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_name_with_a_space_is_quoted() {
         assert_eq!(sanitize_font_family("JetBrains Mono"), "\"JetBrains Mono\"");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_bare_identifier_stays_unquoted() {
         assert_eq!(sanitize_font_family("Consolas"), "Consolas");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_reserved_css_keyword_is_quoted() {
         assert_eq!(sanitize_font_family("inherit"), "\"inherit\"");
         assert_eq!(sanitize_font_family("Revert-Layer"), "\"Revert-Layer\"");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn an_unsafe_character_is_dropped() {
         assert_eq!(sanitize_font_family("Foo;Bar"), "FooBar");
         assert_eq!(sanitize_font_family("Foo{Bar}<Baz>\\Qux"), "FooBarBazQux");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_control_character_is_dropped() {
         assert_eq!(
             sanitize_font_family("Foo\u{0}Bar\u{1f}Baz\u{7f}"),
@@ -194,7 +194,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_stray_quote_inside_a_name_is_removed() {
         // A bare name keeps the quotes out of the CSS string it becomes.
         assert_eq!(sanitize_font_family("Foo\"Bar"), "FooBar");
@@ -202,12 +202,12 @@ mod tests {
         assert_eq!(sanitize_font_family("\"Foo\"Bar\""), "\"FooBar\"");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_quoted_name_is_kept_quoted_even_when_it_could_be_bare() {
         assert_eq!(sanitize_font_family("\"Consolas\""), "\"Consolas\"");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn internal_whitespace_runs_collapse_to_one_space() {
         assert_eq!(
             sanitize_font_family("  Cascadia   Code  "),
@@ -215,7 +215,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_length_cap_drops_a_whole_trailing_name() {
         let long = "A".repeat(190);
         let value = format!("{long}, {}", "B".repeat(20));
@@ -226,13 +226,13 @@ mod tests {
         assert!(family.chars().count() <= FONT_FAMILY_MAX_CHARS);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn an_empty_value_yields_an_empty_list() {
         assert_eq!(sanitize_font_family(""), "");
         assert!(family_names("").is_empty());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_stack_splits_into_bare_names() {
         assert_eq!(
             family_names("\"Cascadia Code\", Consolas , Menlo"),
@@ -244,7 +244,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn an_empty_choice_offers_the_built_in_families_in_order() {
         let families = terminal_font_families("");
         assert_eq!(
@@ -265,7 +265,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_chosen_family_comes_before_the_built_in_stack() {
         let families = terminal_font_families("Iosevka");
         assert_eq!(families.first().map(String::as_str), Some("Iosevka"));
@@ -276,13 +276,13 @@ mod tests {
         assert_eq!(families.last().map(String::as_str), Some("Malgun Gothic"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_chosen_name_is_bare_for_the_font_lookup() {
         let families = terminal_font_families("JetBrains Mono");
         assert_eq!(families.first().map(String::as_str), Some("JetBrains Mono"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_css_generic_monospace_is_not_offered_to_the_font_lookup() {
         let families = terminal_font_families("");
         assert!(!families
