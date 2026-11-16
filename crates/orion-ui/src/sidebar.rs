@@ -24,8 +24,9 @@
 use crate::agents::agent_rows;
 use crate::terminal_tree::{status_token, terminal_rows, TerminalRow, TerminalSource};
 use crate::theme::Theme;
-use gpui::prelude::*;
-use gpui::{div, px, Context, FocusHandle, Render, Styled, StyledText, TextStyle, Window};
+use gpui_kit::component::{avatar::Avatar, button::Button, button::ButtonVariants, Sizable};
+use gpui_kit::*;
+use gpui_kit::{div, px, Context, FocusHandle, Render, Styled, StyledText, TextStyle, Window};
 use orion_core::protocol::AgentStatus;
 use orion_core::runtime::Runtime;
 use serde_json::{json, Value};
@@ -61,7 +62,7 @@ pub enum SidebarEvent {
     PaneFocused(String),
 }
 
-impl gpui::EventEmitter<SidebarEvent> for WorkspaceSidebar {}
+impl gpui_kit::EventEmitter<SidebarEvent> for WorkspaceSidebar {}
 
 /// One tab row (shown under its workspace; also what the app's tab strip
 /// reads from the snapshot).
@@ -389,7 +390,7 @@ impl WorkspaceSidebar {
     /// §1): RUN is the working cyan, INPUT the blocked coral, DONE the
     /// emerald, ERROR the indicator ruby. Live statuses breathe between
     /// alpha 0.55 and 1.0 by `pulse` (DESIGN.md: RUN = blue/cyan pulse).
-    fn status_color(status: AgentStatus, theme: &Theme, pulse: u32) -> gpui::Rgba {
+    fn status_color(status: AgentStatus, theme: &Theme, pulse: u32) -> gpui_kit::Rgba {
         let base = match status {
             AgentStatus::Idle => theme.status_idle,
             AgentStatus::Working => theme.status_working,
@@ -406,7 +407,7 @@ impl WorkspaceSidebar {
                 } else {
                     2.0 - phase * 2.0
                 };
-                gpui::Rgba {
+                gpui_kit::Rgba {
                     r: base.r,
                     g: base.g,
                     b: base.b,
@@ -515,17 +516,10 @@ impl Render for WorkspaceSidebar {
                     } else {
                         Theme::transparent()
                     })
-                    .child(
-                        div()
-                            .flex()
-                            .size(px(22.0 * scale))
-                            .rounded_md()
-                            .items_center()
-                            .justify_center()
-                            .bg(theme.accent_tint)
-                            .text_color(theme.text_strong)
-                            .child(mark),
-                    )
+                    // Kit avatar carries the agent initial; it picks its own
+                    // identity tint from the initial instead of the old
+                    // hand-rolled accent tile.
+                    .child(Avatar::new().name(mark).with_size(px(22.0 * scale)))
                     .child(
                         div().flex_1().min_w(px(0.0)).overflow_hidden().child(
                             StyledText::new(if self.rail {
@@ -540,7 +534,7 @@ impl Render for WorkspaceSidebar {
                                     } else {
                                         theme.text.into()
                                     },
-                                    font_size: gpui::rems(0.875).into(),
+                                    font_size: gpui_kit::rems(0.875).into(),
                                     ..Default::default()
                                 },
                                 [],
@@ -556,23 +550,27 @@ impl Render for WorkspaceSidebar {
                             .justify_end()
                             .gap(px(4.0 * scale))
                             .child(if self.rail {
-                                div().id(self.next_row_id())
+                                div().id(self.next_row_id()).into_any_element()
                             } else {
-                                div()
-                                    .id(self.next_row_id())
-                                    .flex()
+                                // Kit text button for the close glyph: the
+                                // text variant stays transparent on hover (the
+                                // ghost variant would wash rose), and the
+                                // 20px box keeps the old hit target.
+                                Button::new(self.next_row_id())
+                                    .text()
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0 * scale))
+                                            .text_color(theme.text_dim)
+                                            .child("×"),
+                                    )
                                     .size(px(20.0 * scale))
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_md()
-                                    .text_size(px(11.0 * scale))
-                                    .text_color(theme.text_dim)
-                                    .child("×")
                                     .on_click(cx.listener(move |_this, _, _, cx| {
                                         cx.stop_propagation();
                                         cx.emit(SidebarEvent::CloseWorkspace(ws_id.clone()));
                                         cx.notify();
                                     }))
+                                    .into_any_element()
                             })
                             .child(
                                 div()
@@ -614,19 +612,16 @@ impl Render for WorkspaceSidebar {
                     .text_color(theme.text_dim)
                     .child("WORKSPACES")
                     .child(div().flex_1())
+                    // Kit secondary button: `sync_gpui_kit` maps the kit
+                    // secondary token to `surface_elevated`/`text`, so this
+                    // paints exactly like the old hand-rolled tile. The 44px
+                    // minimums keep the touch target.
                     .child(
-                        div()
-                            .id("new-workspace-button")
-                            .flex()
-                            .size(px(24.0 * scale))
+                        Button::new("new-workspace-button")
+                            .secondary()
+                            .child(div().text_size(px(11.0 * scale)).child("+"))
                             .min_h(px(44.0))
                             .min_w(px(44.0))
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .bg(theme.surface_elevated)
-                            .text_color(theme.text)
-                            .child("+")
                             .on_click(cx.listener(|_this, _, _, cx| {
                                 cx.emit(SidebarEvent::NewWorkspace);
                                 cx.notify();
@@ -668,16 +663,11 @@ impl Render for WorkspaceSidebar {
                             } else {
                                 Theme::transparent()
                             })
+                            // Kit avatar for the agent initial, same as the
+                            // workspace rows above.
                             .child(
-                                div()
-                                    .flex()
-                                    .size(px(22.0 * scale))
-                                    .rounded_md()
-                                    .items_center()
-                                    .justify_center()
-                                    .bg(theme.accent_tint)
-                                    .text_color(theme.text_strong)
-                                    .child(
+                                Avatar::new()
+                                    .name(
                                         agent
                                             .title
                                             .chars()
@@ -685,7 +675,8 @@ impl Render for WorkspaceSidebar {
                                             .unwrap_or('?')
                                             .to_ascii_uppercase()
                                             .to_string(),
-                                    ),
+                                    )
+                                    .with_size(px(22.0 * scale)),
                             )
                             .child(
                                 div()
@@ -804,18 +795,19 @@ impl Render for WorkspaceSidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::rgb;
+    use gpui_kit::rgb;
 
-    #[gpui::test]
-    fn sidebar_renders_empty_state_without_panic(cx: &mut gpui::TestAppContext) {
-        use gpui::{point, size};
-        let cx = cx.add_empty_window();
-        cx.draw(point(px(0.), px(0.)), size(px(280.), px(800.)), |_, cx| {
-            cx.new(WorkspaceSidebar::new)
-        });
-    }
+    crate::orion_test!(
+        fn sidebar_renders_empty_state_without_panic(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::{point, size};
+            let cx = cx.add_empty_window();
+            cx.draw(point(px(0.), px(0.)), size(px(280.), px(800.)), |_, cx| {
+                cx.new(WorkspaceSidebar::new).into_any_element()
+            });
+        }
+    );
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn status_parses_wire_names() {
         assert_eq!(parse_status(Some("working")), AgentStatus::Working);
         assert_eq!(parse_status(Some("blocked")), AgentStatus::Blocked);
@@ -825,7 +817,7 @@ mod tests {
         assert_eq!(parse_status(None), AgentStatus::Idle);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn status_dot_uses_theme_tokens_not_rose() {
         // DESIGN.md §1: rose marks the live edge alone; agent states never
         // resolve to the accent.
