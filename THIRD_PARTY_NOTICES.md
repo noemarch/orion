@@ -2,6 +2,14 @@
 
 Orbit includes material from the projects below, under their own licenses.
 
+## GPUI Kit
+
+Orion's native desktop shell (`crates/orion-ui`) uses [GPUI Kit](https://gpui-kit.com/)
+(Longbridge) 0.9.1 with the `gpui-fast` backend for its component library. GPUI Kit
+software and code examples are licensed under Apache-2.0; its documentation prose and
+illustrations are CC BY 4.0. This project uses the component APIs, not copied source.
+See https://gpui-kit.com/docs and https://github.com/longbridge/gpui-kit.
+
 ## Theme palettes
 
 The CSS theme colors adapt orion's pinned palettes, with readability adjustments recorded in
