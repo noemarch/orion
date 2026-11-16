@@ -238,7 +238,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parses_all_wire_part_kinds() {
         let value = json!({
             "source": "claude-transcript",
@@ -270,7 +270,7 @@ mod tests {
         assert!(matches!(response.turns[1].parts[6], ChatPart::Unknown));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn large_transcript_caps_rendered_turns() {
         let turns = (0..500)
             .map(|i| ChatTurn {
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(rendered[0].ts.as_deref(), Some("300"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn recent_cap_keeps_newest() {
         let response = ConversationResponse {
             source: "scrollback".to_string(),
@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(recent[0].ts.as_deref(), Some("2"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parses_prompt_wire() {
         let value = json!({
             "id": "p1", "agent": "claude", "kind": "question", "title": "Approve?",
@@ -317,7 +317,7 @@ mod tests {
         assert!(ChatPrompt::from_value(&json!(null)).is_none());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_terminal_the_pane_started_is_a_delegation() {
         let terminals = json!([
             { "id": "pane-1", "program": "claude" },
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(rows[0].status.as_deref(), Some("working"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_terminal_the_pane_did_not_start_is_not_a_delegation() {
         let terminals = json!([
             { "id": "t1", "parent_id": "other-pane", "program": "omp" },
@@ -342,7 +342,7 @@ mod tests {
         assert!(delegated_terminals(&terminals, "pane-1").is_empty());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_terminal_that_has_not_reported_has_no_badge() {
         let terminals = json!([
             { "id": "t1", "parent_id": "pane-1", "program": "omp" },
