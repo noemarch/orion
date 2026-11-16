@@ -12,8 +12,12 @@
 //! groups P4 scoped, with matching defaults (dark, comfortable, `["alt"]`).
 
 use crate::theme::{Density, Theme, ThemeMode};
-use gpui::prelude::*;
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::group_box::GroupBox;
+use gpui_kit::component::radio::{Radio, RadioGroup};
+use gpui_kit::component::switch::Switch;
+use gpui_kit::*;
+use gpui_kit::{
     div, px, Context, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, Render, Styled,
     Window,
 };
@@ -271,7 +275,6 @@ pub struct SettingsModal {
     prefs: Preferences,
     last_body: Option<String>,
     focus_handle: FocusHandle,
-    row_seq: usize,
     open: bool,
 }
 
@@ -282,7 +285,6 @@ impl SettingsModal {
             prefs: Preferences::default(),
             last_body: None,
             focus_handle: cx.focus_handle(),
-            row_seq: 0,
             open: false,
         }
     }
@@ -306,12 +308,6 @@ impl SettingsModal {
 
     fn close(&mut self) {
         self.open = false;
-    }
-
-    fn next_row_id(&mut self) -> usize {
-        let id = self.row_seq;
-        self.row_seq += 1;
-        id
     }
 
     /// Load saved preferences through the wire seam. A 404 (nothing written
@@ -355,279 +351,180 @@ impl Render for SettingsModal {
         let dark = self.prefs.theme == ThemeMode::Dark;
         let compact = self.prefs.density == Density::Compact;
         let prefs = self.prefs.clone();
-        let row_h = theme.row_height() * scale;
 
-        let radio = |id: &'static str, label: &'static str, active: bool| {
-            div()
-                .id(id)
-                .flex_row()
-                .items_center()
-                .gap(px(8.0 * scale))
-                .h(px(row_h))
-                .px_2()
-                .rounded_md()
-                .bg(if active {
-                    theme.accent_tint
+        // Appearance and density are single-choice: the kit's radio group owns
+        // the selection, and the chosen index maps back to the persisted value.
+        let theme_group = RadioGroup::horizontal("settings-theme")
+            .children([
+                Radio::new("settings-theme-dark")
+                    .label("Dark")
+                    .debug_selector(|| "settings-theme-dark".to_string()),
+                Radio::new("settings-theme-light")
+                    .label("Light")
+                    .debug_selector(|| "settings-theme-light".to_string()),
+            ])
+            .selected_index(if dark { Some(0) } else { Some(1) })
+            .on_change(cx.listener(|this, index: &usize, _, cx| {
+                this.prefs.theme = if *index == 0 {
+                    ThemeMode::Dark
                 } else {
-                    theme.surface_elevated
-                })
-                .text_color(if active {
-                    theme.text_strong
-                } else {
-                    theme.text_dim
-                })
-                .child(if active { "●" } else { "○" })
-                .child(label)
-        };
+                    ThemeMode::Light
+                };
+                this.save();
+                cx.notify();
+            }));
 
-        let body =
-            div()
-                .id("settings-panel")
-                .flex_col()
-                .gap(px(12.0 * scale))
-                .w(px(360.0))
-                .p_4()
-                .rounded_lg()
-                .bg(theme.surface_panel)
-                .border_1()
-                .border_color(theme.border)
-                .child(
-                    div()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_size(px(14.0 * scale))
-                                .text_color(theme.text_strong)
-                                .child("Settings"),
-                        )
-                        .child(
-                            div()
-                                .id("settings-close")
-                                .flex()
-                                .size(px(32.0 * scale))
-                                .items_center()
-                                .justify_center()
-                                .rounded_md()
-                                .bg(theme.surface_hover)
-                                .text_color(theme.text)
-                                .child("✕")
-                                .on_click(cx.listener(|this, _, _, _cx| this.close())),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_size(px(11.0 * scale))
-                                .text_color(theme.text_dim)
-                                .child("APPEARANCE"),
-                        )
-                        .child(
-                            div()
-                                .flex_row()
-                                .gap_2()
-                                .child(radio("settings-theme-dark", "Dark", dark).on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.prefs.theme = ThemeMode::Dark;
-                                        this.save();
-                                        cx.notify();
-                                    }),
-                                ))
-                                .child(radio("settings-theme-light", "Light", !dark).on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.prefs.theme = ThemeMode::Light;
-                                        this.save();
-                                        cx.notify();
-                                    }),
-                                )),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_size(px(11.0 * scale))
-                                .text_color(theme.text_dim)
-                                .child("DENSITY"),
-                        )
-                        .child(
-                            div()
-                                .flex_row()
-                                .gap_2()
-                                .child(
-                                    radio("settings-density-comfortable", "Comfortable", !compact)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.prefs.density = Density::Comfortable;
-                                            this.save();
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    radio("settings-density-compact", "Compact", compact).on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            this.prefs.density = Density::Compact;
-                                            this.save();
-                                            cx.notify();
-                                        }),
-                                    ),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_size(px(11.0 * scale))
-                                .text_color(theme.text_dim)
-                                .child("KEY BAR EXTRAS"),
-                        )
-                        .children(KEY_BAR_EXTRAS.iter().map(|extra| {
-                            let extra = *extra;
-                            let on = prefs.has_extra(extra);
-                            div()
-                                .id(self.next_row_id())
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0 * scale))
-                                .h(px(row_h))
-                                .px_2()
-                                .rounded_md()
-                                .bg(if on {
-                                    theme.accent_tint
-                                } else {
-                                    theme.surface_elevated
-                                })
-                                .text_color(if on {
-                                    theme.text_strong
-                                } else {
-                                    theme.text_dim
-                                })
-                                .child(if on { "✓" } else { "○" })
-                                .child(extra_label(extra))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.prefs.toggle_extra(extra);
-                                    this.save();
-                                    cx.notify();
-                                }))
-                        })),
-                )
-                .child(
-                    div()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_size(px(11.0 * scale))
-                                .text_color(theme.text_dim)
-                                .child("ALERTS"),
-                        )
-                        .child(
-                            div()
-                                .flex_row()
-                                .gap_2()
-                                .child(
-                                    radio("settings-alerts-on", "Alerts on", prefs.alerts_on)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.prefs.alerts_on = !this.prefs.alerts_on;
-                                            this.save();
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    radio("settings-alert-input", "Input", prefs.alert_input)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.prefs.alert_input = !this.prefs.alert_input;
-                                            this.save();
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_row()
-                                .gap_2()
-                                .child(
-                                    radio(
-                                        "settings-alert-done-long",
-                                        "Done: long",
-                                        prefs.alert_done == "long",
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.prefs.alert_done = "long".to_string();
-                                            this.save();
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    radio(
-                                        "settings-alert-done-always",
-                                        "Done: always",
-                                        prefs.alert_done == "always",
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.prefs.alert_done = "always".to_string();
-                                            this.save();
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    radio(
-                                        "settings-alert-done-off",
-                                        "Done: off",
-                                        prefs.alert_done == "off",
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.prefs.alert_done = "off".to_string();
-                                            this.save();
-                                            cx.notify();
-                                        },
-                                    )),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_size(px(11.0 * scale))
-                                .text_color(theme.text_dim)
-                                .child("ABOUT"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0 * scale))
-                                .text_color(theme.text_dim)
-                                .child("Orbit · native GPUI shell · Engine: live"),
-                        ),
-                )
-                .child(
-                    div().flex_row().justify_end().child(
+        let density_group = RadioGroup::horizontal("settings-density")
+            .children([
+                Radio::new("settings-density-comfortable")
+                    .label("Comfortable")
+                    .debug_selector(|| "settings-density-comfortable".to_string()),
+                Radio::new("settings-density-compact")
+                    .label("Compact")
+                    .debug_selector(|| "settings-density-compact".to_string()),
+            ])
+            .selected_index(if compact { Some(1) } else { Some(0) })
+            .on_change(cx.listener(|this, index: &usize, _, cx| {
+                this.prefs.density = if *index == 1 {
+                    Density::Compact
+                } else {
+                    Density::Comfortable
+                };
+                this.save();
+                cx.notify();
+            }));
+
+        // Key-bar extras are independent toggles: the kit's switch reports the
+        // requested state, so the saved set follows the reader's click.
+        let extra_switches = KEY_BAR_EXTRAS.iter().map(|extra| {
+            let extra = *extra;
+            Switch::new(format!("settings-extra-{extra}"))
+                .label(extra_label(extra))
+                .checked(prefs.has_extra(extra))
+                .on_change(cx.listener(move |this, _next: &bool, _, cx| {
+                    this.prefs.toggle_extra(extra);
+                    this.save();
+                    cx.notify();
+                }))
+        });
+
+        // Alerts: the two booleans are switches (a kit radio cannot be
+        // unchecked by the reader), and Done is one choice across
+        // long/always/off.
+        let alert_done_group = RadioGroup::horizontal("settings-alert-done")
+            .children([
+                Radio::new("settings-alert-done-long")
+                    .label("Done: long")
+                    .debug_selector(|| "settings-alert-done-long".to_string()),
+                Radio::new("settings-alert-done-always")
+                    .label("Done: always")
+                    .debug_selector(|| "settings-alert-done-always".to_string()),
+                Radio::new("settings-alert-done-off")
+                    .label("Done: off")
+                    .debug_selector(|| "settings-alert-done-off".to_string()),
+            ])
+            .selected_index(match prefs.alert_done.as_str() {
+                "always" => Some(1),
+                "off" => Some(2),
+                _ => Some(0),
+            })
+            .on_change(cx.listener(|this, index: &usize, _, cx| {
+                this.prefs.alert_done = match *index {
+                    1 => "always",
+                    2 => "off",
+                    _ => "long",
+                }
+                .to_string();
+                this.save();
+                cx.notify();
+            }));
+
+        let body = div()
+            .id("settings-panel")
+            .flex_col()
+            .gap(px(12.0 * scale))
+            .w(px(360.0))
+            .p_4()
+            .rounded_lg()
+            .bg(theme.surface_panel)
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
                         div()
-                            .id("settings-done")
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .bg(theme.primary)
-                            .text_color(theme.text)
-                            .child("Done")
+                            .text_size(px(14.0 * scale))
+                            .text_color(theme.text_strong)
+                            .child("Settings"),
+                    )
+                    .child(
+                        Button::new("settings-close")
+                            .label("✕")
+                            .text()
                             .on_click(cx.listener(|this, _, _, _cx| this.close())),
                     ),
-                );
+            )
+            .child(GroupBox::new().title("APPEARANCE").child(theme_group))
+            .child(GroupBox::new().title("DENSITY").child(density_group))
+            .child(
+                GroupBox::new()
+                    .title("KEY BAR EXTRAS")
+                    .child(div().flex().flex_col().gap_1().children(extra_switches)),
+            )
+            .child(
+                GroupBox::new().title("ALERTS").child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0 * scale))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(16.0 * scale))
+                                .child(
+                                    Switch::new("settings-alerts-on")
+                                        .label("Alerts on")
+                                        .checked(prefs.alerts_on)
+                                        .on_change(cx.listener(|this, next: &bool, _, cx| {
+                                            this.prefs.alerts_on = *next;
+                                            this.save();
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Switch::new("settings-alert-input")
+                                        .label("Input")
+                                        .checked(prefs.alert_input)
+                                        .on_change(cx.listener(|this, next: &bool, _, cx| {
+                                            this.prefs.alert_input = *next;
+                                            this.save();
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(alert_done_group),
+                ),
+            )
+            .child(
+                GroupBox::new().title("ABOUT").child(
+                    div()
+                        .text_size(px(12.0 * scale))
+                        .text_color(theme.text_dim)
+                        .child("Orbit · native GPUI shell · Engine: live"),
+                ),
+            )
+            .child(
+                div().flex_row().justify_end().child(
+                    Button::new("settings-done")
+                        .label("Done")
+                        .primary()
+                        .on_click(cx.listener(|this, _, _, _cx| this.close())),
+                ),
+            );
 
         div()
             .id("settings-overlay")
@@ -672,7 +569,7 @@ impl Render for SettingsModal {
 mod tests {
     use super::*;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn defaults_match_web_default_settings() {
         let prefs = Preferences::default();
         assert_eq!(prefs.theme, ThemeMode::Dark);
@@ -680,7 +577,7 @@ mod tests {
         assert_eq!(prefs.key_bar_extras, vec!["alt".to_string()]);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn settings_defaults_match_orbit_defaults() {
         let prefs = Preferences::default();
         assert_eq!(prefs.theme.as_wire(), "dark");
@@ -691,7 +588,7 @@ mod tests {
         assert_eq!(prefs.alert_done, "long");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn extras_sanitize_against_known_list() {
         let settings = json!({
             "theme": "light", "density": "compact",
@@ -707,7 +604,7 @@ mod tests {
         assert!(!prefs.key_bar_extras.contains(&"bogus".to_string()));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn extras_keys_use_encoder_vocabulary() {
         // shift+tab is accepted by encode_key (CSI Z), ctrl chords lowercase,
         // pipe/tilde/slash are single literals.
