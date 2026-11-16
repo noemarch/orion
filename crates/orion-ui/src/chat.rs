@@ -38,10 +38,14 @@ use crate::tool_card::{
     clipped_output, lines_with_paths, part_card, tool_object, tool_verb, DiffLine, PartCard,
     ToolCard, ToolStatus, MAX_FILE_LINKS,
 };
-use gpui::prelude::*;
-use gpui::{
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyTitle};
+use gpui_kit::component::skeleton::Skeleton;
+use gpui_kit::*;
+use gpui_kit::{
     div, px, App, Context, Entity, FocusHandle, FontStyle, FontWeight, IntoElement, Render,
-    ScrollHandle, ScrollWheelEvent, StyledText, Subscription, TextStyle, Window,
+    ScrollEvent, ScrollHandle, StyledText, Subscription, TextStyle, Window,
 };
 use orion_core::protocol::AgentStatus;
 use orion_core::runtime::Runtime;
@@ -68,7 +72,7 @@ pub enum ChatEvent {
     FocusTerminal { id: String },
 }
 
-impl gpui::EventEmitter<ChatEvent> for ChatView {}
+impl gpui_kit::EventEmitter<ChatEvent> for ChatView {}
 
 /// Whether the menu the reader answered is the menu on screen.
 ///
@@ -131,7 +135,7 @@ pub struct ChatView {
     /// costs the UI thread, so the count is worth having.
     reads: u64,
     scroll_handle: ScrollHandle,
-    focus_handle: gpui::FocusHandle,
+    focus_handle: gpui_kit::FocusHandle,
     row_seq: usize,
 }
 
@@ -575,7 +579,7 @@ fn span_style(base: &TextStyle, span: &TextSpan, theme: Theme, inline_code_size:
     }
     if span.link && span.target.as_deref().is_some_and(opens_in_browser) {
         style.color = theme.accent.into();
-        style.underline = Some(gpui::UnderlineStyle {
+        style.underline = Some(gpui_kit::UnderlineStyle {
             thickness: px(1.0),
             ..Default::default()
         });
@@ -613,7 +617,7 @@ fn render_markdown_line(
             theme.text
         }),
         font_size: px(size).into(),
-        line_height: gpui::relative(CHAT_LINE_HEIGHT),
+        line_height: gpui_kit::relative(CHAT_LINE_HEIGHT),
         ..Default::default()
     };
     if style.bold {
@@ -695,7 +699,7 @@ fn render_code_block(lines: &[MarkdownLine], theme: Theme) -> impl IntoElement {
         color: crate::theme::hsla(theme.text),
         font_size: px(theme.chat_code_size()).into(),
         font_family: "JetBrains Mono".into(),
-        line_height: gpui::relative(CHAT_LINE_HEIGHT),
+        line_height: gpui_kit::relative(CHAT_LINE_HEIGHT),
         ..Default::default()
     };
     let mut block = div()
@@ -720,9 +724,9 @@ fn render_rule(theme: Theme) -> impl IntoElement {
 }
 
 /// Markdown prose, in the Quiet Slate type scale.
-fn render_text_block(text: &str, theme: Theme, row_seq: &mut usize) -> Vec<gpui::AnyElement> {
+fn render_text_block(text: &str, theme: Theme, row_seq: &mut usize) -> Vec<gpui_kit::AnyElement> {
     let lines = parse_markdown(text);
-    let mut blocks: Vec<gpui::AnyElement> = Vec::new();
+    let mut blocks: Vec<gpui_kit::AnyElement> = Vec::new();
     let mut index = 0;
     while index < lines.len() {
         let line = &lines[index];
@@ -753,7 +757,7 @@ impl Render for ChatView {
         // Where the reader is: the follow rule follows the scroll position,
         // so a scrollbar drag pins the view just like the wheel does.
         let offset = f32::from(self.scroll_handle.offset().y);
-        let max_offset = f32::from(self.scroll_handle.max_offset().height);
+        let max_offset = f32::from(self.scroll_handle.max_offset().y);
         self.model.sync_scroll(offset, max_offset);
 
         let chat = div()
@@ -765,10 +769,10 @@ impl Render for ChatView {
             .size_full()
             .bg(theme.surface_base)
             .text_color(theme.text)
-            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
+            .on_scroll(cx.listener(|this, ev: &ScrollEvent, window, cx| {
                 let delta = f32::from(ev.delta.pixel_delta(window.line_height()).y);
                 let offset = f32::from(this.scroll_handle.offset().y);
-                let max_offset = f32::from(this.scroll_handle.max_offset().height);
+                let max_offset = f32::from(this.scroll_handle.max_offset().y);
                 // Scrolling up pins the view; the scroll position itself says
                 // when the reader is back at the bottom.
                 this.model.on_scroll(delta, at_bottom(offset, max_offset));
@@ -782,7 +786,7 @@ impl Render for ChatView {
             root = root.child(self.render_failure(&message, cx));
         }
 
-        let content: gpui::AnyElement = if self.model.is_loading() {
+        let content: gpui_kit::AnyElement = if self.model.is_loading() {
             self.render_loading()
         } else if self.model.is_empty() {
             self.render_empty()
@@ -837,12 +841,12 @@ impl Render for ChatView {
             FocusWanted::Prompt => {
                 if let Some(card) = &prompt_card {
                     let handle = card.read(cx).focus_handle().clone();
-                    handle.focus(window);
+                    handle.focus(window, cx);
                 }
             }
             FocusWanted::Composer => {
                 let handle = self.composer.read(cx).focus_handle().clone();
-                handle.focus(window);
+                handle.focus(window, cx);
             }
             FocusWanted::None => {}
         }
@@ -879,8 +883,8 @@ impl ChatView {
     }
 
     /// The loading state: a skeleton of the turns that are on their way.
-    fn render_loading(&self) -> gpui::AnyElement {
-        let theme = Theme::current();
+    fn render_loading(&self) -> gpui_kit::AnyElement {
+        let _theme = Theme::current();
         let mut column = div()
             .id("chat-loading")
             .debug_selector(|| "chat-loading".to_string())
@@ -889,39 +893,25 @@ impl ChatView {
             .gap(px(12.0))
             .p_3();
         for width in [220.0, 320.0, 180.0] {
-            column = column.child(
-                div()
-                    .h(px(12.0))
-                    .w(px(width))
-                    .rounded_md()
-                    .bg(theme.surface_elevated),
-            );
+            column = column.child(Skeleton::new().h(px(12.0)).w(px(width)));
         }
         column.into_any_element()
     }
 
     /// The empty state: the transcript is readable and holds no turns.
-    fn render_empty(&self) -> gpui::AnyElement {
-        let theme = Theme::current();
+    fn render_empty(&self) -> gpui_kit::AnyElement {
+        let _theme = Theme::current();
         div()
             .id("chat-empty")
             .debug_selector(|| "chat-empty".to_string())
-            .flex()
-            .flex_col()
-            .items_start()
-            .gap(px(4.0))
-            .p_3()
             .child(
-                div()
-                    .text_size(px(13.0 * theme.density_scale()))
-                    .text_color(theme.text)
-                    .child("No conversation yet."),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0 * theme.density_scale()))
-                    .text_color(theme.text_dim)
-                    .child("This agent has not written a transcript. The terminal lens shows its live output."),
+                Empty::new().header(
+                    EmptyHeader::new()
+                        .title(EmptyTitle::new().child("No conversation yet."))
+                        .description(EmptyDescription::new().child(
+                            "This agent has not written a transcript. The terminal lens shows its live output.",
+                        )),
+                ),
             )
             .into_any_element()
     }
@@ -940,37 +930,26 @@ impl ChatView {
             .px_3()
             .py_2()
             .bg(theme.danger_tint)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .text_size(px(12.0 * theme.density_scale()))
-                    .text_color(theme.danger_text)
-                    .child(message.to_string()),
-            )
+            .child(Alert::error("chat-error-message", message.to_string()))
             .child(
                 div()
                     .id("chat-retry")
                     .debug_selector(|| "chat-retry".to_string())
                     .flex()
-                    .items_center()
-                    .justify_center()
-                    .min_h(px(44.0))
-                    .px_3()
-                    .rounded_md()
-                    .bg(theme.primary)
-                    .text_color(theme.primary_text)
-                    .text_size(px(12.0 * theme.density_scale()))
-                    .child("Try again")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.retry(cx);
-                        cx.notify();
-                    })),
+                    .child(
+                        Button::new("chat-retry")
+                            .label("Try again")
+                            .primary()
+                            .h(px(44.0))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.retry(cx);
+                                cx.notify();
+                            })),
+                    ),
             )
     }
 
-    fn render_turns(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_turns(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let turns = cap_turns(self.model.turns().to_vec(), MAX_RECENT_TURNS);
         let total = self.model.turns().len();
         let mut column = div().id("chat-turns").flex().flex_col().gap(px(12.0)).p_3();
@@ -1036,7 +1015,7 @@ impl ChatView {
     }
 
     /// Prose: the markdown of one part, in the Quiet Slate scale.
-    fn render_prose(&mut self, text: &str, theme: Theme) -> gpui::AnyElement {
+    fn render_prose(&mut self, text: &str, theme: Theme) -> gpui_kit::AnyElement {
         let mut column = div().id(self.next_row_id()).flex().flex_col();
         let mut row_seq = self.row_seq;
         for line in render_text_block(text, theme, &mut row_seq) {
@@ -1052,7 +1031,7 @@ impl ChatView {
         part_index: usize,
         part: &ChatPart,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let theme = Theme::current();
         match part_card(part) {
             PartCard::Text { text } => self.render_prose(&text, theme),
@@ -1066,25 +1045,15 @@ impl ChatView {
                     .rounded_md()
                     .bg(theme.surface_elevated);
                 folded = folded.child(
-                    div()
-                        .id(self.next_row_id())
+                    Button::new(format!("chat-thinking-{turn_index}-{part_index}"))
                         .debug_selector(|| "chat-thinking".to_string())
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px_2()
-                        .py_1()
-                        .min_h(px(44.0))
-                        .cursor_pointer()
-                        .text_size(px(12.0 * theme.density_scale()))
-                        .text_color(theme.text_dim)
-                        .child(if open { "\u{25be}" } else { "\u{25b8}" })
-                        .child(if open {
+                        .label(if open {
                             "Thinking (collapse)"
                         } else {
                             "Thinking (expand)"
                         })
+                        .text()
+                        .h(px(44.0))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.model.toggle_thinking(turn_index, part_index);
                             cx.notify();
@@ -1137,7 +1106,7 @@ impl ChatView {
 
     /// The parts this shell does not draw as a card of their own: background
     /// tasks, skills, images.
-    fn render_other_part(&mut self, part: &ChatPart, theme: Theme) -> gpui::AnyElement {
+    fn render_other_part(&mut self, part: &ChatPart, theme: Theme) -> gpui_kit::AnyElement {
         match part {
             ChatPart::TaskResult { tasks } => {
                 let mut column = div().id(self.next_row_id()).flex().flex_col().gap(px(2.0));
@@ -1189,7 +1158,7 @@ impl ChatView {
         lines: &[DiffLine],
         diff_clipped: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let theme = Theme::current();
         let open = self.model.is_tool_open(turn_index, part_index);
         let failed = card.status == ToolStatus::Failed;
@@ -1330,7 +1299,7 @@ impl ChatView {
         text: &str,
         theme: Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let text_style = TextStyle {
             color: crate::theme::hsla(theme.text),
             font_size: px(theme.chat_code_size()).into(),
@@ -1374,13 +1343,11 @@ impl ChatView {
                 // The path is a control: it opens the file.
                 let target = path.clone();
                 row = row.child(
-                    div()
-                        .id(self.next_row_id())
+                    Button::new(format!("chat-file-path-{}", self.next_row_id()))
                         .debug_selector(|| "chat-file-path".to_string())
-                        .text_color(theme.accent)
+                        .label(path.clone())
+                        .text()
                         .underline()
-                        .cursor_pointer()
-                        .child(path.clone())
                         .on_click(cx.listener(move |_this, _, _, cx| {
                             cx.emit(ChatEvent::OpenFile(target.clone()));
                             cx.notify();
@@ -1404,7 +1371,7 @@ impl ChatView {
 
     /// An edit diff: the added lines in `--syntax-inserted`, the deleted ones
     /// in `--syntax-deleted`, with the context between them.
-    fn render_diff(&mut self, lines: &[DiffLine], theme: Theme) -> gpui::AnyElement {
+    fn render_diff(&mut self, lines: &[DiffLine], theme: Theme) -> gpui_kit::AnyElement {
         let mut block = div()
             .id(self.next_row_id())
             .debug_selector(|| "chat-diff".to_string())
@@ -1446,20 +1413,13 @@ impl ChatView {
     }
 
     /// The path to the whole output: the Terminal Lens has it.
-    fn render_terminal_path(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = Theme::current();
-        div()
-            .id(self.next_row_id())
+    fn render_terminal_path(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let _theme = Theme::current();
+        Button::new("chat-terminal-path")
             .debug_selector(|| "chat-terminal-path".to_string())
-            .flex()
-            .flex_row()
-            .items_center()
-            .min_h(px(44.0))
-            .px_2()
-            .text_size(px(11.0 * theme.density_scale()))
-            .text_color(theme.accent)
-            .cursor_pointer()
-            .child("View full in Terminal")
+            .label("View full in Terminal")
+            .text()
+            .h(px(44.0))
             .on_click(cx.listener(|_this, _, _, cx| {
                 cx.emit(ChatEvent::ShowTerminal);
                 cx.notify();
@@ -1475,7 +1435,7 @@ impl ChatView {
     /// whose they are. The status badge follows the sidebar's rule exactly: a
     /// terminal that has not reported shows no badge, and the shell does not
     /// guess one from the screen.
-    fn render_terminal_cards(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_terminal_cards(&mut self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let terminals = self.terminals.as_ref()?;
         let rows = delegated_terminals(terminals, &self.pane_id);
         if rows.is_empty() {
@@ -1565,7 +1525,7 @@ impl ChatView {
 
 /// The color a reported status paints: the sidebar's status tokens, never the
 /// accent (DESIGN.md §1).
-fn terminal_status_color(token: &str, theme: &Theme) -> gpui::Rgba {
+fn terminal_status_color(token: &str, theme: &Theme) -> gpui_kit::Rgba {
     match AgentStatus::from_wire(token) {
         Some(AgentStatus::Working) => theme.status_working,
         Some(AgentStatus::Done) => theme.status_done,
@@ -1580,7 +1540,8 @@ mod tests {
     use super::*;
     use crate::chat_model::ChatPhase;
     use crate::pane_seam::test_doubles::{menu_prompt, RecordingPane, SeamCall};
-    use gpui::Window;
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::Window;
     use orion_core::engine::store::Store;
     use orion_core::runtime::PaneHandle;
     use orion_core::{Engine, FrameSink};
@@ -1601,7 +1562,7 @@ mod tests {
         ConversationResponse::parse(&value).expect("the wire shape parses")
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn conversation_fetch_failure_is_plain_language_with_retry() {
         let message = conversation_error_message(500);
         assert_eq!(message, "Couldn't load the conversation.");
@@ -1615,7 +1576,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_pane_that_is_gone_says_so() {
         assert_eq!(
             conversation_error_message(404),
@@ -1624,114 +1585,118 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn a_hidden_chat_does_not_reread_the_transcript(cx: &mut gpui::TestAppContext) {
-        use std::sync::Arc;
-        use std::time::Duration;
+    crate::orion_test!(
+        fn a_hidden_chat_does_not_reread_the_transcript(cx: &mut gpui_kit::TestAppContext) {
+            use std::sync::Arc;
+            use std::time::Duration;
 
-        let engine: Arc<dyn Runtime> = Arc::new(Engine::with_store(Store::at(
-            std::env::temp_dir().join(format!("orion-chat-poll-{}", std::process::id())),
-        )));
-        let view = cx.update(|app| app.new(ChatView::new));
-        let seam: Arc<dyn PaneSeam> = Arc::new(RecordingPane::new());
+            let engine: Arc<dyn Runtime> = Arc::new(Engine::with_store(Store::at(
+                std::env::temp_dir().join(format!("orion-chat-poll-{}", std::process::id())),
+            )));
+            let view = cx.update(|app| app.new(ChatView::new));
+            let seam: Arc<dyn PaneSeam> = Arc::new(RecordingPane::new());
 
-        cx.update(|app| {
-            view.update(app, |view, cx| {
-                view.attach(Some(Arc::clone(&engine)), seam, "p1".to_string(), cx);
+            cx.update(|app| {
+                view.update(app, |view, cx| {
+                    view.attach(Some(Arc::clone(&engine)), seam, "p1".to_string(), cx);
+                });
             });
-        });
-        let after_attach = cx.read(|app| view.read(app).reads());
-        assert!(after_attach > 0, "attaching reads the transcript once");
+            let after_attach = cx.read(|app| view.read(app).reads());
+            assert!(after_attach > 0, "attaching reads the transcript once");
 
-        // The lens is not the one on screen. Its poll must leave the agent's
-        // transcript alone: the route reads it from disk, and that read lands
-        // on the UI thread.
-        cx.update(|app| {
-            view.update(app, |view, cx| view.set_visible(cx, false));
-        });
-        cx.executor().advance_clock(Duration::from_secs(3));
-        cx.executor().run_until_parked();
-        assert_eq!(
-            cx.read(|app| view.read(app).reads()),
-            after_attach,
-            "a hidden lens does not read the transcript"
-        );
-
-        // A lens that comes back reads it at once: it never shows a stale turn.
-        cx.update(|app| {
-            view.update(app, |view, cx| view.set_visible(cx, true));
-        });
-        assert_eq!(
-            cx.read(|app| view.read(app).reads()),
-            after_attach + 1,
-            "a lens that comes back reads the transcript"
-        );
-    }
-
-    #[gpui::test]
-    fn the_chat_shows_its_surface_turn_rows_and_error_state(cx: &mut gpui::TestAppContext) {
-        use gpui::{point, size};
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(ChatView::new));
-
-        // A real transcript: a user turn and an agent turn.
-        cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, cx| {
-            view.update(cx, |view, _cx| {
-                view.apply_conversation(response(json!({
-                    "source": "claude-transcript",
-                    "turns": [
-                        { "role": "user", "ts": "2026-01-01T00:00:00Z",
-                          "parts": [{ "kind": "text", "text": "hello" }] },
-                        { "role": "assistant", "ts": "2026-01-01T00:00:05Z",
-                          "parts": [{ "kind": "text", "text": "hi" }] },
-                    ],
-                })));
+            // The lens is not the one on screen. Its poll must leave the agent's
+            // transcript alone: the route reads it from disk, and that read lands
+            // on the UI thread.
+            cx.update(|app| {
+                view.update(app, |view, cx| view.set_visible(cx, false));
             });
-            view.clone()
-        });
-        assert!(
-            cx.debug_bounds("chat-view").is_some(),
-            "the chat surface is on screen"
-        );
-        assert!(
-            cx.debug_bounds("chat-turn").is_some(),
-            "the turns are on screen"
-        );
-        assert!(
-            cx.debug_bounds("chat-error").is_none(),
-            "a good read shows no failure"
-        );
+            cx.executor().advance_clock(Duration::from_secs(3));
+            cx.executor().run_until_parked();
+            assert_eq!(
+                cx.read(|app| view.read(app).reads()),
+                after_attach,
+                "a hidden lens does not read the transcript"
+            );
 
-        // A failed read: a plain-language message and a Retry.
-        cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, cx| {
-            view.update(cx, |view, _cx| {
-                view.fail_conversation("Couldn't load the conversation. Try again.".to_string());
+            // A lens that comes back reads it at once: it never shows a stale turn.
+            cx.update(|app| {
+                view.update(app, |view, cx| view.set_visible(cx, true));
             });
-            view.clone()
-        });
-        assert!(
-            cx.debug_bounds("chat-error").is_some(),
-            "the failure is on screen"
-        );
-        assert!(
-            cx.debug_bounds("chat-retry").is_some(),
-            "a Retry is offered"
-        );
-    }
+            assert_eq!(
+                cx.read(|app| view.read(app).reads()),
+                after_attach + 1,
+                "a lens that comes back reads the transcript"
+            );
+        }
+    );
 
-    #[gpui::test]
-    fn the_chat_draws_markdown_in_the_quiet_slate_scale(cx: &mut gpui::TestAppContext) {
-        use gpui::{point, size};
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(ChatView::new));
-        cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, cx| {
-            view.update(cx, |view, _cx| {
-                view.apply_conversation(response(json!({
-                    "source": "claude-transcript",
-                    "turns": [
-                        { "role": "assistant", "ts": "2026-01-01T00:00:00Z",
-                          "parts": [{ "kind": "text", "text":
-                            "# Title
+    crate::orion_test!(
+        fn the_chat_shows_its_surface_turn_rows_and_error_state(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::{point, size};
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChatView::new));
+
+            // A real transcript: a user turn and an agent turn.
+            cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, cx| {
+                view.update(cx, |view, _cx| {
+                    view.apply_conversation(response(json!({
+                        "source": "claude-transcript",
+                        "turns": [
+                            { "role": "user", "ts": "2026-01-01T00:00:00Z",
+                              "parts": [{ "kind": "text", "text": "hello" }] },
+                            { "role": "assistant", "ts": "2026-01-01T00:00:05Z",
+                              "parts": [{ "kind": "text", "text": "hi" }] },
+                        ],
+                    })));
+                });
+                view.clone().into_any_element()
+            });
+            assert!(
+                cx.debug_bounds("chat-view").is_some(),
+                "the chat surface is on screen"
+            );
+            assert!(
+                cx.debug_bounds("chat-turn").is_some(),
+                "the turns are on screen"
+            );
+            assert!(
+                cx.debug_bounds("chat-error").is_none(),
+                "a good read shows no failure"
+            );
+
+            // A failed read: a plain-language message and a Retry.
+            cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, cx| {
+                view.update(cx, |view, _cx| {
+                    view.fail_conversation(
+                        "Couldn't load the conversation. Try again.".to_string(),
+                    );
+                });
+                view.clone().into_any_element()
+            });
+            assert!(
+                cx.debug_bounds("chat-error").is_some(),
+                "the failure is on screen"
+            );
+            assert!(
+                cx.debug_bounds("chat-retry").is_some(),
+                "a Retry is offered"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn the_chat_draws_markdown_in_the_quiet_slate_scale(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::{point, size};
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChatView::new));
+            cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, cx| {
+                view.update(cx, |view, _cx| {
+                    view.apply_conversation(response(json!({
+                        "source": "claude-transcript",
+                        "turns": [
+                            { "role": "assistant", "ts": "2026-01-01T00:00:00Z",
+                              "parts": [{ "kind": "text", "text":
+                                "# Title
 
 - one
 - two
@@ -1742,203 +1707,211 @@ Inline `code` and [docs](https://example.com).
 let x = 1;
 ```
 "
-                          }] },
-                    ],
-                })));
+                              }] },
+                        ],
+                    })));
+                });
+                view.clone().into_any_element()
             });
-            view.clone()
-        });
-        assert!(
-            cx.debug_bounds("chat-heading").is_some(),
-            "a heading is drawn"
-        );
-        assert!(
-            cx.debug_bounds("chat-list-item").is_some(),
-            "a list item is drawn"
-        );
-        assert!(
-            cx.debug_bounds("chat-code-block").is_some(),
-            "a fenced code block is drawn"
-        );
-        assert!(cx.debug_bounds("chat-link").is_some(), "a link is drawn");
-    }
-
-    #[gpui::test]
-    fn a_thinking_row_opens_and_closes_on_a_click(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, _cx| {
-                view.apply_conversation(response(json!({
-                    "source": "claude-transcript",
-                    "turns": [
-                        { "role": "assistant", "ts": "2026-01-01T00:00:00Z",
-                          "parts": [{ "kind": "thinking", "text": "hmm" }] },
-                    ],
-                })));
-            });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(
-            cx.debug_bounds("chat-thinking").is_some(),
-            "the thinking row is drawn"
-        );
-        assert!(
-            cx.debug_bounds("chat-thinking-body").is_none(),
-            "a thinking row starts closed"
-        );
-
-        let bounds = cx.debug_bounds("chat-thinking").expect("the thinking row");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
             assert!(
-                chat.read(app).model().is_thinking_open(0, 0),
-                "the click opened the thinking row"
+                cx.debug_bounds("chat-heading").is_some(),
+                "a heading is drawn"
             );
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(
-            cx.debug_bounds("chat-thinking-body").is_some(),
-            "the thinking row shows its body"
-        );
-
-        let bounds = cx.debug_bounds("chat-thinking").expect("the thinking row");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
             assert!(
-                !chat.read(app).model().is_thinking_open(0, 0),
-                "the second click closed the thinking row"
+                cx.debug_bounds("chat-list-item").is_some(),
+                "a list item is drawn"
             );
-        });
-    }
-
-    #[gpui::test]
-    fn a_retry_recovers_the_conversation_without_a_restart(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, _cx| {
-                view.fail_conversation("Couldn't load the conversation. Try again.".to_string());
-            });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(
-            cx.debug_bounds("chat-error").is_some(),
-            "the failure is on screen"
-        );
-        assert!(
-            cx.debug_bounds("chat-retry").is_some(),
-            "a Retry is offered"
-        );
-
-        let bounds = cx.debug_bounds("chat-retry").expect("the Retry");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            assert_eq!(
-                chat.read(app).model().failure(),
-                None,
-                "the Retry cleared the failure"
+            assert!(
+                cx.debug_bounds("chat-code-block").is_some(),
+                "a fenced code block is drawn"
             );
-            assert_eq!(chat.read(app).model().phase(), &ChatPhase::Loading);
-        });
+            assert!(cx.debug_bounds("chat-link").is_some(), "a link is drawn");
+        }
+    );
 
-        // The next good answer fills the column again.
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, _cx| {
-                view.apply_conversation(response(json!({
-                    "source": "claude-transcript",
-                    "turns": [
-                        { "role": "user", "ts": "2026-01-01T00:00:00Z",
-                          "parts": [{ "kind": "text", "text": "hello" }] },
-                    ],
-                })));
+    crate::orion_test!(
+        fn a_thinking_row_opens_and_closes_on_a_click(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(
-            cx.debug_bounds("chat-turn").is_some(),
-            "the recovered transcript is on screen"
-        );
-    }
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.apply_conversation(response(json!({
+                        "source": "claude-transcript",
+                        "turns": [
+                            { "role": "assistant", "ts": "2026-01-01T00:00:00Z",
+                              "parts": [{ "kind": "thinking", "text": "hmm" }] },
+                        ],
+                    })));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.debug_bounds("chat-thinking").is_some(),
+                "the thinking row is drawn"
+            );
+            assert!(
+                cx.debug_bounds("chat-thinking-body").is_none(),
+                "a thinking row starts closed"
+            );
 
-    #[gpui::test]
-    fn scrolling_up_pins_the_view(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        // A long transcript, so the column really scrolls.
-        let turns: Vec<Value> = (0..80)
-            .map(|index| {
-                json!({
-                    "role": "user",
-                    "ts": "2026-01-01T00:00:00Z",
-                    "parts": [{ "kind": "text", "text": format!("turn {index}") }],
+            let bounds = cx.debug_bounds("chat-thinking").expect("the thinking row");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert!(
+                    chat.read(app).model().is_thinking_open(0, 0),
+                    "the click opened the thinking row"
+                );
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.debug_bounds("chat-thinking-body").is_some(),
+                "the thinking row shows its body"
+            );
+
+            let bounds = cx.debug_bounds("chat-thinking").expect("the thinking row");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert!(
+                    !chat.read(app).model().is_thinking_open(0, 0),
+                    "the second click closed the thinking row"
+                );
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn a_retry_recovers_the_conversation_without_a_restart(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.fail_conversation(
+                        "Couldn't load the conversation. Try again.".to_string(),
+                    );
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.debug_bounds("chat-error").is_some(),
+                "the failure is on screen"
+            );
+            assert!(
+                cx.debug_bounds("chat-retry").is_some(),
+                "a Retry is offered"
+            );
+
+            let bounds = cx.debug_bounds("chat-retry").expect("the Retry");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert_eq!(
+                    chat.read(app).model().failure(),
+                    None,
+                    "the Retry cleared the failure"
+                );
+                assert_eq!(chat.read(app).model().phase(), &ChatPhase::Loading);
+            });
+
+            // The next good answer fills the column again.
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.apply_conversation(response(json!({
+                        "source": "claude-transcript",
+                        "turns": [
+                            { "role": "user", "ts": "2026-01-01T00:00:00Z",
+                              "parts": [{ "kind": "text", "text": "hello" }] },
+                        ],
+                    })));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.debug_bounds("chat-turn").is_some(),
+                "the recovered transcript is on screen"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn scrolling_up_pins_the_view(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            // A long transcript, so the column really scrolls.
+            let turns: Vec<Value> = (0..80)
+                .map(|index| {
+                    json!({
+                        "role": "user",
+                        "ts": "2026-01-01T00:00:00Z",
+                        "parts": [{ "kind": "text", "text": format!("turn {index}") }],
+                    })
                 })
-            })
-            .collect();
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, _cx| {
-                view.apply_conversation(response(json!({
-                    "source": "claude-transcript",
-                    "turns": turns,
-                })));
+                .collect();
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.apply_conversation(response(json!({
+                        "source": "claude-transcript",
+                        "turns": turns,
+                    })));
+                });
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            assert!(
-                chat.read(app).model().follows_bottom(),
-                "a fresh chat follows the bottom"
-            );
-        });
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert!(
+                    chat.read(app).model().follows_bottom(),
+                    "a fresh chat follows the bottom"
+                );
+            });
 
-        cx.simulate_event(gpui::ScrollWheelEvent {
-            position: gpui::point(px(400.), px(300.)),
-            // A positive wheel delta scrolls up.
-            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(120.))),
-            modifiers: gpui::Modifiers::none(),
-            touch_phase: gpui::TouchPhase::default(),
-        });
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            assert!(
-                !chat.read(app).model().follows_bottom(),
-                "scrolling up pins the view: the transcript must not jump away"
-            );
-        });
-    }
+            cx.simulate_event(gpui_kit::ScrollEvent {
+                position: gpui_kit::point(px(400.), px(300.)),
+                // A positive wheel delta scrolls up.
+                delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(120.))),
+                modifiers: gpui_kit::Modifiers::none(),
+                touch_phase: gpui_kit::TouchPhase::default(),
+                source: gpui_kit::ScrollSource::Pointer,
+            });
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert!(
+                    !chat.read(app).model().follows_bottom(),
+                    "scrolling up pins the view: the transcript must not jump away"
+                );
+            });
+        }
+    );
 
-    #[gpui::test]
-    fn a_chat_that_has_not_read_yet_shows_a_skeleton(cx: &mut gpui::TestAppContext) {
-        use gpui::{point, size};
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(ChatView::new));
-        cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, _cx| {
-            view.clone()
-        });
-        assert!(
-            cx.debug_bounds("chat-loading").is_some(),
-            "the first load shows a skeleton"
-        );
-        assert!(
-            cx.debug_bounds("chat-empty").is_none(),
-            "a chat that has not read yet is not empty"
-        );
-        assert!(
-            cx.debug_bounds("chat-turn").is_none(),
-            "a chat that has not read yet has no turns"
-        );
-    }
+    crate::orion_test!(
+        fn a_chat_that_has_not_read_yet_shows_a_skeleton(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::{point, size};
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChatView::new));
+            cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, _cx| {
+                view.clone().into_any_element()
+            });
+            assert!(
+                cx.debug_bounds("chat-loading").is_some(),
+                "the first load shows a skeleton"
+            );
+            assert!(
+                cx.debug_bounds("chat-empty").is_none(),
+                "a chat that has not read yet is not empty"
+            );
+            assert!(
+                cx.debug_bounds("chat-turn").is_none(),
+                "a chat that has not read yet has no turns"
+            );
+        }
+    );
 
     /// A transcript with one tool call, as the tool card reads it.
     fn tool_turn(input: &str, output: &str, error: bool) -> Value {
@@ -1955,309 +1928,325 @@ let x = 1;
         })
     }
 
-    #[gpui::test]
-    fn a_tool_call_is_a_row_with_its_work_inside(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, _cx| {
-                view.apply_conversation(response(tool_turn(
-                    "{\"command\":\"ls\"}",
-                    "src\nCargo.toml\n",
-                    false,
-                )));
+    crate::orion_test!(
+        fn a_tool_call_is_a_row_with_its_work_inside(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(
-            cx.debug_bounds("chat-tool").is_some(),
-            "the tool row is drawn"
-        );
-        assert!(
-            cx.debug_bounds("chat-tool-header").is_some(),
-            "the row has a header"
-        );
-        assert!(
-            cx.debug_bounds("chat-tool-output").is_some(),
-            "a tool's work starts open"
-        );
-    }
-
-    #[gpui::test]
-    fn a_tool_row_names_its_tool_and_its_state(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, _cx| {
-                view.apply_conversation(response(tool_turn(
-                    "{\"command\":\"ls\"}",
-                    "src\n",
-                    false,
-                )));
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.apply_conversation(response(tool_turn(
+                        "{\"command\":\"ls\"}",
+                        "src\nCargo.toml\n",
+                        false,
+                    )));
+                });
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(
-            cx.debug_bounds("chat-tool-header").is_some(),
-            "the row has a header"
-        );
-        // The header says how the call ended, and the body names the tool.
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            let card = part_card(&ChatPart::Tool(crate::chat_entities::ToolPart {
-                name: "Bash".to_string(),
-                summary: "Bash: ls".to_string(),
-                input: "{}".to_string(),
-                output: "src\n".to_string(),
-                error: false,
-                arguments_omitted: false,
-                skill: None,
-                output_ref: None,
-                output_size: None,
-                images: Vec::new(),
-            }));
-            let PartCard::Tool(card) = card else {
-                panic!("a tool call is a tool card");
-            };
-            assert_eq!(card.status, ToolStatus::Done);
-            assert_eq!(card.status.as_word(), "Done");
-            assert_eq!(card.name, "Bash", "the body names the tool");
-            let _ = chat;
-        });
-    }
-
-    #[gpui::test]
-    fn a_tool_row_folds_away_on_a_click(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, _cx| {
-                view.apply_conversation(response(tool_turn(
-                    "{\"command\":\"ls\"}",
-                    "src\n",
-                    false,
-                )));
-            });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        let before = cx.debug_bounds("chat-tool").expect("the tool row");
-        let bounds = cx
-            .debug_bounds("chat-tool-header")
-            .expect("the tool row's header");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        cx.update(|window, cx| window.draw(cx).clear());
-        let after = cx.debug_bounds("chat-tool").expect("the tool row");
-        assert!(
-            after.size.height < before.size.height,
-            "the click folded the work away: {before:?} then {after:?}"
-        );
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
+            cx.update(|window, cx| window.render_frame(cx));
             assert!(
-                !chat.read(app).model().is_tool_open(0, 0),
-                "the row's state is the model's"
+                cx.debug_bounds("chat-tool").is_some(),
+                "the tool row is drawn"
             );
-        });
-    }
-
-    #[gpui::test]
-    fn a_failed_tool_call_says_so_and_stays(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, _cx| {
-                view.apply_conversation(response(tool_turn("{}", "boom", true)));
-            });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(
-            cx.debug_bounds("chat-tool").is_some(),
-            "a failed tool call does not disappear"
-        );
-        assert!(
-            cx.debug_bounds("chat-tool-output").is_some(),
-            "and it keeps what it said"
-        );
-    }
-
-    #[gpui::test]
-    fn an_edit_shows_its_diff(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        let input = json!({
-            "file_path": "C:/work/src/main.rs",
-            "old_string": "one\ntwo\n",
-            "new_string": "one\nthree\n",
-        })
-        .to_string();
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, _cx| {
-                view.apply_conversation(response(tool_turn(&input, "updated", false)));
-            });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(
-            cx.debug_bounds("chat-diff").is_some(),
-            "the edit shows its diff"
-        );
-    }
-
-    #[gpui::test]
-    fn a_file_path_in_a_tool_card_is_a_control(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let collected = events.clone();
-        // The subscription must outlive the test, or the events go nowhere.
-        let subscription = cx.update(|_window, app| {
-            app.subscribe(
-                &root.read(app).view.clone(),
-                move |_entity, event: &ChatEvent, _cx| {
-                    collected.borrow_mut().push(event.clone());
-                },
-            )
-        });
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, _cx| {
-                view.apply_conversation(response(tool_turn(
-                    "{\"file_path\":\"C:/work/src/main.rs\"}",
-                    "wrote C:/work/src/main.rs",
-                    false,
-                )));
-            });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(
-            cx.debug_bounds("chat-file-path").is_some(),
-            "the path is its own control"
-        );
-
-        let bounds = cx.debug_bounds("chat-file-path").expect("the path");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        assert!(
-            events
-                .borrow()
-                .contains(&ChatEvent::OpenFile("C:/work/src/main.rs".to_string())),
-            "the click asked for the file: {:?}",
-            events.borrow()
-        );
-        drop(subscription);
-    }
-
-    #[gpui::test]
-    fn output_beyond_the_bound_points_at_the_terminal(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let collected = events.clone();
-        // The subscription must outlive the test, or the events go nowhere.
-        let subscription = cx.update(|_window, app| {
-            app.subscribe(
-                &root.read(app).view.clone(),
-                move |_entity, event: &ChatEvent, _cx| {
-                    collected.borrow_mut().push(event.clone());
-                },
-            )
-        });
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, _cx| {
-                view.apply_conversation(response(tool_turn(
-                    "{}",
-                    &"x".repeat(crate::tool_card::MAX_TOOL_CHARS + 100),
-                    false,
-                )));
-            });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(
-            cx.debug_bounds("chat-terminal-path").is_some(),
-            "the cut output points at the Terminal Lens"
-        );
-
-        let bounds = cx.debug_bounds("chat-terminal-path").expect("the path");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        assert!(
-            events.borrow().contains(&ChatEvent::ShowTerminal),
-            "the click asked for the Terminal Lens: {:?}",
-            events.borrow()
-        );
-        drop(subscription);
-    }
-
-    #[gpui::test]
-    fn an_empty_transcript_shows_the_empty_state_not_the_grid(cx: &mut gpui::TestAppContext) {
-        use gpui::{point, size};
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(ChatView::new));
-        cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, cx| {
-            view.update(cx, |view, _cx| {
-                // The Engine answers "scrollback" with no turns when the agent
-                // keeps no transcript: the chat must not show the terminal's
-                // own text as a turn.
-                view.apply_conversation(response(json!({
-                    "source": "scrollback",
-                    "turns": [],
-                })));
-            });
-            view.clone()
-        });
-        assert!(
-            cx.debug_bounds("chat-empty").is_some(),
-            "an empty transcript shows the empty state"
-        );
-        assert!(
-            cx.debug_bounds("chat-turn").is_none(),
-            "an empty transcript shows no turns"
-        );
-    }
-
-    #[gpui::test]
-    fn a_failed_read_shows_the_failure_and_a_retry(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(ChatView::new));
-        cx.update(|_window, app| {
-            view.update(app, |view, _cx| {
-                view.fail_conversation("Couldn't load the conversation. Try again.".to_string());
-            });
-            assert_eq!(
-                view.read(app).model().failure(),
-                Some("Couldn't load the conversation. Try again.")
+            assert!(
+                cx.debug_bounds("chat-tool-header").is_some(),
+                "the row has a header"
             );
-            assert!(view.read(app).model().phase().is_failed());
-        });
-    }
+            assert!(
+                cx.debug_bounds("chat-tool-output").is_some(),
+                "a tool's work starts open"
+            );
+        }
+    );
 
-    #[gpui::test]
-    fn a_retry_clears_the_failure(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(ChatView::new));
-        cx.update(|_window, app| {
-            view.update(app, |view, cx| {
-                view.fail_conversation("Couldn't load the conversation. Try again.".to_string());
-                view.retry(cx);
+    crate::orion_test!(
+        fn a_tool_row_names_its_tool_and_its_state(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
             });
-            assert_eq!(view.read(app).model().failure(), None);
-            assert_eq!(view.read(app).model().phase(), &ChatPhase::Loading);
-        });
-    }
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.apply_conversation(response(tool_turn(
+                        "{\"command\":\"ls\"}",
+                        "src\n",
+                        false,
+                    )));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.debug_bounds("chat-tool-header").is_some(),
+                "the row has a header"
+            );
+            // The header says how the call ended, and the body names the tool.
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                let card = part_card(&ChatPart::Tool(crate::chat_entities::ToolPart {
+                    name: "Bash".to_string(),
+                    summary: "Bash: ls".to_string(),
+                    input: "{}".to_string(),
+                    output: "src\n".to_string(),
+                    error: false,
+                    arguments_omitted: false,
+                    skill: None,
+                    output_ref: None,
+                    output_size: None,
+                    images: Vec::new(),
+                }));
+                let PartCard::Tool(card) = card else {
+                    panic!("a tool call is a tool card");
+                };
+                assert_eq!(card.status, ToolStatus::Done);
+                assert_eq!(card.status.as_word(), "Done");
+                assert_eq!(card.name, "Bash", "the body names the tool");
+                let _ = chat;
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn a_tool_row_folds_away_on_a_click(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.apply_conversation(response(tool_turn(
+                        "{\"command\":\"ls\"}",
+                        "src\n",
+                        false,
+                    )));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            let before = cx.debug_bounds("chat-tool").expect("the tool row");
+            let bounds = cx
+                .debug_bounds("chat-tool-header")
+                .expect("the tool row's header");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
+            cx.update(|window, cx| window.render_frame(cx));
+            let after = cx.debug_bounds("chat-tool").expect("the tool row");
+            assert!(
+                after.size.height < before.size.height,
+                "the click folded the work away: {before:?} then {after:?}"
+            );
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert!(
+                    !chat.read(app).model().is_tool_open(0, 0),
+                    "the row's state is the model's"
+                );
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn a_failed_tool_call_says_so_and_stays(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.apply_conversation(response(tool_turn("{}", "boom", true)));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.debug_bounds("chat-tool").is_some(),
+                "a failed tool call does not disappear"
+            );
+            assert!(
+                cx.debug_bounds("chat-tool-output").is_some(),
+                "and it keeps what it said"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn an_edit_shows_its_diff(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            let input = json!({
+                "file_path": "C:/work/src/main.rs",
+                "old_string": "one\ntwo\n",
+                "new_string": "one\nthree\n",
+            })
+            .to_string();
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.apply_conversation(response(tool_turn(&input, "updated", false)));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.debug_bounds("chat-diff").is_some(),
+                "the edit shows its diff"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn a_file_path_in_a_tool_card_is_a_control(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let collected = events.clone();
+            // The subscription must outlive the test, or the events go nowhere.
+            let subscription = cx.update(|_window, app| {
+                app.subscribe(
+                    &root.read(app).view.clone(),
+                    move |_entity, event: &ChatEvent, _cx| {
+                        collected.borrow_mut().push(event.clone());
+                    },
+                )
+            });
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.apply_conversation(response(tool_turn(
+                        "{\"file_path\":\"C:/work/src/main.rs\"}",
+                        "wrote C:/work/src/main.rs",
+                        false,
+                    )));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.debug_bounds("chat-file-path").is_some(),
+                "the path is its own control"
+            );
+
+            let bounds = cx.debug_bounds("chat-file-path").expect("the path");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
+            assert!(
+                events
+                    .borrow()
+                    .contains(&ChatEvent::OpenFile("C:/work/src/main.rs".to_string())),
+                "the click asked for the file: {:?}",
+                events.borrow()
+            );
+            drop(subscription);
+        }
+    );
+
+    crate::orion_test!(
+        fn output_beyond_the_bound_points_at_the_terminal(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let collected = events.clone();
+            // The subscription must outlive the test, or the events go nowhere.
+            let subscription = cx.update(|_window, app| {
+                app.subscribe(
+                    &root.read(app).view.clone(),
+                    move |_entity, event: &ChatEvent, _cx| {
+                        collected.borrow_mut().push(event.clone());
+                    },
+                )
+            });
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.apply_conversation(response(tool_turn(
+                        "{}",
+                        &"x".repeat(crate::tool_card::MAX_TOOL_CHARS + 100),
+                        false,
+                    )));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.debug_bounds("chat-terminal-path").is_some(),
+                "the cut output points at the Terminal Lens"
+            );
+
+            let bounds = cx.debug_bounds("chat-terminal-path").expect("the path");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
+            assert!(
+                events.borrow().contains(&ChatEvent::ShowTerminal),
+                "the click asked for the Terminal Lens: {:?}",
+                events.borrow()
+            );
+            drop(subscription);
+        }
+    );
+
+    crate::orion_test!(
+        fn an_empty_transcript_shows_the_empty_state_not_the_grid(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            use gpui_kit::{point, size};
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChatView::new));
+            cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, cx| {
+                view.update(cx, |view, _cx| {
+                    // The Engine answers "scrollback" with no turns when the agent
+                    // keeps no transcript: the chat must not show the terminal's
+                    // own text as a turn.
+                    view.apply_conversation(response(json!({
+                        "source": "scrollback",
+                        "turns": [],
+                    })));
+                });
+                view.clone().into_any_element()
+            });
+            assert!(
+                cx.debug_bounds("chat-empty").is_some(),
+                "an empty transcript shows the empty state"
+            );
+            assert!(
+                cx.debug_bounds("chat-turn").is_none(),
+                "an empty transcript shows no turns"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn a_failed_read_shows_the_failure_and_a_retry(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChatView::new));
+            cx.update(|_window, app| {
+                view.update(app, |view, _cx| {
+                    view.fail_conversation(
+                        "Couldn't load the conversation. Try again.".to_string(),
+                    );
+                });
+                assert_eq!(
+                    view.read(app).model().failure(),
+                    Some("Couldn't load the conversation. Try again.")
+                );
+                assert!(view.read(app).model().phase().is_failed());
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn a_retry_clears_the_failure(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChatView::new));
+            cx.update(|_window, app| {
+                view.update(app, |view, cx| {
+                    view.fail_conversation(
+                        "Couldn't load the conversation. Try again.".to_string(),
+                    );
+                    view.retry(cx);
+                });
+                assert_eq!(view.read(app).model().failure(), None);
+                assert_eq!(view.read(app).model().phase(), &ChatPhase::Loading);
+            });
+        }
+    );
 
     /// Give the chat an agent to talk to.
     fn attach_agent(
-        cx: &mut gpui::VisualTestContext,
+        cx: &mut gpui_kit::VisualTestContext,
         root: &Entity<ChatRoot>,
         seam: Arc<RecordingPane>,
     ) {
@@ -2270,129 +2259,133 @@ let x = 1;
         });
     }
 
-    #[gpui::test]
-    fn the_composer_sends_the_message_to_the_agent(cx: &mut gpui::TestAppContext) {
-        let seam = Arc::new(RecordingPane::new());
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        attach_agent(cx, &root, seam.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
+    crate::orion_test!(
+        fn the_composer_sends_the_message_to_the_agent(cx: &mut gpui_kit::TestAppContext) {
+            let seam = Arc::new(RecordingPane::new());
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
 
-        // The box has the focus, so what the reader types lands in it.
-        cx.simulate_input("hello");
-        cx.simulate_keystrokes("enter");
+            // The box has the focus, so what the reader types lands in it.
+            cx.simulate_input("hello");
+            cx.simulate_keystrokes("enter");
 
-        assert_eq!(
-            seam.submitted(),
-            vec!["hello".to_string()],
-            "the agent has the message"
-        );
-    }
-
-    #[gpui::test]
-    fn an_empty_draft_cannot_be_sent(cx: &mut gpui::TestAppContext) {
-        let seam = Arc::new(RecordingPane::new());
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        attach_agent(cx, &root, seam.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        let bounds = cx.debug_bounds("composer-send").expect("the send control");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-
-        assert!(
-            seam.submitted().is_empty(),
-            "an empty draft is not a message"
-        );
-    }
-
-    #[gpui::test]
-    fn a_send_on_its_way_is_visible(cx: &mut gpui::TestAppContext) {
-        let seam = Arc::new(RecordingPane::new());
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        attach_agent(cx, &root, seam.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        cx.simulate_input("hello");
-        // The keystroke is dispatched without letting the background executor
-        // run, so the message is caught on its way.
-        cx.update(|window, app| {
-            window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), app);
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        assert!(
-            cx.debug_bounds("composer-pending").is_some(),
-            "the box says the message is on its way"
-        );
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            assert!(
-                chat.read(app)
-                    .composer()
-                    .read(app)
-                    .model()
-                    .state()
-                    .is_pending(),
-                "the send is still on its way"
-            );
-        });
-
-        // The executor runs the send through: the box settles.
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            assert!(
-                !chat
-                    .read(app)
-                    .composer()
-                    .read(app)
-                    .model()
-                    .state()
-                    .is_pending(),
+            assert_eq!(
+                seam.submitted(),
+                vec!["hello".to_string()],
                 "the agent has the message"
             );
-        });
-        assert_eq!(seam.submitted(), vec!["hello".to_string()]);
-    }
+        }
+    );
 
-    #[gpui::test]
-    fn a_failed_send_offers_a_retry(cx: &mut gpui::TestAppContext) {
-        let seam = Arc::new(RecordingPane::new());
-        seam.fail_with("pty closed");
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        attach_agent(cx, &root, seam.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
+    crate::orion_test!(
+        fn an_empty_draft_cannot_be_sent(cx: &mut gpui_kit::TestAppContext) {
+            let seam = Arc::new(RecordingPane::new());
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
 
-        cx.simulate_input("hello");
-        cx.simulate_keystrokes("enter");
-        cx.update(|window, cx| window.draw(cx).clear());
+            let bounds = cx.debug_bounds("composer-send").expect("the send control");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
 
-        assert!(
-            cx.debug_bounds("composer-failed").is_some(),
-            "the failure is on screen"
-        );
-        assert_eq!(seam.submitted(), vec!["hello".to_string()]);
+            assert!(
+                seam.submitted().is_empty(),
+                "an empty draft is not a message"
+            );
+        }
+    );
 
-        let bounds = cx.debug_bounds("composer-retry").expect("the retry");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        cx.run_until_parked();
+    crate::orion_test!(
+        fn a_send_on_its_way_is_visible(cx: &mut gpui_kit::TestAppContext) {
+            let seam = Arc::new(RecordingPane::new());
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
 
-        assert_eq!(
-            seam.submitted(),
-            vec!["hello".to_string(), "hello".to_string()],
-            "the retry sends the same words"
-        );
-    }
+            cx.simulate_input("hello");
+            // The keystroke is dispatched without letting the background executor
+            // run, so the message is caught on its way.
+            cx.update(|window, app| {
+                window.dispatch_keystroke(gpui_kit::Keystroke::parse("enter").unwrap(), app);
+            });
+            cx.update(|window, cx| window.render_frame(cx));
 
-    #[test]
+            assert!(
+                cx.debug_bounds("composer-pending").is_some(),
+                "the box says the message is on its way"
+            );
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert!(
+                    chat.read(app)
+                        .composer()
+                        .read(app)
+                        .model()
+                        .state()
+                        .is_pending(),
+                    "the send is still on its way"
+                );
+            });
+
+            // The executor runs the send through: the box settles.
+            cx.run_until_parked();
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert!(
+                    !chat
+                        .read(app)
+                        .composer()
+                        .read(app)
+                        .model()
+                        .state()
+                        .is_pending(),
+                    "the agent has the message"
+                );
+            });
+            assert_eq!(seam.submitted(), vec!["hello".to_string()]);
+        }
+    );
+
+    crate::orion_test!(
+        fn a_failed_send_offers_a_retry(cx: &mut gpui_kit::TestAppContext) {
+            let seam = Arc::new(RecordingPane::new());
+            seam.fail_with("pty closed");
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
+
+            cx.simulate_input("hello");
+            cx.simulate_keystrokes("enter");
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert!(
+                cx.debug_bounds("composer-failed").is_some(),
+                "the failure is on screen"
+            );
+            assert_eq!(seam.submitted(), vec!["hello".to_string()]);
+
+            let bounds = cx.debug_bounds("composer-retry").expect("the retry");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
+            cx.run_until_parked();
+
+            assert_eq!(
+                seam.submitted(),
+                vec!["hello".to_string(), "hello".to_string()],
+                "the retry sends the same words"
+            );
+        }
+    );
+
+    #[::core::prelude::v1::test]
     fn an_answered_menu_is_the_same_question_only_for_a_moment() {
         let now = Instant::now();
         let answered = ("p1".to_string(), now - Duration::from_secs(1));
@@ -2412,280 +2405,292 @@ let x = 1;
         assert!(!answered_menu_still_shows(None, "p1", now));
     }
 
-    #[gpui::test]
-    fn a_click_in_the_box_gives_it_the_focus(cx: &mut gpui::TestAppContext) {
-        let seam = Arc::new(RecordingPane::new());
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        attach_agent(cx, &root, seam.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        let bounds = cx.debug_bounds("composer-input").expect("the box");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-
-        cx.update(|window, app| {
-            let chat = root.read(app).view.clone();
-            let composer = chat.read(app).composer_focus(app);
-            assert!(composer.is_focused(window), "the box took the focus");
-        });
-    }
-
-    #[gpui::test]
-    fn a_send_that_arrives_late_leaves_the_new_pane_alone(cx: &mut gpui::TestAppContext) {
-        let seam = Arc::new(RecordingPane::new());
-        seam.fail_with("pty closed");
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        attach_agent(cx, &root, seam.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        cx.simulate_input("for the first agent");
-        // The keystroke goes out without letting the background executor run:
-        // the message is on its way.
-        cx.update(|window, app| {
-            window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), app);
-        });
-
-        // Another pane takes the box while the message is on its way.
-        let other = Arc::new(RecordingPane::new());
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, cx| {
-                let seam: Arc<dyn PaneSeam> = other;
-                view.attach(None, seam, "p2".to_string(), cx);
+    crate::orion_test!(
+        fn a_click_in_the_box_gives_it_the_focus(cx: &mut gpui_kit::TestAppContext) {
+            let seam = Arc::new(RecordingPane::new());
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
             });
-        });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
 
-        // The first agent answers: the second pane must not hear about it.
-        cx.run_until_parked();
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            let composer = chat.read(app).composer();
-            assert_eq!(
-                composer.read(app).model().failure(),
-                None,
-                "the old pane's failure is not shown in the new pane"
-            );
-        });
-        assert_eq!(seam.submitted(), vec!["for the first agent".to_string()]);
-    }
+            let bounds = cx.debug_bounds("composer-input").expect("the box");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
 
-    #[gpui::test]
-    fn the_reader_pastes_what_they_copied(cx: &mut gpui::TestAppContext) {
-        let seam = Arc::new(RecordingPane::new());
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        attach_agent(cx, &root, seam.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string("pasted words".to_string()));
-        cx.simulate_keystrokes("ctrl-v");
-
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            assert_eq!(
-                chat.read(app).composer().read(app).model().draft(),
-                "pasted words"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn the_stop_control_interrupts_the_running_agent(cx: &mut gpui::TestAppContext) {
-        let seam = Arc::new(RecordingPane::new());
-        seam.set_working(true);
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        attach_agent(cx, &root, seam.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        let bounds = cx.debug_bounds("composer-stop").expect("the stop control");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        cx.run_until_parked();
-
-        assert_eq!(
-            seam.calls(),
-            vec![SeamCall::Stop],
-            "the agent's turn was interrupted"
-        );
-    }
-
-    #[gpui::test]
-    fn a_prompt_card_blocks_the_conversation_until_it_is_answered(cx: &mut gpui::TestAppContext) {
-        let seam = Arc::new(RecordingPane::new());
-        seam.show_prompt(menu_prompt());
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        attach_agent(cx, &root, seam.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        // The card is on screen with the agent's question and its options.
-        assert!(
-            cx.debug_bounds("prompt-card").is_some(),
-            "the card is on screen"
-        );
-        assert!(cx.debug_bounds("prompt-question").is_some());
-        assert!(cx.debug_bounds("prompt-option-0").is_some());
-        assert!(cx.debug_bounds("prompt-option-1").is_some());
-
-        // The composer says why it is not taking messages.
-        assert!(cx.debug_bounds("chat-composer").is_some());
-        assert!(
-            cx.debug_bounds("composer-blocked").is_some(),
-            "the composer says the question comes first"
-        );
-
-        // The card took the focus: the agent is waiting for an answer.
-        cx.update(|window, app| {
-            let chat = root.read(app).view.clone();
-            let card = chat
-                .read(app)
-                .prompt_card_focus(app)
-                .expect("the card has a focus handle");
-            assert!(card.is_focused(window), "the card took the focus");
-            assert!(
-                chat.read(app).composer().read(app).is_blocked(),
-                "the composer waits for the answer"
-            );
-        });
-
-        // The card has the focus, so typing answers the menu rather than
-        // starting a new message.
-        cx.simulate_keystrokes("2");
-        assert_eq!(
-            seam.calls(),
-            vec![SeamCall::Answer("p1".to_string(), 1)],
-            "the keyboard picked the second option"
-        );
-        assert!(
-            seam.submitted().is_empty(),
-            "the card blocks the conversation"
-        );
-
-        // The answer went out: the card is gone, and the composer takes over.
-        cx.update(|window, cx| window.draw(cx).clear());
-        cx.update(|window, app| {
-            let chat = root.read(app).view.clone();
-            assert!(!chat.read(app).has_prompt_card(), "the card is gone");
-            assert!(
-                !chat.read(app).composer().read(app).is_blocked(),
-                "the composer is live again"
-            );
-            let composer = chat.read(app).composer_focus(app);
-            assert!(
-                composer.is_focused(window),
-                "the composer took the focus back"
-            );
-        });
-
-        // The reader's box is live again: the message goes to the agent.
-        cx.simulate_input("thanks");
-        cx.simulate_keystrokes("enter");
-        assert_eq!(
-            seam.submitted(),
-            vec!["thanks".to_string()],
-            "the composer sends once the card is answered"
-        );
-    }
-
-    #[gpui::test]
-    fn an_answered_card_does_not_come_back(cx: &mut gpui::TestAppContext) {
-        let seam = Arc::new(RecordingPane::new());
-        seam.show_prompt(menu_prompt());
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        attach_agent(cx, &root, seam.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        cx.simulate_keystrokes("1");
-        assert_eq!(
-            seam.calls(),
-            vec![SeamCall::Answer("p1".to_string(), 0)],
-            "the keyboard picked the first option"
-        );
-
-        // The agent's screen still shows the menu for a moment: the card must
-        // not come back and block the composer again.
-        seam.show_prompt(menu_prompt());
-        cx.update(|window, cx| window.draw(cx).clear());
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            assert!(
-                !chat.read(app).has_prompt_card(),
-                "the answered card stays gone"
-            );
-            assert!(
-                !chat.read(app).composer().read(app).is_blocked(),
-                "the composer is not blocked by a menu that was answered"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn a_draft_does_not_cross_panes(cx: &mut gpui::TestAppContext) {
-        let seam = Arc::new(RecordingPane::new());
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        attach_agent(cx, &root, seam.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        cx.simulate_input("for the first agent");
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            assert_eq!(
-                chat.read(app).composer().read(app).model().draft(),
-                "for the first agent"
-            );
-        });
-
-        // Another pane: its own words, not the first agent's.
-        let other = Arc::new(RecordingPane::new());
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, cx| {
-                let seam: Arc<dyn PaneSeam> = other;
-                view.attach(None, seam, "p2".to_string(), cx);
+            cx.update(|window, app| {
+                let chat = root.read(app).view.clone();
+                let composer = chat.read(app).composer_focus(app);
+                assert!(composer.is_focused(window), "the box took the focus");
             });
-        });
+        }
+    );
 
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
+    crate::orion_test!(
+        fn a_send_that_arrives_late_leaves_the_new_pane_alone(cx: &mut gpui_kit::TestAppContext) {
+            let seam = Arc::new(RecordingPane::new());
+            seam.fail_with("pty closed");
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
+
+            cx.simulate_input("for the first agent");
+            // The keystroke goes out without letting the background executor run:
+            // the message is on its way.
+            cx.update(|window, app| {
+                window.dispatch_keystroke(gpui_kit::Keystroke::parse("enter").unwrap(), app);
+            });
+
+            // Another pane takes the box while the message is on its way.
+            let other = Arc::new(RecordingPane::new());
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, cx| {
+                    let seam: Arc<dyn PaneSeam> = other;
+                    view.attach(None, seam, "p2".to_string(), cx);
+                });
+            });
+
+            // The first agent answers: the second pane must not hear about it.
+            cx.run_until_parked();
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                let composer = chat.read(app).composer();
+                assert_eq!(
+                    composer.read(app).model().failure(),
+                    None,
+                    "the old pane's failure is not shown in the new pane"
+                );
+            });
+            assert_eq!(seam.submitted(), vec!["for the first agent".to_string()]);
+        }
+    );
+
+    crate::orion_test!(
+        fn the_reader_pastes_what_they_copied(cx: &mut gpui_kit::TestAppContext) {
+            let seam = Arc::new(RecordingPane::new());
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
+
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                "pasted words".to_string(),
+            ));
+            cx.simulate_keystrokes("ctrl-v");
+
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert_eq!(
+                    chat.read(app).composer().read(app).model().draft(),
+                    "pasted words"
+                );
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn the_stop_control_interrupts_the_running_agent(cx: &mut gpui_kit::TestAppContext) {
+            let seam = Arc::new(RecordingPane::new());
+            seam.set_working(true);
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
+
+            let bounds = cx.debug_bounds("composer-stop").expect("the stop control");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
+            cx.run_until_parked();
+
             assert_eq!(
-                chat.read(app).composer().read(app).model().draft(),
-                "",
-                "the draft belonged to the old agent"
+                seam.calls(),
+                vec![SeamCall::Stop],
+                "the agent's turn was interrupted"
             );
-        });
-    }
+        }
+    );
 
-    #[gpui::test]
-    fn a_prompt_card_is_answered_with_the_pointer(cx: &mut gpui::TestAppContext) {
-        let seam = Arc::new(RecordingPane::new());
-        seam.show_prompt(menu_prompt());
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        attach_agent(cx, &root, seam.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
+    crate::orion_test!(
+        fn a_prompt_card_blocks_the_conversation_until_it_is_answered(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let seam = Arc::new(RecordingPane::new());
+            seam.show_prompt(menu_prompt());
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
 
-        let bounds = cx
-            .debug_bounds("prompt-option-1")
-            .expect("the second option");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+            // The card is on screen with the agent's question and its options.
+            assert!(
+                cx.debug_bounds("prompt-card").is_some(),
+                "the card is on screen"
+            );
+            assert!(cx.debug_bounds("prompt-question").is_some());
+            assert!(cx.debug_bounds("prompt-option-0").is_some());
+            assert!(cx.debug_bounds("prompt-option-1").is_some());
 
-        assert_eq!(
-            seam.calls(),
-            vec![SeamCall::Answer("p1".to_string(), 1)],
-            "the pointer chose the second option"
-        );
-    }
+            // The composer says why it is not taking messages.
+            assert!(cx.debug_bounds("chat-composer").is_some());
+            assert!(
+                cx.debug_bounds("composer-blocked").is_some(),
+                "the composer says the question comes first"
+            );
+
+            // The card took the focus: the agent is waiting for an answer.
+            cx.update(|window, app| {
+                let chat = root.read(app).view.clone();
+                let card = chat
+                    .read(app)
+                    .prompt_card_focus(app)
+                    .expect("the card has a focus handle");
+                assert!(card.is_focused(window), "the card took the focus");
+                assert!(
+                    chat.read(app).composer().read(app).is_blocked(),
+                    "the composer waits for the answer"
+                );
+            });
+
+            // The card has the focus, so typing answers the menu rather than
+            // starting a new message.
+            cx.simulate_keystrokes("2");
+            assert_eq!(
+                seam.calls(),
+                vec![SeamCall::Answer("p1".to_string(), 1)],
+                "the keyboard picked the second option"
+            );
+            assert!(
+                seam.submitted().is_empty(),
+                "the card blocks the conversation"
+            );
+
+            // The answer went out: the card is gone, and the composer takes over.
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.update(|window, app| {
+                let chat = root.read(app).view.clone();
+                assert!(!chat.read(app).has_prompt_card(), "the card is gone");
+                assert!(
+                    !chat.read(app).composer().read(app).is_blocked(),
+                    "the composer is live again"
+                );
+                let composer = chat.read(app).composer_focus(app);
+                assert!(
+                    composer.is_focused(window),
+                    "the composer took the focus back"
+                );
+            });
+
+            // The reader's box is live again: the message goes to the agent.
+            cx.simulate_input("thanks");
+            cx.simulate_keystrokes("enter");
+            assert_eq!(
+                seam.submitted(),
+                vec!["thanks".to_string()],
+                "the composer sends once the card is answered"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn an_answered_card_does_not_come_back(cx: &mut gpui_kit::TestAppContext) {
+            let seam = Arc::new(RecordingPane::new());
+            seam.show_prompt(menu_prompt());
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
+
+            cx.simulate_keystrokes("1");
+            assert_eq!(
+                seam.calls(),
+                vec![SeamCall::Answer("p1".to_string(), 0)],
+                "the keyboard picked the first option"
+            );
+
+            // The agent's screen still shows the menu for a moment: the card must
+            // not come back and block the composer again.
+            seam.show_prompt(menu_prompt());
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert!(
+                    !chat.read(app).has_prompt_card(),
+                    "the answered card stays gone"
+                );
+                assert!(
+                    !chat.read(app).composer().read(app).is_blocked(),
+                    "the composer is not blocked by a menu that was answered"
+                );
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn a_draft_does_not_cross_panes(cx: &mut gpui_kit::TestAppContext) {
+            let seam = Arc::new(RecordingPane::new());
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
+
+            cx.simulate_input("for the first agent");
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert_eq!(
+                    chat.read(app).composer().read(app).model().draft(),
+                    "for the first agent"
+                );
+            });
+
+            // Another pane: its own words, not the first agent's.
+            let other = Arc::new(RecordingPane::new());
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, cx| {
+                    let seam: Arc<dyn PaneSeam> = other;
+                    view.attach(None, seam, "p2".to_string(), cx);
+                });
+            });
+
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert_eq!(
+                    chat.read(app).composer().read(app).model().draft(),
+                    "",
+                    "the draft belonged to the old agent"
+                );
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn a_prompt_card_is_answered_with_the_pointer(cx: &mut gpui_kit::TestAppContext) {
+            let seam = Arc::new(RecordingPane::new());
+            seam.show_prompt(menu_prompt());
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
+
+            let bounds = cx
+                .debug_bounds("prompt-option-1")
+                .expect("the second option");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
+
+            assert_eq!(
+                seam.calls(),
+                vec![SeamCall::Answer("p1".to_string(), 1)],
+                "the pointer chose the second option"
+            );
+        }
+    );
 
     /// A runtime that answers the conversation route and the terminal list.
     ///
@@ -2737,93 +2742,97 @@ let x = 1;
         fn restore(&self) {}
     }
 
-    #[gpui::test]
-    fn a_terminal_the_agent_started_is_a_card_the_reader_can_click(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        let runtime: Arc<dyn Runtime> = Arc::new(FakeRuntime {
-            terminals: json!({
-                "terminals": [
-                    { "id": "00000002", "name": "build", "parent_id": "p1",
-                      "program": "omp", "status": "working" },
-                    { "id": "00000003", "name": "someone else's", "parent_id": "p2",
-                      "program": "omp", "status": "working" },
-                ],
-            }),
-        });
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, cx| {
-                let seam: Arc<dyn PaneSeam> = Arc::new(RecordingPane::new());
-                view.attach(Some(Arc::clone(&runtime)), seam, "p1".to_string(), cx);
+    crate::orion_test!(
+        fn a_terminal_the_agent_started_is_a_card_the_reader_can_click(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        assert!(
-            cx.debug_bounds("chat-terminal-card-00000002").is_some(),
-            "the terminal this agent started is a card"
-        );
-        assert!(
-            cx.debug_bounds("chat-terminal-card-00000003").is_none(),
-            "a terminal another pane started is not this pane's card"
-        );
-
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let collected = events.clone();
-        // The subscription must outlive the test, or the events go nowhere.
-        let subscription = cx.update(|_window, app| {
-            app.subscribe(
-                &root.read(app).view.clone(),
-                move |_entity, event: &ChatEvent, _cx| {
-                    collected.borrow_mut().push(event.clone());
-                },
-            )
-        });
-        let bounds = cx
-            .debug_bounds("chat-terminal-card-00000002")
-            .expect("the card");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-
-        assert!(
-            events.borrow().contains(&ChatEvent::FocusTerminal {
-                id: "00000002".to_string()
-            }),
-            "the click asked for that terminal: {:?}",
-            events.borrow()
-        );
-        drop(subscription);
-    }
-
-    #[gpui::test]
-    fn a_terminal_that_has_not_reported_shows_no_badge(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
-            view: cx.new(ChatView::new),
-        });
-        let runtime: Arc<dyn Runtime> = Arc::new(FakeRuntime {
-            terminals: json!({
-                "terminals": [
-                    { "id": "00000002", "name": "build", "parent_id": "p1",
-                      "program": "omp" },
-                ],
-            }),
-        });
-        cx.update(|_window, app| {
-            let chat = root.read(app).view.clone();
-            chat.update(app, |view, cx| {
-                let seam: Arc<dyn PaneSeam> = Arc::new(RecordingPane::new());
-                view.attach(Some(Arc::clone(&runtime)), seam, "p1".to_string(), cx);
+            let runtime: Arc<dyn Runtime> = Arc::new(FakeRuntime {
+                terminals: json!({
+                    "terminals": [
+                        { "id": "00000002", "name": "build", "parent_id": "p1",
+                          "program": "omp", "status": "working" },
+                        { "id": "00000003", "name": "someone else's", "parent_id": "p2",
+                          "program": "omp", "status": "working" },
+                    ],
+                }),
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, cx| {
+                    let seam: Arc<dyn PaneSeam> = Arc::new(RecordingPane::new());
+                    view.attach(Some(Arc::clone(&runtime)), seam, "p1".to_string(), cx);
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
 
-        let _card = cx
-            .debug_bounds("chat-terminal-card-00000002")
-            .expect("the card is drawn");
-        assert!(
-            cx.debug_bounds("chat-terminal-badge").is_none(),
-            "a terminal that has not reported wears no badge"
-        );
-    }
+            assert!(
+                cx.debug_bounds("chat-terminal-card-00000002").is_some(),
+                "the terminal this agent started is a card"
+            );
+            assert!(
+                cx.debug_bounds("chat-terminal-card-00000003").is_none(),
+                "a terminal another pane started is not this pane's card"
+            );
+
+            let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let collected = events.clone();
+            // The subscription must outlive the test, or the events go nowhere.
+            let subscription = cx.update(|_window, app| {
+                app.subscribe(
+                    &root.read(app).view.clone(),
+                    move |_entity, event: &ChatEvent, _cx| {
+                        collected.borrow_mut().push(event.clone());
+                    },
+                )
+            });
+            let bounds = cx
+                .debug_bounds("chat-terminal-card-00000002")
+                .expect("the card");
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
+
+            assert!(
+                events.borrow().contains(&ChatEvent::FocusTerminal {
+                    id: "00000002".to_string()
+                }),
+                "the click asked for that terminal: {:?}",
+                events.borrow()
+            );
+            drop(subscription);
+        }
+    );
+
+    crate::orion_test!(
+        fn a_terminal_that_has_not_reported_shows_no_badge(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            let runtime: Arc<dyn Runtime> = Arc::new(FakeRuntime {
+                terminals: json!({
+                    "terminals": [
+                        { "id": "00000002", "name": "build", "parent_id": "p1",
+                          "program": "omp" },
+                    ],
+                }),
+            });
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, cx| {
+                    let seam: Arc<dyn PaneSeam> = Arc::new(RecordingPane::new());
+                    view.attach(Some(Arc::clone(&runtime)), seam, "p1".to_string(), cx);
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            let _card = cx
+                .debug_bounds("chat-terminal-card-00000002")
+                .expect("the card is drawn");
+            assert!(
+                cx.debug_bounds("chat-terminal-badge").is_none(),
+                "a terminal that has not reported wears no badge"
+            );
+        }
+    );
 }
