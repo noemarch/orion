@@ -16,8 +16,12 @@ use crate::chat_entities::ChatPrompt;
 use crate::composer::typed_character;
 use crate::pane_seam::{PaneSeam, PROMPT_CHANGED};
 use crate::theme::Theme;
-use gpui::prelude::*;
-use gpui::{div, px, white, Context, FocusHandle, IntoElement, KeyDownEvent, Render, Window};
+use gpui_kit::base::component_traits::Disableable;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::*;
+use gpui_kit::{
+    div, px, white, App, Context, FocusHandle, IntoElement, KeyDownEvent, Render, Window,
+};
 use std::sync::Arc;
 
 /// What the card tells the shell.
@@ -27,7 +31,7 @@ pub enum PromptCardEvent {
     Answered,
 }
 
-impl gpui::EventEmitter<PromptCardEvent> for PromptCard {}
+impl gpui_kit::EventEmitter<PromptCardEvent> for PromptCard {}
 
 pub struct PromptCard {
     seam: Arc<dyn PaneSeam>,
@@ -69,8 +73,8 @@ impl PromptCard {
     }
 
     /// Give the card the focus.
-    pub fn focus(&self, window: &mut Window) {
-        self.focus_handle.focus(window);
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        self.focus_handle.focus(window, cx);
     }
 
     fn answer_option(&mut self, option_index: usize, cx: &mut Context<Self>) {
@@ -223,7 +227,7 @@ impl Render for PromptCard {
                     .id("prompt-title")
                     .debug_selector(|| "prompt-title".to_string())
                     .text_size(px(12.0 * Theme::current().density_scale()))
-                    .font_weight(gpui::FontWeight::BOLD)
+                    .font_weight(gpui_kit::FontWeight::BOLD)
                     .child(format!("{} · {}", prompt.agent, prompt.title)),
             )
             .child(
@@ -261,21 +265,20 @@ impl Render for PromptCard {
                 div()
                     .id(index)
                     .debug_selector(|| format!("prompt-option-{index}"))
-                    .py_2()
-                    .px_3()
-                    .rounded_md()
-                    .bg(if pending {
-                        Theme::current().surface_input
-                    } else {
-                        Theme::current().surface_hover
-                    })
-                    .child(text)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !pending {
-                            this.answer_option(index, cx);
-                            cx.notify();
-                        }
-                    })),
+                    .flex()
+                    .child(
+                        Button::new(format!("prompt-option-{index}"))
+                            .label(text)
+                            .secondary()
+                            .w_full()
+                            .disabled(pending)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !pending {
+                                    this.answer_option(index, cx);
+                                    cx.notify();
+                                }
+                            })),
+                    ),
             );
         }
 
@@ -285,19 +288,21 @@ impl Render for PromptCard {
                 div()
                     .id("prompt-custom-toggle")
                     .debug_selector(|| "prompt-custom-toggle".to_string())
-                    .py_2()
-                    .px_3()
-                    .rounded_md()
-                    .bg(Theme::current().surface_hover)
-                    .child(if custom_open {
-                        "Custom answer (type below)"
-                    } else {
-                        "Type your own answer…"
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.custom_open = !this.custom_open;
-                        cx.notify();
-                    })),
+                    .flex()
+                    .child(
+                        Button::new("prompt-custom-toggle")
+                            .label(if custom_open {
+                                "Custom answer (type below)"
+                            } else {
+                                "Type your own answer…"
+                            })
+                            .secondary()
+                            .w_full()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.custom_open = !this.custom_open;
+                                cx.notify();
+                            })),
+                    ),
             );
         }
 
@@ -319,18 +324,19 @@ impl Render for PromptCard {
                     div()
                         .id("prompt-custom-send")
                         .debug_selector(|| "prompt-custom-send".to_string())
-                        .py_2()
-                        .px_3()
-                        .rounded_md()
-                        .bg(Theme::current().accent)
-                        .child("Answer")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let text = std::mem::take(&mut this.custom_text);
-                            if !text.is_empty() {
-                                this.answer_custom(&text, cx);
-                                cx.notify();
-                            }
-                        })),
+                        .flex()
+                        .child(
+                            Button::new("prompt-custom-send")
+                                .label("Answer")
+                                .primary()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let text = std::mem::take(&mut this.custom_text);
+                                    if !text.is_empty() {
+                                        this.answer_custom(&text, cx);
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
                 );
             card = card.child(input);
         }
@@ -362,7 +368,7 @@ mod tests {
     use super::answer_hint;
     use super::*;
     use crate::pane_seam::test_doubles::{RecordingPane, SeamCall};
-    use gpui::{Entity, TestAppContext};
+    use gpui_kit::{Entity, TestAppContext};
     use serde_json::json;
     use std::sync::Arc;
 
@@ -381,7 +387,7 @@ mod tests {
         cx.update(|app| app.new(|cx| PromptCard::new(seam, prompt(), cx)))
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_error_line_is_plain_language() {
         assert_eq!(
             answer_error_message(PROMPT_CHANGED),
@@ -398,89 +404,95 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn a_number_key_answers_the_option_the_agent_numbered(cx: &mut TestAppContext) {
-        let pane = Arc::new(RecordingPane::new());
-        let card = card(cx, pane.clone());
+    crate::orion_test!(
+        fn a_number_key_answers_the_option_the_agent_numbered(cx: &mut TestAppContext) {
+            let pane = Arc::new(RecordingPane::new());
+            let card = card(cx, pane.clone());
 
-        cx.update(|app| {
-            card.update(app, |card, cx| {
-                card.on_key(
-                    &gpui::KeyDownEvent {
-                        keystroke: gpui::Keystroke {
-                            key: "2".to_string(),
-                            key_char: Some("2".to_string()),
-                            modifiers: gpui::Modifiers::none(),
+            cx.update(|app| {
+                card.update(app, |card, cx| {
+                    card.on_key(
+                        &gpui_kit::KeyDownEvent {
+                            keystroke: gpui_kit::Keystroke {
+                                key: "2".to_string(),
+                                key_char: Some("2".to_string()),
+                                modifiers: gpui_kit::Modifiers::none(),
+                            },
+                            is_held: false,
+                            prefer_character_input: false,
                         },
-                        is_held: false,
-                    },
-                    cx,
-                );
+                        cx,
+                    );
+                });
             });
-        });
 
-        assert_eq!(
-            pane.calls(),
-            vec![SeamCall::Answer("p1".to_string(), 1)],
-            "the second option was chosen"
-        );
-    }
+            assert_eq!(
+                pane.calls(),
+                vec![SeamCall::Answer("p1".to_string(), 1)],
+                "the second option was chosen"
+            );
+        }
+    );
 
-    #[gpui::test]
-    fn a_number_key_outside_the_options_answers_nothing(cx: &mut TestAppContext) {
-        let pane = Arc::new(RecordingPane::new());
-        let card = card(cx, pane.clone());
+    crate::orion_test!(
+        fn a_number_key_outside_the_options_answers_nothing(cx: &mut TestAppContext) {
+            let pane = Arc::new(RecordingPane::new());
+            let card = card(cx, pane.clone());
 
-        cx.update(|app| {
-            card.update(app, |card, cx| {
-                card.on_key(
-                    &gpui::KeyDownEvent {
-                        keystroke: gpui::Keystroke {
-                            key: "9".to_string(),
-                            key_char: Some("9".to_string()),
-                            modifiers: gpui::Modifiers::none(),
+            cx.update(|app| {
+                card.update(app, |card, cx| {
+                    card.on_key(
+                        &gpui_kit::KeyDownEvent {
+                            keystroke: gpui_kit::Keystroke {
+                                key: "9".to_string(),
+                                key_char: Some("9".to_string()),
+                                modifiers: gpui_kit::Modifiers::none(),
+                            },
+                            is_held: false,
+                            prefer_character_input: false,
                         },
-                        is_held: false,
-                    },
-                    cx,
-                );
+                        cx,
+                    );
+                });
             });
-        });
 
-        assert!(
-            pane.calls().is_empty(),
-            "the agent numbered two options; nine is not one of them"
-        );
-    }
+            assert!(
+                pane.calls().is_empty(),
+                "the agent numbered two options; nine is not one of them"
+            );
+        }
+    );
 
-    #[gpui::test]
-    fn the_zero_key_answers_nothing(cx: &mut TestAppContext) {
-        let pane = Arc::new(RecordingPane::new());
-        let card = card(cx, pane.clone());
+    crate::orion_test!(
+        fn the_zero_key_answers_nothing(cx: &mut TestAppContext) {
+            let pane = Arc::new(RecordingPane::new());
+            let card = card(cx, pane.clone());
 
-        cx.update(|app| {
-            card.update(app, |card, cx| {
-                card.on_key(
-                    &gpui::KeyDownEvent {
-                        keystroke: gpui::Keystroke {
-                            key: "0".to_string(),
-                            key_char: Some("0".to_string()),
-                            modifiers: gpui::Modifiers::none(),
+            cx.update(|app| {
+                card.update(app, |card, cx| {
+                    card.on_key(
+                        &gpui_kit::KeyDownEvent {
+                            keystroke: gpui_kit::Keystroke {
+                                key: "0".to_string(),
+                                key_char: Some("0".to_string()),
+                                modifiers: gpui_kit::Modifiers::none(),
+                            },
+                            is_held: false,
+                            prefer_character_input: false,
                         },
-                        is_held: false,
-                    },
-                    cx,
-                );
+                        cx,
+                    );
+                });
             });
-        });
 
-        assert!(
-            pane.calls().is_empty(),
-            "the agent numbered two options; there is no zero"
-        );
-    }
+            assert!(
+                pane.calls().is_empty(),
+                "the agent numbered two options; there is no zero"
+            );
+        }
+    );
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_hint_says_how_to_answer_the_menu() {
         let mut prompt = prompt();
         assert_eq!(answer_hint(&prompt), "Type 1–2 to choose…");
@@ -501,45 +513,47 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn an_answered_card_says_it_is_answered(cx: &mut TestAppContext) {
-        let pane = Arc::new(RecordingPane::new());
-        let card = card(cx, pane.clone());
+    crate::orion_test!(
+        fn an_answered_card_says_it_is_answered(cx: &mut TestAppContext) {
+            let pane = Arc::new(RecordingPane::new());
+            let card = card(cx, pane.clone());
 
-        cx.update(|app| {
-            card.update(app, |card, cx| {
-                card.answer_option(0, cx);
+            cx.update(|app| {
+                card.update(app, |card, cx| {
+                    card.answer_option(0, cx);
+                });
             });
-        });
 
-        cx.update(|app| {
-            assert!(card.read(app).is_answered());
-        });
-    }
-
-    #[gpui::test]
-    fn a_failed_answer_keeps_the_card_and_says_why(cx: &mut TestAppContext) {
-        let pane = Arc::new(RecordingPane::new());
-        pane.fail_with("prompt_changed");
-        let card = card(cx, pane.clone());
-
-        cx.update(|app| {
-            card.update(app, |card, cx| {
-                card.answer_option(0, cx);
+            cx.update(|app| {
+                assert!(card.read(app).is_answered());
             });
-        });
+        }
+    );
 
-        cx.update(|app| {
-            let card = card.read(app);
-            assert!(
-                !card.is_answered(),
-                "the answer did not go out: the card stays"
+    crate::orion_test!(
+        fn a_failed_answer_keeps_the_card_and_says_why(cx: &mut TestAppContext) {
+            let pane = Arc::new(RecordingPane::new());
+            pane.fail_with("prompt_changed");
+            let card = card(cx, pane.clone());
+
+            cx.update(|app| {
+                card.update(app, |card, cx| {
+                    card.answer_option(0, cx);
+                });
+            });
+
+            cx.update(|app| {
+                let card = card.read(app);
+                assert!(
+                    !card.is_answered(),
+                    "the answer did not go out: the card stays"
+                );
+            });
+            assert_eq!(
+                pane.calls(),
+                vec![SeamCall::Answer("p1".to_string(), 0)],
+                "the card did try"
             );
-        });
-        assert_eq!(
-            pane.calls(),
-            vec![SeamCall::Answer("p1".to_string(), 0)],
-            "the card did try"
-        );
-    }
+        }
+    );
 }
