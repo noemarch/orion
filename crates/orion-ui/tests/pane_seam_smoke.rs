@@ -31,7 +31,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
     dir
 }
 
-#[test]
+#[::core::prelude::v1::test]
 fn the_seam_reaches_a_real_agent() {
     let Some(spec) = claude_spec() else {
         eprintln!("skipped: claude is not on PATH");
@@ -89,7 +89,7 @@ fn the_seam_reaches_a_real_agent() {
 /// The agent stands in for the echo here: the point is the wire, not the
 /// agent. What the lens sends has to reach the process on the other end of
 /// the PTY, byte for byte.
-#[test]
+#[::core::prelude::v1::test]
 fn the_seam_writes_the_readers_words_to_the_process() {
     let Some(spec) = echo_spec() else {
         eprintln!("skipped: no echo command on PATH");
