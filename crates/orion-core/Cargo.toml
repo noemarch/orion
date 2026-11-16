@@ -3,6 +3,8 @@ name = "orion-core"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
