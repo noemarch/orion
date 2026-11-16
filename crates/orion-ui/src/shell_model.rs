@@ -155,7 +155,7 @@ pub fn apply_text_key(
 mod tests {
     use super::*;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn narrow_window_uses_rail_with_touch_targets() {
         let layout = ShellLayout::for_width(800.0);
         assert!(layout.rail);
@@ -163,14 +163,14 @@ mod tests {
         assert!(layout.touch_target_px >= 44.0);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn desktop_window_uses_orbit_sidebar_width() {
         let layout = ShellLayout::for_width(1280.0);
         assert!(!layout.rail);
         assert_eq!(layout.sidebar_width_px, 280.0);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn empty_session_renders_inviting_empty_state() {
         let model = HeaderModel::empty();
         assert_eq!(model.title, "Orion");
@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(model.connection, "Connecting…");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn lens_segment_marks_only_the_active_lens() {
         assert_eq!(
             lens_segment_state(crate::app::Lens::Chat),
@@ -194,14 +194,14 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn lens_book_defaults_new_panes_to_chat() {
         let book = LensBook::new();
         assert_eq!(book.lens_for(Some("p1")), crate::app::Lens::Chat);
         assert_eq!(book.lens_for(None), crate::app::Lens::Chat);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn lens_book_remembers_each_pane_separately() {
         let mut book = LensBook::new();
         book.set(Some("p1"), crate::app::Lens::Terminal);
@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(book.lens_for(Some("p3")), crate::app::Lens::Chat);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn lens_book_forgets_closed_panes() {
         let mut book = LensBook::new();
         book.set(Some("p1"), crate::app::Lens::Terminal);
@@ -219,14 +219,14 @@ mod tests {
         assert_eq!(book.lens_for(Some("p1")), crate::app::Lens::Chat);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn lens_book_ignores_a_missing_pane() {
         let mut book = LensBook::new();
         book.set(None, crate::app::Lens::Changes);
         assert_eq!(book.lens_for(None), crate::app::Lens::Chat);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn rename_keys_build_and_commit_a_label() {
         let mut text = String::from("ta");
         assert_eq!(
@@ -254,7 +254,7 @@ mod tests {
         assert_eq!(text, "ta", "ignored keys leave the draft alone");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn rename_ignores_ctrl_alt_and_command_chords() {
         let mut text = String::from("tab");
         for key in ["c", "x", "v", "a"] {
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(text, "tab", "a chord leaves the draft alone");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn clamp_tree_width_keeps_the_reader_usable() {
         // Plenty of room: the default passes through.
         assert_eq!(
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(clamp_tree_width(TREE_WIDTH_DEFAULT, 300.0), TREE_WIDTH_MIN);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn lens_book_drops_panes_that_left_the_session() {
         let mut book = LensBook::new();
         book.set(Some("p1"), crate::app::Lens::Terminal);
