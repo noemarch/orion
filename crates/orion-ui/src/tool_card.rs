@@ -418,7 +418,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn prose_and_reasoning_are_not_tool_cards() {
         let text = part_card(&ChatPart::Text {
             text: "hello".to_string(),
@@ -441,7 +441,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_tool_call_becomes_a_card_with_its_name_and_status() {
         let card = part_card(&ChatPart::Tool(tool("Bash", "{}", "done", false)));
         let PartCard::Tool(card) = card else {
@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(card.status, ToolStatus::Done);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_failed_tool_call_says_so_and_keeps_its_output() {
         let card = part_card(&ChatPart::Tool(tool("Bash", "{}", "boom", true)));
         let PartCard::Tool(card) = card else {
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(card.status.as_word(), "Failed");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_tool_that_edited_a_file_becomes_a_diff() {
         let input = json!({
             "file_path": "C:/work/src/main.rs",
@@ -502,7 +502,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_unified_diff_in_the_output_is_read() {
         let output = concat!(
             "diff --git a/src/main.rs b/src/main.rs\n",
@@ -528,13 +528,13 @@ mod tests {
         assert_eq!(lines[1].text(), "two");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn text_that_is_not_a_diff_has_no_diff_lines() {
         assert!(diff_lines("The file has been updated.").is_empty());
         assert!(diff_lines("").is_empty());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_file_path_in_the_text_is_found() {
         let paths = file_paths("Read C:\\work\\src\\main.rs and src/lib.rs today");
         assert!(
@@ -548,13 +548,13 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_json_argument_names_its_file() {
         let paths = file_paths(&json!({ "file_path": "C:/work/src/main.rs" }).to_string());
         assert_eq!(paths, vec!["C:/work/src/main.rs".to_string()]);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_file_path_knows_where_it_sits() {
         let text = "Read C:/work/src/main.rs now";
         let ranges = file_path_ranges(text);
@@ -567,7 +567,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_paths_come_back_in_the_order_they_appear() {
         let text = "{\"note\":\"a/c.rs\",\"file_path\":\"src/b.rs\"}";
         let ranges = file_path_ranges(text);
@@ -577,7 +577,7 @@ mod tests {
         assert_eq!(starts, sorted, "the ranges are ordered: {ranges:?}");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_json_path_is_the_real_path_not_its_escaped_form() {
         let text = "{\"file_path\":\"C:\\\\Users\\\\me\\\\main.rs\"}";
         let paths = file_paths(text);
@@ -588,13 +588,13 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_url_is_not_a_file_path() {
         let paths = file_paths("see https://example.com/api/workspace/create");
         assert!(paths.is_empty(), "{paths:?}");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_tool_row_reads_as_verb_and_object() {
         assert_eq!(tool_verb("Bash"), Some("Ran"));
         assert_eq!(tool_verb("Edit"), Some("Edited"));
@@ -608,7 +608,7 @@ mod tests {
         assert_eq!(tool_object("Widget", "Widget"), "Widget");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn output_beyond_the_bound_is_cut() {
         let short = "x".repeat(100);
         let (text, clipped) = clipped_output(&short);
