@@ -11,7 +11,7 @@
 //! without changing information architecture. [`Theme::density_scale`]
 //! multiplies spacing tokens; text sizes use [`Theme::text_size`].
 
-use gpui::{rgb, rgba, Hsla, Rgba};
+use gpui_kit::{px, rgb, rgba, App, Hsla, Rgba};
 use std::sync::{LazyLock, Mutex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeMode {
@@ -355,6 +355,104 @@ pub fn hsla(color: Rgba) -> Hsla {
     color.into()
 }
 
+// The last palette pushed into the gpui-kit global theme, as
+// (is dark, density scale). The kit theme is global mutable state; the app
+// re-syncs it only when this changes, so a per-frame call stays cheap.
+static KIT_SYNCED: LazyLock<Mutex<(Option<bool>, f32)>> = LazyLock::new(|| Mutex::new((None, 0.0)));
+
+// Push the current Quiet Slate palette into gpui-kit's global theme.
+//
+// gpui-kit components (Button, Input, Sidebar, ...) paint from
+// `Theme::global(cx)`; this is the seam that makes them read Orion's
+// colors instead of the kit defaults. Call it after [`Theme::set_current`]
+// — the kit `init(cx)` installs the defaults, and every Orion theme
+// change (mode or density) rewrites them from this module's table.
+pub(crate) fn sync_gpui_kit(cx: &mut App) {
+    use gpui_kit::component::theme::{Theme as KitTheme, ThemeMode as KitThemeMode};
+
+    let t = Theme::current();
+    let mode = match t.mode {
+        ThemeMode::Dark => KitThemeMode::Dark,
+        ThemeMode::Light => KitThemeMode::Light,
+    };
+    let is_dark = matches!(mode, KitThemeMode::Dark);
+    let scale = t.density_scale();
+
+    if let Ok(guard) = KIT_SYNCED.lock() {
+        if guard.0 == Some(is_dark) && guard.1 == scale {
+            return;
+        }
+    }
+
+    // `change` loads the kit's registered palette for the mode; the edit
+    // that follows replaces the colors Quiet Slate owns. A second edit is
+    // required only because `change` reloads after a mode switch.
+    KitTheme::change(mode, None, cx);
+    KitTheme::update(cx, |theme| {
+        let c = &mut theme.colors;
+        c.background = t.surface_base.into();
+        c.foreground = t.text.into();
+        c.border = t.border.into();
+        c.input = t.surface_input.into();
+        c.accent = t.accent.into();
+        c.accent_foreground = t.text_strong.into();
+        c.primary = t.primary.into();
+        c.primary_foreground = t.primary_text.into();
+        c.primary_hover = t.primary_hover.into();
+        c.primary_active = t.primary.into();
+        c.secondary = t.surface_elevated.into();
+        c.secondary_foreground = t.text.into();
+        c.secondary_hover = t.surface_hover.into();
+        c.secondary_active = t.surface_hover.into();
+        c.muted = t.surface_panel.into();
+        c.muted_foreground = t.text_dim.into();
+        c.danger = t.danger_tint.into();
+        c.danger_foreground = t.danger_text.into();
+        c.danger_active = t.danger_tint.into();
+        c.danger_hover = t.danger_tint.into();
+        c.success = t.status_done.into();
+        c.success_foreground = t.primary_text.into();
+        c.success_active = t.status_done.into();
+        c.success_hover = t.status_done.into();
+        c.warning = t.status_blocked.into();
+        c.warning_foreground = t.text_strong.into();
+        c.warning_active = t.status_blocked.into();
+        c.warning_hover = t.status_blocked.into();
+        c.info = t.status_working.into();
+        c.info_foreground = t.text_strong.into();
+        c.info_active = t.status_working.into();
+        c.info_hover = t.status_working.into();
+        // Rose is the focus ring and nothing else (DESIGN.md §1).
+        c.ring = t.accent.into();
+        c.caret = t.accent.into();
+        c.popover = t.surface_elevated.into();
+        c.popover_foreground = t.text.into();
+        c.tab = t.surface_panel.into();
+        c.tab_foreground = t.text_dim.into();
+        c.tab_active = t.accent_tint.into();
+        c.tab_active_foreground = t.text_strong.into();
+        c.tab_bar = t.surface_panel.into();
+        c.sidebar = t.surface_base.into();
+        c.sidebar_foreground = t.text.into();
+        c.sidebar_accent = t.surface_hover.into();
+        c.sidebar_accent_foreground = t.text_strong.into();
+        c.sidebar_border = t.border.into();
+        c.sidebar_primary = t.primary.into();
+        c.sidebar_primary_foreground = t.primary_text.into();
+        c.list = t.surface_panel.into();
+        c.list_hover = t.surface_hover.into();
+        c.list_active = t.accent_tint.into();
+        c.list_active_border = t.accent.into();
+        theme.font_size = px(t.text_size());
+        theme.mono_font_size = px(t.chat_code_size());
+    });
+
+    if let Ok(mut guard) = KIT_SYNCED.lock() {
+        guard.0 = Some(is_dark);
+        guard.1 = scale;
+    }
+}
+
 /// The standard xterm 256-colour palette, as red, green, blue triples.
 ///
 /// Index 0-15 are the sixteen ANSI colours, 16-231 are the 6x6x6 colour cube and
@@ -435,7 +533,7 @@ pub fn rgb_color(r: u8, g: u8, b: u8) -> Rgba {
 mod tests {
     use super::*;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn dark_defaults_match_design_table() {
         let theme = Theme::dark();
         assert_eq!(theme.surface_base, rgb(0x221d27));
@@ -445,7 +543,7 @@ mod tests {
         assert_eq!(theme.density_scale(), 1.0);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn light_matches_design_table() {
         let theme = Theme::light();
         assert_eq!(theme.surface_base, rgb(0xfaf5fa));
@@ -453,15 +551,15 @@ mod tests {
         assert_eq!(theme.border, rgb(0xe4d8e0));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn orbit_token_table_matches_design_doc() {
         let theme = Theme::dark();
-        assert_eq!(theme.primary_hover, gpui::rgb(0xa3185a));
-        assert_eq!(theme.primary_text, gpui::rgb(0xf2eef5));
-        assert_eq!(theme.syntax_keyword, gpui::rgb(0xff8fa8));
+        assert_eq!(theme.primary_hover, gpui_kit::rgb(0xa3185a));
+        assert_eq!(theme.primary_text, gpui_kit::rgb(0xf2eef5));
+        assert_eq!(theme.syntax_keyword, gpui_kit::rgb(0xff8fa8));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_chat_reading_scale_follows_the_design_table() {
         let comfortable = Theme::dark();
         assert_eq!(comfortable.chat_prose_size(), 15.0, "--fs-chat");
@@ -486,7 +584,7 @@ mod tests {
         assert_eq!(compact.chat_heading_size(3), 14.0);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn compact_scales_without_changing_architecture() {
         let theme = Theme::for_mode(ThemeMode::Dark, Density::Compact);
         assert!(theme.density_scale() < 1.0);
@@ -496,7 +594,7 @@ mod tests {
         assert_eq!(theme.accent, Theme::dark().accent);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn current_falls_back_to_dark_and_can_be_set() {
         let theme = Theme::current();
         assert_eq!(theme.mode, ThemeMode::Dark);
@@ -505,7 +603,7 @@ mod tests {
         Theme::set_current(Theme::dark());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_palette_starts_with_the_ansi_colours() {
         assert_eq!(xterm_256(0), rgb(0x000000), "index 0 is black");
         assert_eq!(xterm_256(1), rgb(0xcd0000), "index 1 is maroon");
@@ -514,7 +612,7 @@ mod tests {
         assert_eq!(xterm_256(15), rgb(0xffffff), "index 15 is bright white");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_cube_starts_at_sixteen() {
         assert_eq!(xterm_256(16), rgb(0x000000), "cube origin is off-black");
         // index 21 is n=5: r=0, g=0, b=5 -> level 5 -> 55 + 40*5 = 255.
@@ -525,14 +623,14 @@ mod tests {
 
     /// xterm's ramp is `8 + 10 * (i - 232)`, so the lightest step is 238, not
     /// pure white -- index 15 is the white ANSI colour.
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_greyscale_ramp_ends_at_white() {
         assert_eq!(xterm_256(232), rgb(0x080808));
         assert_eq!(xterm_256(243), rgb(0x767676));
         assert_eq!(xterm_256(255), rgb(0xeeeeee), "ramp ends at 238");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_truecolor_value_is_the_colour_it_names() {
         assert_eq!(rgb_color(10, 20, 30), rgb(0x0a141e));
         assert_eq!(rgb_color(0, 0, 0), rgb(0x000000));
