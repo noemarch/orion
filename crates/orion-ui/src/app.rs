@@ -1,9 +1,12 @@
 //! Main application view with engine integration.
 
-use gpui::prelude::*;
-use gpui::{
-    div, px, App, Application, Context, Entity, Render, Size, Subscription, Window, WindowBounds,
-    WindowOptions,
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::toolbar::Toolbar;
+use gpui_kit::component::Sizable;
+use gpui_kit::*;
+use gpui_kit::{
+    div, px, App, Context, Entity, Render, Size, Subscription, Window, WindowBounds, WindowOptions,
 };
 use orion_core::runtime::{PaneHandle, Runtime, RuntimeClient, RuntimeStream};
 use orion_core::{Engine, FrameSink, Role};
@@ -18,9 +21,7 @@ use crate::files_view::FileTree;
 use crate::new_workspace::{recent_directory, NewWorkspaceEvent, NewWorkspaceModal};
 use crate::pane_seam::seam_of;
 use crate::settings::{KeyBarExtras, SettingsModal};
-use crate::shell_model::{
-    lens_segment_state, HeaderModel, LensBook, ShellLayout, FILES_SURFACE_WIDTH_WIDE,
-};
+use crate::shell_model::{HeaderModel, LensBook, ShellLayout, FILES_SURFACE_WIDTH_WIDE};
 use crate::sidebar::SidebarEvent;
 use crate::terminal::TerminalPane;
 use crate::theme::Theme;
@@ -72,7 +73,7 @@ pub struct OrionApp {
     split_changes_view: Entity<ChangesView>,
     subscriptions: Vec<Subscription>,
     /// Keyboard focus for the shell chrome (tab rename).
-    focus_handle: gpui::FocusHandle,
+    focus_handle: gpui_kit::FocusHandle,
     /// The last lifecycle command that failed, shown as one plain sentence.
     notice: Option<String>,
 }
@@ -231,7 +232,7 @@ pub fn spawn_pty_pump(
                 cx.background_executor().timer(FRAME_BUDGET - since).await;
             }
             let generation = Arc::clone(&generation);
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 if generation.load(Ordering::SeqCst) != mine {
                     return;
                 }
@@ -259,7 +260,7 @@ pub fn spawn_pty_pump(
             last_notify = Instant::now();
         }
         // Final notify to flush any pending repaint.
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             terminal_pane.update(cx, |_view, cx| {
                 cx.notify();
             });
@@ -360,7 +361,7 @@ fn spawn_status_poller(
                 .is_ok()
             });
             // The view is gone (or the app is shutting down): stop polling.
-            if !applied.unwrap_or(false) {
+            if !applied {
                 break;
             }
         }
@@ -652,7 +653,7 @@ impl OrionApp {
         detach_split_terminal(pane.as_ref(), &self.split_attach_generation);
     }
 
-    fn set_lens(&mut self, lens: Lens, cx: &mut impl gpui::AppContext) {
+    fn set_lens(&mut self, lens: Lens, cx: &mut impl gpui_kit::AppContext) {
         self.lens_book.set(self.focused_pane.as_deref(), lens);
         match lens {
             // The chat is the lens the reader is looking at: their next word
@@ -752,7 +753,7 @@ impl OrionApp {
 
     /// Typing while a tab label is being edited renames it through
     /// `POST /api/tab/rename`; Escape cancels.
-    fn handle_editing_key(&mut self, ev: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+    fn handle_editing_key(&mut self, ev: &gpui_kit::KeyDownEvent, cx: &mut Context<Self>) {
         let Some((tab_id, text)) = self.editing_tab.clone() else {
             return;
         };
@@ -852,29 +853,27 @@ impl OrionApp {
                 HeaderModel::empty()
             }
         });
-        div()
-            .id("app-header")
-            .flex()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
+        // The kit's toolbar: the title and workspace are plain content, and
+        // the flexible spacer pushes the connection and the settings control
+        // to the trailing edge.
+        Toolbar::new("app-header")
             .h(px(48.0))
             .px_3()
+            .gap(px(12.0))
             .bg(theme.surface_panel)
-            .child(
+            .content(
                 div()
                     .text_size(px(14.0))
                     .text_color(theme.text_strong)
                     .child(header.title),
             )
-            .child(
+            .content(
                 div()
                     .text_size(px(12.0))
                     .text_color(theme.text_dim)
                     .child(header.workspace),
             )
-            .child(
+            .content(
                 div().flex_1().flex().flex_row().justify_end().child(
                     div()
                         .text_size(px(12.0))
@@ -882,15 +881,13 @@ impl OrionApp {
                         .child(header.connection),
                 ),
             )
-            .child(
-                div()
-                    .id("header-settings")
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(theme.surface_elevated)
-                    .text_color(theme.text)
-                    .child("Settings")
+            // content, not child: the toolbar's child() turns a button into a
+            // quiet ghost command, and this one keeps its labeled action look.
+            .content(
+                Button::new("header-settings")
+                    .label("Settings")
+                    .secondary()
+                    .small()
                     .on_click(cx.listener(|this, _, _, cx| {
                         let settings = this.settings.clone();
                         settings.update(cx, |view, cx| {
@@ -904,8 +901,13 @@ impl OrionApp {
 
     fn render_lens_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
-        let (chat_active, terminal_active, changes_active) =
-            lens_segment_state(self.current_lens());
+        // The three lenses are one segmented switch: the kit's tab bar owns
+        // the selected pill, and the index is the lens the book holds.
+        let lens_index = match self.current_lens() {
+            Lens::Chat => 0,
+            Lens::Terminal => 1,
+            Lens::Changes => 2,
+        };
         let focused_pane_id = self.workspace_sidebar.update(cx, |view, _cx| {
             view.snapshot().and_then(|s| {
                 s.get("focused_pane_id")
@@ -928,68 +930,42 @@ impl OrionApp {
             .w_full()
             .bg(theme.surface_panel)
             .child(
-                div()
-                    .id("lens-chat")
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(if chat_active {
-                        theme.accent
-                    } else {
-                        theme.surface_elevated
-                    })
-                    .text_color(theme.text_strong)
-                    .child("Chat")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_lens(Lens::Chat, cx);
-                        cx.notify();
-                    })),
+                TabBar::new("lens-switch")
+                    .segmented()
+                    .selected_index(lens_index)
+                    .child(
+                        Tab::new()
+                            .debug_selector(|| "lens-chat".into())
+                            .label("Chat")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_lens(Lens::Chat, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Tab::new()
+                            .debug_selector(|| "lens-terminal".into())
+                            .label("Terminal")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_lens(Lens::Terminal, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Tab::new()
+                            .debug_selector(|| "lens-changes".into())
+                            .label("Changes")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_lens(Lens::Changes, cx);
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(
-                div()
-                    .id("lens-terminal")
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(if terminal_active {
-                        theme.accent
-                    } else {
-                        theme.surface_elevated
-                    })
-                    .text_color(theme.text_strong)
-                    .child("Terminal")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_lens(Lens::Terminal, cx);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .id("lens-changes")
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(if changes_active {
-                        theme.accent
-                    } else {
-                        theme.surface_elevated
-                    })
-                    .text_color(theme.text_strong)
-                    .child("Changes")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_lens(Lens::Changes, cx);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .id("pane-zoom")
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(theme.surface_elevated)
-                    .text_color(theme.text)
-                    .child("Zoom")
+                Button::new("pane-zoom")
+                    .label("Zoom")
+                    .secondary()
+                    .small()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(pane_id) = focused_pane_id_zoom.clone() {
                             this.call_route(
@@ -1001,14 +977,10 @@ impl OrionApp {
                     })),
             )
             .child(
-                div()
-                    .id("pane-close")
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(theme.surface_elevated)
-                    .text_color(theme.text)
-                    .child("Close")
+                Button::new("pane-close")
+                    .label("Close")
+                    .secondary()
+                    .small()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(pane_id) = focused_pane_id.clone() {
                             this.call_route("/api/pane/close", &json!({ "pane_id": pane_id }));
@@ -1019,14 +991,10 @@ impl OrionApp {
                     })),
             )
             .child(
-                div()
-                    .id("settings-button")
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(theme.surface_elevated)
-                    .text_color(theme.text)
-                    .child("Settings")
+                Button::new("settings-button")
+                    .label("Settings")
+                    .secondary()
+                    .small()
                     .on_click(cx.listener(|this, _, _, cx| {
                         let settings = this.settings.clone();
                         settings.update(cx, |view, cx| {
@@ -1058,17 +1026,21 @@ impl OrionApp {
         let ws_agent_for_new = ws_agent.clone();
         let next_tab_number = tabs.iter().map(|tab| tab.number).max().unwrap_or(0) + 1;
         let new_tab_label = format!("Tab {next_tab_number}");
-        div()
-            .id("tab-strip")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
+        // The kit's tab bar owns the strip: each tab carries its own rename,
+        // split and close buttons as its suffix, and the bar's suffix is the
+        // new-tab button. A tab with no focused pane selects nothing, so the
+        // index is the sentinel the bar reads as "no selection".
+        let selected_index = tabs
+            .iter()
+            .position(|tab| tab.focused)
+            .unwrap_or(usize::MAX);
+        TabBar::new("tab-strip")
+            .small()
+            .bg(theme.surface_panel)
             .px_3()
             .py_1()
-            .bg(theme.surface_panel)
+            .selected_index(selected_index)
             .children(tabs.iter().map(|tab| {
-                let is_active = tab.focused;
                 let pane_id = tab
                     .active_pane
                     .clone()
@@ -1081,7 +1053,7 @@ impl OrionApp {
                     .editing_tab
                     .as_ref()
                     .is_some_and(|(id, _)| id == &tab_id);
-                let edit_text = if editing {
+                let label = if editing {
                     let draft = self
                         .editing_tab
                         .as_ref()
@@ -1092,100 +1064,82 @@ impl OrionApp {
                 } else {
                     tab.label.clone()
                 };
-                let row = div()
-                    .id(self.next_row_id())
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(if is_active {
-                        theme.accent_tint
-                    } else {
-                        Theme::transparent()
-                    })
-                    .text_color(if is_active {
-                        theme.text_strong
-                    } else {
-                        theme.text_dim
-                    })
-                    .text_size(px(12.0 * scale))
-                    .child(edit_text)
-                    .child(
-                        div()
-                            .id(self.next_row_id())
-                            .px_1()
-                            .text_size(px(12.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child("✎")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.editing_tab =
-                                    Some((tab_id_for_edit.clone(), tab_label_for_edit.clone()));
-                                this.focus_handle.focus(window);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id(self.next_row_id())
-                            .px_1()
-                            .text_size(px(12.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child("◫")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                if let Some(pane_id) = pane_id_for_split.clone() {
-                                    this.call_route(
-                                        "/api/pane/split",
-                                        &json!({
-                                            "pane_id": pane_id,
-                                            "direction": "right",
-                                        }),
-                                    );
+                let kit_tab = Tab::new().label(label).text_size(px(12.0 * scale)).suffix(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Button::new(format!("tab-edit-{tab_id}"))
+                                .label("✎")
+                                .text()
+                                .xsmall()
+                                .px_1()
+                                .text_size(px(12.0 * scale))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.editing_tab =
+                                        Some((tab_id_for_edit.clone(), tab_label_for_edit.clone()));
+                                    this.focus_handle.focus(window, cx);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("tab-split-{tab_id}"))
+                                .label("◫")
+                                .text()
+                                .xsmall()
+                                .px_1()
+                                .text_size(px(12.0 * scale))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if let Some(pane_id) = pane_id_for_split.clone() {
+                                        this.call_route(
+                                            "/api/pane/split",
+                                            &json!({
+                                                "pane_id": pane_id,
+                                                "direction": "right",
+                                            }),
+                                        );
+                                        this.workspace_sidebar
+                                            .update(cx, |view, _cx| view.refresh());
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("tab-close-{tab_id}"))
+                                .label("×")
+                                .text()
+                                .xsmall()
+                                .px_1()
+                                .text_size(px(12.0 * scale))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.call_route("/api/tab/close", &json!({ "tab_id": tab_id }));
                                     this.workspace_sidebar
                                         .update(cx, |view, _cx| view.refresh());
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id(self.next_row_id())
-                            .px_1()
-                            .text_size(px(12.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child("×")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.call_route("/api/tab/close", &json!({ "tab_id": tab_id }));
-                                this.workspace_sidebar
-                                    .update(cx, |view, _cx| view.refresh());
-                                cx.notify();
-                            })),
-                    );
+                                    cx.notify();
+                                })),
+                        ),
+                );
                 if let Some(pane_id) = pane_id {
-                    row.on_click(cx.listener(move |this, _, _, cx| {
+                    kit_tab.on_click(cx.listener(move |this, _, _, cx| {
                         let sidebar = this.workspace_sidebar.clone();
                         sidebar.update(cx, |view, _cx| view.focus_pane(&pane_id));
                         cx.notify();
                     }))
                 } else {
-                    row
+                    kit_tab
                 }
             }))
-            .child(
-                div()
-                    .id(self.next_row_id())
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(theme.surface_elevated)
-                    .text_color(theme.text)
+            .suffix(
+                Button::new("tab-new")
+                    .label("+")
+                    .secondary()
+                    .small()
                     .text_size(px(12.0 * scale))
-                    .child("+")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.call_route(
                             "/api/tab/create",
@@ -1200,16 +1154,6 @@ impl OrionApp {
                         cx.notify();
                     })),
             )
-    }
-
-    fn next_row_id(&self) -> usize {
-        // GPUI element ids must be unique per render; the strip is small and
-        // static per frame, so a fixed base plus tab order is enough. The
-        // sidebar uses its own counter; ids only need to be unique within
-        // their parent element tree.
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static SEQ: AtomicUsize = AtomicUsize::new(0);
-        SEQ.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -1289,6 +1233,7 @@ impl Render for OrionApp {
             .update(cx, |view, cx| view.set_visible(cx, chat_active));
         let prefs = self.settings.update(cx, |view, _cx| view.prefs().clone());
         Theme::set_current(Theme::for_mode(prefs.theme, prefs.density));
+        crate::theme::sync_gpui_kit(cx);
         let extras = KeyBarExtras::from_preferences(&prefs);
         self.terminal_pane
             .update(cx, |view, _cx| view.set_key_bar_extras(extras));
@@ -1370,14 +1315,9 @@ impl Render for OrionApp {
                         .child("Open a workspace to begin."),
                 )
                 .child(
-                    div()
-                        .id("empty-new-workspace")
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .bg(Theme::current().primary)
-                        .text_color(Theme::current().primary_text)
-                        .child("New Workspace")
+                    Button::new("empty-new-workspace")
+                        .label("New Workspace")
+                        .primary()
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.open_new_workspace(cx);
                             cx.notify();
@@ -1536,9 +1476,9 @@ impl Render for OrionApp {
             .flex_row()
             .size_full()
             .track_focus(&self.focus_handle)
-            .on_key_down(
-                cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| this.handle_editing_key(ev, cx)),
-            )
+            .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
+                this.handle_editing_key(ev, cx)
+            }))
             .child(
                 div()
                     .id("sidebar")
@@ -1600,17 +1540,23 @@ impl Render for OrionApp {
 }
 
 pub fn run() {
-    let app = Application::new();
-    app.run(|cx| {
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::centered(Size::new(px(1280.0), px(800.0)), cx)),
-                ..Default::default()
-            },
-            |_window, cx| cx.new(OrionApp::new),
-        )
-        .unwrap();
-    });
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::centered(
+                        Size::new(px(1280.0), px(800.0)),
+                        cx,
+                    )),
+                    ..Default::default()
+                },
+                cx,
+                |_window, cx| cx.new(OrionApp::new),
+            )
+            .expect("Failed to open window");
+        });
     // The startup timeline, when the reader asked for one.
     orion_core::trace::print_report();
 }
@@ -1625,96 +1571,100 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
 
-    #[gpui::test]
-    fn the_pump_feeds_chunks_and_notifies_only_on_revision_change(cx: &mut gpui::TestAppContext) {
-        let view = cx.update(|app| app.new(TerminalPane::new));
-        let (tx, rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
-        let generation = Arc::new(AtomicU64::new(0));
-        let notifies = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&notifies);
-        let _subscription = cx.update(|app| {
-            app.observe(&view, move |_view, _app| {
-                counter.fetch_add(1, Ordering::SeqCst);
-            })
-        });
-        cx.update(|app| {
-            spawn_pty_pump(view.clone(), rx, Arc::clone(&generation), app);
-        });
-        for i in 0..100 {
-            tx.send(format!("chunk {i}\r\n"))
-                .expect("the pump is listening");
-        }
-        drop(tx);
-        cx.run_until_parked();
-
-        let revision = cx.read(|app| view.read(app).revision());
-        assert!(
-            revision >= 100,
-            "every chunk advanced the revision: {revision}"
-        );
-        let notifies = notifies.load(Ordering::SeqCst);
-        assert!(notifies >= 1, "the pump notified at least once");
-        assert!(
-            notifies <= 100,
-            "the pump notified at most once per chunk: {notifies}"
-        );
-    }
-
-    #[gpui::test]
-    fn a_flood_of_output_asks_for_one_frame_per_frame(cx: &mut gpui::TestAppContext) {
-        // The pump waits out the frame budget, so it has a task outstanding:
-        // parking is allowed rather than a panic.
-        cx.background_executor.allow_parking();
-        let view = cx.update(|app| app.new(TerminalPane::new));
-        let (tx, rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
-        let generation = Arc::new(AtomicU64::new(0));
-        let notifies = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&notifies);
-        let _subscription = cx.update(|app| {
-            app.observe(&view, move |_view, _app| {
-                counter.fetch_add(1, Ordering::SeqCst);
-            })
-        });
-        cx.update(|app| {
-            spawn_pty_pump(view.clone(), rx, Arc::clone(&generation), app);
-        });
-
-        // A flood: chunks arrive over time, so the pump sees them one after
-        // another rather than as one batch.
-        let started = Instant::now();
-        for i in 0..40 {
-            tx.send(format!("chunk {i}\r\n"))
-                .expect("the pump is listening");
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        drop(tx);
-        // The pump's last tick lands within a frame of the channel closing.
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        while Instant::now() < deadline {
-            cx.run_until_parked();
-            let revision = cx.read(|app| view.read(app).revision());
-            if revision >= 40 {
-                break;
+    crate::orion_test!(
+        fn the_pump_feeds_chunks_and_notifies_only_on_revision_change(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let view = cx.update(|app| app.new(TerminalPane::new));
+            let (tx, rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
+            let generation = Arc::new(AtomicU64::new(0));
+            let notifies = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&notifies);
+            let _subscription = cx.update(|app| {
+                app.observe(&view, move |_view, _app| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                })
+            });
+            cx.update(|app| {
+                spawn_pty_pump(view.clone(), rx, Arc::clone(&generation), app);
+            });
+            for i in 0..100 {
+                tx.send(format!("chunk {i}\r\n"))
+                    .expect("the pump is listening");
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            drop(tx);
+            cx.run_until_parked();
+
+            let revision = cx.read(|app| view.read(app).revision());
+            assert!(
+                revision >= 100,
+                "every chunk advanced the revision: {revision}"
+            );
+            let notifies = notifies.load(Ordering::SeqCst);
+            assert!(notifies >= 1, "the pump notified at least once");
+            assert!(
+                notifies <= 100,
+                "the pump notified at most once per chunk: {notifies}"
+            );
         }
-        let elapsed = started.elapsed();
-        let notifies = notifies.load(Ordering::SeqCst);
+    );
 
-        assert!(
-            cx.read(|app| view.read(app).revision()) >= 40,
-            "every chunk reached the grid"
-        );
-        // One repaint per frame: the renderer is never asked for more frames
-        // than the frame rate allows.
-        let budget = (elapsed.as_millis() as usize / FRAME_BUDGET.as_millis() as usize) + 2;
-        assert!(
-            notifies <= budget,
-            "the pump asked for {notifies} frames in {elapsed:?}, the budget is {budget}"
-        );
-    }
+    crate::orion_test!(
+        fn a_flood_of_output_asks_for_one_frame_per_frame(cx: &mut gpui_kit::TestAppContext) {
+            // The pump waits out the frame budget, so it has a task outstanding:
+            // parking is allowed rather than a panic.
+            cx.background_executor.allow_parking();
+            let view = cx.update(|app| app.new(TerminalPane::new));
+            let (tx, rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
+            let generation = Arc::new(AtomicU64::new(0));
+            let notifies = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&notifies);
+            let _subscription = cx.update(|app| {
+                app.observe(&view, move |_view, _app| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                })
+            });
+            cx.update(|app| {
+                spawn_pty_pump(view.clone(), rx, Arc::clone(&generation), app);
+            });
 
-    #[test]
+            // A flood: chunks arrive over time, so the pump sees them one after
+            // another rather than as one batch.
+            let started = Instant::now();
+            for i in 0..40 {
+                tx.send(format!("chunk {i}\r\n"))
+                    .expect("the pump is listening");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            drop(tx);
+            // The pump's last tick lands within a frame of the channel closing.
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while Instant::now() < deadline {
+                cx.run_until_parked();
+                let revision = cx.read(|app| view.read(app).revision());
+                if revision >= 40 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let elapsed = started.elapsed();
+            let notifies = notifies.load(Ordering::SeqCst);
+
+            assert!(
+                cx.read(|app| view.read(app).revision()) >= 40,
+                "every chunk reached the grid"
+            );
+            // One repaint per frame: the renderer is never asked for more frames
+            // than the frame rate allows.
+            let budget = (elapsed.as_millis() as usize / FRAME_BUDGET.as_millis() as usize) + 2;
+            assert!(
+                notifies <= budget,
+                "the pump asked for {notifies} frames in {elapsed:?}, the budget is {budget}"
+            );
+        }
+    );
+
+    #[::core::prelude::v1::test]
     fn the_pty_channel_blocks_the_producer_at_capacity() {
         let (tx, _rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
         for i in 0..PTY_CHANNEL_CAPACITY {
@@ -1735,33 +1685,34 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn a_stale_pump_stops_feeding_when_the_generation_bumps(cx: &mut gpui::TestAppContext) {
-        let view = cx.update(|app| app.new(TerminalPane::new));
-        let (tx, rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
-        let generation = Arc::new(AtomicU64::new(0));
-        cx.update(|app| {
-            spawn_pty_pump(view.clone(), rx, Arc::clone(&generation), app);
-        });
-        tx.send("first\r\n".to_string())
-            .expect("the pump is listening");
-        cx.run_until_parked();
-        let after_first = cx.read(|app| view.read(app).revision());
-        assert!(after_first >= 1, "the first chunk was fed: {after_first}");
+    crate::orion_test!(
+        fn a_stale_pump_stops_feeding_when_the_generation_bumps(cx: &mut gpui_kit::TestAppContext) {
+            let view = cx.update(|app| app.new(TerminalPane::new));
+            let (tx, rx) = flume::bounded::<String>(PTY_CHANNEL_CAPACITY);
+            let generation = Arc::new(AtomicU64::new(0));
+            cx.update(|app| {
+                spawn_pty_pump(view.clone(), rx, Arc::clone(&generation), app);
+            });
+            tx.send("first\r\n".to_string())
+                .expect("the pump is listening");
+            cx.run_until_parked();
+            let after_first = cx.read(|app| view.read(app).revision());
+            assert!(after_first >= 1, "the first chunk was fed: {after_first}");
 
-        // A newer attach owns the view now; the stale pump must stop feeding.
-        generation.fetch_add(1, Ordering::SeqCst);
-        tx.send("stale\r\n".to_string())
-            .expect("the pump is listening");
-        drop(tx);
-        cx.run_until_parked();
+            // A newer attach owns the view now; the stale pump must stop feeding.
+            generation.fetch_add(1, Ordering::SeqCst);
+            tx.send("stale\r\n".to_string())
+                .expect("the pump is listening");
+            drop(tx);
+            cx.run_until_parked();
 
-        let after_stale = cx.read(|app| view.read(app).revision());
-        assert_eq!(
-            after_first, after_stale,
-            "a stale pump must not feed the grid"
-        );
-    }
+            let after_stale = cx.read(|app| view.read(app).revision());
+            assert_eq!(
+                after_first, after_stale,
+                "a stale pump must not feed the grid"
+            );
+        }
+    );
 
     /// What the split asked of the pane when it attached.
     #[derive(Clone)]
@@ -1866,96 +1817,98 @@ mod tests {
         }
     }
 
-    /// The split watches the pane: it takes the output, never the size.
-    #[gpui::test]
-    fn the_split_watches_the_pane_without_taking_its_size(cx: &mut gpui::TestAppContext) {
-        let attaches = Arc::new(Mutex::new(Vec::new()));
-        let detaches = Arc::new(Mutex::new(Vec::new()));
-        let pane = Arc::new(SplitPane {
-            cwd: std::path::PathBuf::from("."),
-            attaches: Arc::clone(&attaches),
-            detaches,
-            sink: Arc::new(Mutex::new(None)),
-        });
-        let handle: Arc<dyn PaneHandle> = pane.clone();
-        let view = cx.update(|app| app.new(TerminalPane::new));
-        let generation = Arc::new(AtomicU64::new(0));
-        cx.update(|app| {
-            assert!(
-                attach_split_terminal(&view, handle, &generation, app),
-                "the split attaches"
+    // The split watches the pane: it takes the output, never the size.
+    crate::orion_test!(
+        fn the_split_watches_the_pane_without_taking_its_size(cx: &mut gpui_kit::TestAppContext) {
+            let attaches = Arc::new(Mutex::new(Vec::new()));
+            let detaches = Arc::new(Mutex::new(Vec::new()));
+            let pane = Arc::new(SplitPane {
+                cwd: std::path::PathBuf::from("."),
+                attaches: Arc::clone(&attaches),
+                detaches,
+                sink: Arc::new(Mutex::new(None)),
+            });
+            let handle: Arc<dyn PaneHandle> = pane.clone();
+            let view = cx.update(|app| app.new(TerminalPane::new));
+            let generation = Arc::new(AtomicU64::new(0));
+            cx.update(|app| {
+                assert!(
+                    attach_split_terminal(&view, handle, &generation, app),
+                    "the split attaches"
+                );
+            });
+
+            let attaches = attaches.lock().expect("the log's lock").clone();
+            assert_eq!(attaches.len(), 1, "the split attaches once");
+            let attach = &attaches[0];
+            assert_eq!(
+                attach.connection, SPLIT_CONNECTION,
+                "the split attaches under its own connection id"
             );
-        });
-
-        let attaches = attaches.lock().expect("the log's lock").clone();
-        assert_eq!(attaches.len(), 1, "the split attaches once");
-        let attach = &attaches[0];
-        assert_eq!(
-            attach.connection, SPLIT_CONNECTION,
-            "the split attaches under its own connection id"
-        );
-        assert_ne!(
-            attach.connection, "gpu-terminal",
-            "the split never takes the main pane's attachment"
-        );
-        assert_eq!(
-            attach.role,
-            Role::Interact,
-            "the split sends the role the main pane sends: the main pane keeps the keyboard"
-        );
-        assert!(
-            attach.keep_size,
-            "the split asks to keep the pane's size: the attach does not resize it"
-        );
-
-        // The split's view shows the pane's output.
-        cx.run_until_parked();
-        let text = cx.read(|app| view.read(app).visible_text());
-        assert!(
-            text.contains("split-live-output"),
-            "the split shows the pane's output: {text:?}"
-        );
-    }
-
-    /// The split lets go of the pane: its attachment goes and its pump stops.
-    #[gpui::test]
-    fn detaching_the_split_stops_its_pump(cx: &mut gpui::TestAppContext) {
-        let attaches = Arc::new(Mutex::new(Vec::new()));
-        let detaches = Arc::new(Mutex::new(Vec::new()));
-        let pane = Arc::new(SplitPane {
-            cwd: std::path::PathBuf::from("."),
-            attaches: Arc::clone(&attaches),
-            detaches: Arc::clone(&detaches),
-            sink: Arc::new(Mutex::new(None)),
-        });
-        let handle: Arc<dyn PaneHandle> = pane.clone();
-        let view = cx.update(|app| app.new(TerminalPane::new));
-        let generation = Arc::new(AtomicU64::new(0));
-        cx.update(|app| {
-            assert!(
-                attach_split_terminal(&view, handle, &generation, app),
-                "the split attaches"
+            assert_ne!(
+                attach.connection, "gpu-terminal",
+                "the split never takes the main pane's attachment"
             );
-        });
-        cx.run_until_parked();
-        let fed = cx.read(|app| view.read(app).revision());
-        assert!(fed > 0, "the split's pump fed the view: {fed}");
+            assert_eq!(
+                attach.role,
+                Role::Interact,
+                "the split sends the role the main pane sends: the main pane keeps the keyboard"
+            );
+            assert!(
+                attach.keep_size,
+                "the split asks to keep the pane's size: the attach does not resize it"
+            );
 
-        // The split goes: the pane keeps no split attachment...
-        let handle: Arc<dyn PaneHandle> = pane.clone();
-        detach_split_terminal(Some(&handle), &generation);
-        assert_eq!(
-            detaches.lock().expect("the log's lock").clone(),
-            vec![SPLIT_CONNECTION.to_string()],
-            "the split lets go of the pane under its own connection id"
-        );
+            // The split's view shows the pane's output.
+            cx.run_until_parked();
+            let text = cx.read(|app| view.read(app).visible_text());
+            assert!(
+                text.contains("split-live-output"),
+                "the split shows the pane's output: {text:?}"
+            );
+        }
+    );
 
-        // ...and its pump stops feeding the grid it was reading.
-        pane.emit("late output\r\n");
-        cx.run_until_parked();
-        let after = cx.read(|app| view.read(app).revision());
-        assert_eq!(fed, after, "a detached split's pump must not feed the grid");
-    }
+    // The split lets go of the pane: its attachment goes and its pump stops.
+    crate::orion_test!(
+        fn detaching_the_split_stops_its_pump(cx: &mut gpui_kit::TestAppContext) {
+            let attaches = Arc::new(Mutex::new(Vec::new()));
+            let detaches = Arc::new(Mutex::new(Vec::new()));
+            let pane = Arc::new(SplitPane {
+                cwd: std::path::PathBuf::from("."),
+                attaches: Arc::clone(&attaches),
+                detaches: Arc::clone(&detaches),
+                sink: Arc::new(Mutex::new(None)),
+            });
+            let handle: Arc<dyn PaneHandle> = pane.clone();
+            let view = cx.update(|app| app.new(TerminalPane::new));
+            let generation = Arc::new(AtomicU64::new(0));
+            cx.update(|app| {
+                assert!(
+                    attach_split_terminal(&view, handle, &generation, app),
+                    "the split attaches"
+                );
+            });
+            cx.run_until_parked();
+            let fed = cx.read(|app| view.read(app).revision());
+            assert!(fed > 0, "the split's pump fed the view: {fed}");
+
+            // The split goes: the pane keeps no split attachment...
+            let handle: Arc<dyn PaneHandle> = pane.clone();
+            detach_split_terminal(Some(&handle), &generation);
+            assert_eq!(
+                detaches.lock().expect("the log's lock").clone(),
+                vec![SPLIT_CONNECTION.to_string()],
+                "the split lets go of the pane under its own connection id"
+            );
+
+            // ...and its pump stops feeding the grid it was reading.
+            pane.emit("late output\r\n");
+            cx.run_until_parked();
+            let after = cx.read(|app| view.read(app).revision());
+            assert_eq!(fed, after, "a detached split's pump must not feed the grid");
+        }
+    );
 
     /// A real pane in this process: the split's rule is about a real PTY's
     /// size, so the test uses one.
@@ -1986,45 +1939,46 @@ mod tests {
         Some(Arc::new(pane))
     }
 
-    /// The agent's PTY keeps the size it had when the split opens.
-    #[gpui::test]
-    fn the_split_attach_leaves_the_pane_the_size_it_had(cx: &mut gpui::TestAppContext) {
-        let Some(pane) = real_pane() else {
-            eprintln!("skipped: no command to hold a terminal open on this machine");
-            return;
-        };
-        // The main pane owns the size: it tells the agent how big it is.
-        pane.attach(
-            "gpu-terminal",
-            Arc::new(|_| {}),
-            Role::Interact,
-            80,
-            24,
-            false,
-        )
-        .expect("the main pane attaches");
-        let before = pane.size();
-        assert_eq!(
-            before,
-            (24, 80),
-            "the main pane sized the agent: {before:?}"
-        );
-
-        let view = cx.update(|app| app.new(TerminalPane::new));
-        let generation = Arc::new(AtomicU64::new(0));
-        let handle: Arc<dyn PaneHandle> = pane.clone();
-        cx.update(|app| {
-            assert!(
-                attach_split_terminal(&view, handle, &generation, app),
-                "the split attaches"
+    // The agent's PTY keeps the size it had when the split opens.
+    crate::orion_test!(
+        fn the_split_attach_leaves_the_pane_the_size_it_had(cx: &mut gpui_kit::TestAppContext) {
+            let Some(pane) = real_pane() else {
+                eprintln!("skipped: no command to hold a terminal open on this machine");
+                return;
+            };
+            // The main pane owns the size: it tells the agent how big it is.
+            pane.attach(
+                "gpu-terminal",
+                Arc::new(|_| {}),
+                Role::Interact,
+                80,
+                24,
+                false,
+            )
+            .expect("the main pane attaches");
+            let before = pane.size();
+            assert_eq!(
+                before,
+                (24, 80),
+                "the main pane sized the agent: {before:?}"
             );
-        });
-        assert_eq!(
-            pane.size(),
-            before,
-            "the split did not resize the agent's PTY"
-        );
-    }
+
+            let view = cx.update(|app| app.new(TerminalPane::new));
+            let generation = Arc::new(AtomicU64::new(0));
+            let handle: Arc<dyn PaneHandle> = pane.clone();
+            cx.update(|app| {
+                assert!(
+                    attach_split_terminal(&view, handle, &generation, app),
+                    "the split attaches"
+                );
+            });
+            assert_eq!(
+                pane.size(),
+                before,
+                "the split did not resize the agent's PTY"
+            );
+        }
+    );
 
     /// A connection that records what the shell sends and answers what the
     /// runtime would answer.
@@ -2073,48 +2027,49 @@ mod tests {
         }
     }
 
-    /// The split leaves the runtime's connection interactive.
-    ///
-    /// The role belongs to the connection, not to the pane: a split that sent
-    /// `observe` would turn the main pane read-only on the daemon path.
-    #[gpui::test]
-    fn the_split_keeps_the_runtime_connection_interactive(cx: &mut gpui::TestAppContext) {
-        let (outbox, inbox) = std::sync::mpsc::channel::<Value>();
-        let sent = Arc::new(Mutex::new(Vec::new()));
-        let connection = RecordingConnection {
-            sent: Arc::clone(&sent),
-            inbox: Arc::new(Mutex::new(inbox)),
-            outbox,
-        };
-        let client = RuntimeClient::new(Box::new(connection)).expect("the runtime answers");
-        let pane = client.pane_by_id("pane-2").expect("the pane is open");
+    // The split leaves the runtime's connection interactive.
+    //
+    // The role belongs to the connection, not to the pane: a split that sent
+    // `observe` would turn the main pane read-only on the daemon path.
+    crate::orion_test!(
+        fn the_split_keeps_the_runtime_connection_interactive(cx: &mut gpui_kit::TestAppContext) {
+            let (outbox, inbox) = std::sync::mpsc::channel::<Value>();
+            let sent = Arc::new(Mutex::new(Vec::new()));
+            let connection = RecordingConnection {
+                sent: Arc::clone(&sent),
+                inbox: Arc::new(Mutex::new(inbox)),
+                outbox,
+            };
+            let client = RuntimeClient::new(Box::new(connection)).expect("the runtime answers");
+            let pane = client.pane_by_id("pane-2").expect("the pane is open");
 
-        let view = cx.update(|app| app.new(TerminalPane::new));
-        let generation = Arc::new(AtomicU64::new(0));
-        cx.update(|app| {
-            assert!(
-                attach_split_terminal(&view, pane, &generation, app),
-                "the split attaches"
+            let view = cx.update(|app| app.new(TerminalPane::new));
+            let generation = Arc::new(AtomicU64::new(0));
+            cx.update(|app| {
+                assert!(
+                    attach_split_terminal(&view, pane, &generation, app),
+                    "the split attaches"
+                );
+            });
+
+            let sent = sent.lock().expect("the log's lock").clone();
+            let role = sent
+                .iter()
+                .find(|frame| frame["type"] == "role")
+                .expect("the split sends a role");
+            assert_eq!(
+                role["mode"], "interact",
+                "the split sends the role the main pane sends: the main pane keeps the keyboard"
             );
-        });
-
-        let sent = sent.lock().expect("the log's lock").clone();
-        let role = sent
-            .iter()
-            .find(|frame| frame["type"] == "role")
-            .expect("the split sends a role");
-        assert_eq!(
-            role["mode"], "interact",
-            "the split sends the role the main pane sends: the main pane keeps the keyboard"
-        );
-        let attach = sent
-            .iter()
-            .find(|frame| frame["type"] == "attach")
-            .expect("the split attaches");
-        assert_eq!(attach["pane_id"], "pane-2");
-        assert_eq!(
-            attach["keep_size"], true,
-            "the split keeps the pane's size: the attach does not resize it"
-        );
-    }
+            let attach = sent
+                .iter()
+                .find(|frame| frame["type"] == "attach")
+                .expect("the split attaches");
+            assert_eq!(attach["pane_id"], "pane-2");
+            assert_eq!(
+                attach["keep_size"], true,
+                "the split keeps the pane's size: the attach does not resize it"
+            );
+        }
+    );
 }
