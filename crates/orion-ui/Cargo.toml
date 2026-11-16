@@ -3,11 +3,13 @@ name = "orion-ui"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
 flume = "0.11"
-gpui = { version = "0.2", default-features = false, features = ["windows-manifest"] }
+gpui-kit = { version = "0.9.1", features = ["gpui-fast", "test-support"] }
 orion-core = { path = "../orion-core" }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -21,7 +23,5 @@ similar = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
-[dev-dependencies]
-gpui = { version = "0.2", default-features = false, features = ["test-support"] }
 
 
