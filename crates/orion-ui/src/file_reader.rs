@@ -22,8 +22,10 @@
 use crate::files_entities::{url_encode, FileInfo, FileKind};
 use crate::terminal_font::terminal_font_families;
 use crate::theme::Theme;
-use gpui::prelude::*;
-use gpui::{div, px, white, Context, Render, ScrollHandle, TextAlign, TextSystem, Window};
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::*;
+use gpui_kit::{div, px, white, Context, Render, ScrollHandle, TextAlign, TextSystem, Window};
 use orion_core::runtime::Runtime;
 use serde_json::Value;
 use std::sync::Arc;
@@ -49,7 +51,7 @@ pub struct FileReader {
     last_body: Option<String>,
     /// The resolved monospace family for the body, cached after the first
     /// render so the font lookup runs once.
-    font_family: Option<gpui::SharedString>,
+    font_family: Option<gpui_kit::SharedString>,
     /// Whether the family lookup already ran (a miss is cached too).
     font_family_resolved: bool,
 }
@@ -58,7 +60,7 @@ pub struct FileReader {
 /// really measures monospace, the way `terminal.rs` picks its grid font: gpui
 /// resolves a family that is not installed to the system UI font, which is
 /// proportional, so a face is only used when `i` and `W` advance the same.
-fn resolve_mono_family(text_system: &TextSystem) -> Option<gpui::SharedString> {
+fn resolve_mono_family(text_system: &TextSystem) -> Option<gpui_kit::SharedString> {
     let installed = text_system.all_font_names();
     let font_size = px(12.0);
     for family in terminal_font_families("") {
@@ -68,7 +70,7 @@ fn resolve_mono_family(text_system: &TextSystem) -> Option<gpui::SharedString> {
         {
             continue;
         }
-        let id = text_system.resolve_font(&gpui::font(family.clone()));
+        let id = text_system.resolve_font(&gpui_kit::font(family.clone()));
         let Ok(narrow) = text_system.advance(id, font_size, 'i') else {
             continue;
         };
@@ -326,8 +328,10 @@ impl Render for FileReader {
 
         // A failed fetch speaks plain language and offers a Retry (the chat
         // lens's voice); the raw status or error body never reaches the reader.
+        // The kit alert paints the failure and the kit button is the Retry;
+        // the selector sits on the button itself so a click at its centre
+        // lands on the control that owns the handler.
         if let Some(message) = self.error.clone() {
-            let theme = Theme::current();
             root = root.child(
                 div()
                     .id("file-reader-error")
@@ -339,27 +343,13 @@ impl Render for FileReader {
                     .gap(px(12.0))
                     .px_3()
                     .py_2()
-                    .bg(theme.danger_tint)
+                    .child(Alert::error("file-reader-error-message", message))
                     .child(
-                        div()
-                            .text_size(px(12.0 * theme.density_scale()))
-                            .text_color(theme.danger_text)
-                            .child(message),
-                    )
-                    .child(
-                        div()
-                            .id("file-reader-retry")
+                        Button::new("file-reader-retry")
                             .debug_selector(|| "file-reader-retry".to_string())
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .min_h(px(44.0))
-                            .px_3()
-                            .rounded_md()
-                            .bg(theme.primary)
-                            .text_color(theme.primary_text)
-                            .text_size(px(12.0 * theme.density_scale()))
-                            .child("Retry")
+                            .label("Retry")
+                            .primary()
+                            .h(px(44.0))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.retry();
                                 cx.notify();
@@ -406,6 +396,10 @@ impl Render for FileReader {
                 // One row per line: a right-aligned gutter with the 1-based
                 // number, then the line's text. An empty line keeps its
                 // number and its row (a single space holds the row open).
+                // The kit editor is not used here: it owns an EditorState and
+                // draws no line-number gutter, so it cannot keep the gutter,
+                // the read-only preview or the per-line selectors. A working
+                // reader outranks a cosmetic swap, so the text view stays.
                 let theme = Theme::current();
                 let mut body = div()
                     .id("file-reader-lines")
@@ -484,7 +478,8 @@ impl Render for FileReader {
 mod tests {
     use super::*;
     use crate::files_entities::FileKind;
-    use gpui::{point, size, Entity};
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{point, size, Entity};
 
     fn text_info() -> FileInfo {
         FileInfo {
@@ -497,43 +492,44 @@ mod tests {
         }
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn line_number_labels_are_right_aligned_to_four_columns() {
         assert_eq!(line_number_label(1), "   1");
         assert_eq!(line_number_label(12), "  12");
     }
 
-    #[gpui::test]
-    fn the_reader_shows_line_numbers_for_its_text(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(FileReader::new));
-        cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, cx| {
-            view.update(cx, |v, _cx| {
-                v.apply_file(
-                    "/tmp/a.txt".to_string(),
-                    text_info(),
-                    "one\n\ntwo".to_string(),
-                );
+    crate::orion_test!(
+        fn the_reader_shows_line_numbers_for_its_text(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(FileReader::new));
+            cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, cx| {
+                view.update(cx, |v, _cx| {
+                    v.apply_file(
+                        "/tmp/a.txt".to_string(),
+                        text_info(),
+                        "one\n\ntwo".to_string(),
+                    );
+                });
+                view.clone().into_any_element()
             });
-            view.clone()
-        });
-        assert!(
-            cx.debug_bounds("file-reader").is_some(),
-            "the reader surface is on screen"
-        );
-        assert!(
-            cx.debug_bounds("file-reader-lines").is_some(),
-            "the body is on screen"
-        );
-        assert!(
-            cx.debug_bounds("file-reader-line").is_some(),
-            "the line rows are on screen"
-        );
-        // The gutter labels come from the pure helper the rows render: the
-        // text "one\n\ntwo" has three lines, numbered 1 through 3.
-        assert_eq!(line_number_label(1), "   1");
-        assert_eq!(line_number_label(3), "   3");
-    }
+            assert!(
+                cx.debug_bounds("file-reader").is_some(),
+                "the reader surface is on screen"
+            );
+            assert!(
+                cx.debug_bounds("file-reader-lines").is_some(),
+                "the body is on screen"
+            );
+            assert!(
+                cx.debug_bounds("file-reader-line").is_some(),
+                "the line rows are on screen"
+            );
+            // The gutter labels come from the pure helper the rows render: the
+            // text "one\n\ntwo" has three lines, numbered 1 through 3.
+            assert_eq!(line_number_label(1), "   1");
+            assert_eq!(line_number_label(3), "   3");
+        }
+    );
 
     struct FileReaderRoot {
         view: Entity<FileReader>,
@@ -545,52 +541,56 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn a_file_that_cannot_be_read_shows_an_error_with_a_retry(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| FileReaderRoot {
-            view: cx.new(FileReader::new),
-        });
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |v, _cx| {
-                v.apply_file("/tmp/a.txt".to_string(), text_info(), "one".to_string());
-                v.fail_file("boom".to_string());
+    crate::orion_test!(
+        fn a_file_that_cannot_be_read_shows_an_error_with_a_retry(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (root, cx) = cx.add_window_view(|_, cx| FileReaderRoot {
+                view: cx.new(FileReader::new),
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(
-            cx.debug_bounds("file-reader-error").is_some(),
-            "the failure is on screen"
-        );
-        let retry = cx
-            .debug_bounds("file-reader-retry")
-            .expect("a Retry is offered");
-        cx.simulate_click(retry.center(), gpui::Modifiers::none());
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            assert_eq!(
-                view.read(app).error(),
-                None,
-                "the Retry cleared the failure"
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |v, _cx| {
+                    v.apply_file("/tmp/a.txt".to_string(), text_info(), "one".to_string());
+                    v.fail_file("boom".to_string());
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.debug_bounds("file-reader-error").is_some(),
+                "the failure is on screen"
             );
-        });
-    }
+            let retry = cx
+                .debug_bounds("file-reader-retry")
+                .expect("a Retry is offered");
+            cx.simulate_click(retry.center(), gpui_kit::Modifiers::none());
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                assert_eq!(
+                    view.read(app).error(),
+                    None,
+                    "the Retry cleared the failure"
+                );
+            });
+        }
+    );
 
-    #[gpui::test]
-    fn an_open_file_is_kept_across_a_visibility_change(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(FileReader::new));
-        cx.update(|_window, app| {
-            view.update(app, |v, _cx| {
-                v.apply_file("/tmp/a.txt".to_string(), text_info(), "one".to_string());
-                v.set_visible(false);
-                v.set_visible(true);
+    crate::orion_test!(
+        fn an_open_file_is_kept_across_a_visibility_change(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(FileReader::new));
+            cx.update(|_window, app| {
+                view.update(app, |v, _cx| {
+                    v.apply_file("/tmp/a.txt".to_string(), text_info(), "one".to_string());
+                    v.set_visible(false);
+                    v.set_visible(true);
+                });
+                assert_eq!(
+                    view.read(app).path(),
+                    Some("/tmp/a.txt"),
+                    "the open file survives the lens toggling"
+                );
             });
-            assert_eq!(
-                view.read(app).path(),
-                Some("/tmp/a.txt"),
-                "the open file survives the lens toggling"
-            );
-        });
-    }
+        }
+    );
 }
