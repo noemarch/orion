@@ -300,7 +300,7 @@ mod tests {
         .expect("the wire shape parses")
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_chat_that_has_not_fetched_yet_is_loading() {
         let model = ChatModel::new();
         assert_eq!(model.phase(), &ChatPhase::Loading);
@@ -308,7 +308,7 @@ mod tests {
         assert!(!model.is_empty());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_transcript_with_turns_is_ready() {
         let mut model = ChatModel::new();
         model.apply(response(vec![turn(
@@ -322,7 +322,7 @@ mod tests {
         assert!(!model.is_empty());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_transcript_without_turns_is_empty() {
         let mut model = ChatModel::new();
         model.apply(response(Vec::new()));
@@ -331,7 +331,7 @@ mod tests {
         assert!(!model.is_loading());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_failed_fetch_says_so_in_plain_language() {
         let mut model = ChatModel::new();
         model.fail("Couldn't load the conversation. Try again.".to_string());
@@ -343,7 +343,7 @@ mod tests {
         assert!(!model.is_empty(), "a failure is not an empty transcript");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_failed_read_keeps_the_last_turns() {
         let mut model = ChatModel::new();
         model.apply(response(vec![turn(
@@ -359,7 +359,7 @@ mod tests {
         assert!(model.phase().is_failed());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_retry_goes_back_to_loading_and_recovers() {
         let mut model = ChatModel::new();
         model.fail("Couldn't load the conversation. Try again.".to_string());
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(model.failure(), None);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn thinking_rows_open_and_close_on_their_own() {
         let mut model = ChatModel::new();
         assert!(!model.is_thinking_open(0, 0));
@@ -389,7 +389,7 @@ mod tests {
         assert!(!model.is_thinking_open(0, 0));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_tool_row_starts_open_and_folds_away() {
         let mut model = ChatModel::new();
         assert!(
@@ -406,7 +406,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn an_open_thinking_row_stays_open_when_the_transcript_grows() {
         let mut model = ChatModel::new();
         model.apply(response(vec![turn(
@@ -424,7 +424,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn scrolling_up_pins_the_view_and_scrolling_back_resumes_following() {
         let mut model = ChatModel::new();
         assert!(model.follows_bottom());
@@ -440,7 +440,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_scroll_position_repins_at_the_bottom() {
         let mut model = ChatModel::new();
         model.on_scroll(120.0, false);
@@ -458,7 +458,7 @@ mod tests {
         assert!(model.follows_bottom());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_scroll_away_from_the_bottom_pins_the_view() {
         let mut model = ChatModel::new();
         // A scrollbar drag or a keyboard scroll: the position says the reader
@@ -470,7 +470,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_transcript_that_fits_does_not_pin_the_view() {
         let mut model = ChatModel::new();
         model.on_scroll(120.0, false);
@@ -478,7 +478,7 @@ mod tests {
         assert!(model.follows_bottom());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_new_pane_starts_with_nothing_open() {
         let mut model = ChatModel::new();
         model.apply(response(vec![turn(
@@ -495,7 +495,7 @@ mod tests {
         assert!(model.follows_bottom());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn timestamps_read_as_a_short_local_time() {
         assert_eq!(
             format_timestamp(Some("2026-01-01T00:01:00Z")),
@@ -508,7 +508,7 @@ mod tests {
         assert!(format_timestamp(Some("2026-01-01T00:01:00Z")).contains("Jan"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_missing_or_unreadable_stamp_says_nothing_or_shows_itself() {
         assert_eq!(format_timestamp(None), "");
         assert_eq!(format_timestamp(Some("   ")), "");
@@ -519,7 +519,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_role_is_read_from_the_wire() {
         let parsed = response(vec![turn("user", json!([]))]);
         assert_eq!(parsed.turns[0].role, ChatRole::User);
