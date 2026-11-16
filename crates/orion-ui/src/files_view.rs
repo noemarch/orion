@@ -27,8 +27,10 @@ use crate::file_reader::FileReader;
 use crate::files_entities::{join_path, url_encode, DirectoryListing};
 use crate::shell_model::{clamp_tree_width, SPLITTER_WIDTH_PX, TREE_WIDTH_DEFAULT};
 use crate::theme::Theme;
-use gpui::prelude::*;
-use gpui::{
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::*;
+use gpui_kit::{
     div, px, white, Context, Div, Entity, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Render, ScrollHandle, Stateful, Window,
 };
@@ -392,6 +394,9 @@ impl FileTree {
 
         // A failed fetch speaks plain language and offers a Retry (the chat
         // lens's voice); the raw status or error body never reaches the reader.
+        // The kit alert paints the failure and the kit button is the Retry;
+        // the selector sits on the button itself so a click at its centre
+        // lands on the control that owns the handler.
         if let Some(message) = self.error.clone() {
             tree = tree.child(
                 div()
@@ -404,27 +409,13 @@ impl FileTree {
                     .gap(px(12.0))
                     .px_3()
                     .py_2()
-                    .bg(theme.danger_tint)
+                    .child(Alert::error("file-tree-error-message", message))
                     .child(
-                        div()
-                            .text_size(px(12.0 * theme.density_scale()))
-                            .text_color(theme.danger_text)
-                            .child(message),
-                    )
-                    .child(
-                        div()
-                            .id("file-tree-retry")
+                        Button::new("file-tree-retry")
                             .debug_selector(|| "file-tree-retry".to_string())
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .min_h(px(44.0))
-                            .px_3()
-                            .rounded_md()
-                            .bg(theme.primary)
-                            .text_color(theme.primary_text)
-                            .text_size(px(12.0 * theme.density_scale()))
-                            .child("Retry")
+                            .label("Retry")
+                            .primary()
+                            .h(px(44.0))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.retry();
                                 cx.notify();
@@ -452,6 +443,14 @@ impl FileTree {
     /// One expanded folder's rows: its folders (chevron + name, the row
     /// toggles it, recursing into the open ones) and its files (name + size,
     /// the row opens it), indented by depth.
+    ///
+    /// The rows stay hand-laid-out but each clickable one is a kit text
+    /// Button. The kit `Tree` owns its own `TreeState` for expansion and
+    /// selection, while this tree's expansion (`expanded`) and selection
+    /// (`selected_file`) live in the view and drive the listing fetches and
+    /// the reader; adopting `Tree` would fork that state and risk the
+    /// navigation and selection behaviour. The chevron, depth indent and
+    /// byte-size suffix are carried in the button label instead.
     fn render_folder_rows(
         &mut self,
         path: &str,
@@ -471,20 +470,13 @@ impl FileTree {
             let chevron = if is_expanded { "▾" } else { "▸" };
             let child_clone = child.clone();
             rows = rows.child(
-                div()
-                    .id(self.next_row_id())
+                Button::new(self.next_row_id())
                     .debug_selector(|| "file-tree-folder".to_string())
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
+                    .label(format!("{chevron} {name}"))
+                    .text()
                     .pl(indent)
                     .px_2()
                     .py_1()
-                    .rounded_md()
-                    .text_size(px(12.0 * theme.density_scale()))
-                    .text_color(theme.primary)
-                    .child(format!("{chevron} {name}"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_folder(child_clone.clone());
                         cx.notify();
@@ -498,20 +490,17 @@ impl FileTree {
             let child = join_path(&listing.path, &file.name);
             let selected = self.selected_file.as_deref() == Some(child.as_str());
             let child_clone = child.clone();
-            let mut row = div()
-                .id(self.next_row_id())
+            let mut row = Button::new(self.next_row_id())
                 .debug_selector(|| "file-tree-row".to_string())
-                .flex()
-                .flex_row()
+                .label(format!("{}  ({} bytes)", file.name, file.size))
+                .text()
                 .pl(indent)
                 .px_2()
-                .py_1()
-                .rounded_md()
-                .text_size(px(12.0 * theme.density_scale()))
-                .text_color(theme.text)
-                .child(format!("{}  ({} bytes)", file.name, file.size));
+                .py_1();
             // The selected file's row is lit so the reader and the tree agree
-            // on which file is open; the rest stay plain.
+            // on which file is open; the rest stay plain. A text button's
+            // selected style is transparent, so the highlight is an explicit
+            // surface rather than the kit's selected variant.
             if selected {
                 row = row.bg(theme.surface_elevated);
             }
@@ -648,7 +637,8 @@ impl Render for FileTree {
 mod tests {
     use super::*;
     use crate::shell_model::{FILES_SURFACE_WIDTH_WIDE, READER_WIDTH_MIN};
-    use gpui::{point, size};
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{point, size};
     use serde_json::json;
 
     /// A wire-shaped listing for one directory, parsed the way the route
@@ -669,83 +659,86 @@ mod tests {
         .expect("parse")
     }
 
-    /// The old fixed-column test, rewritten for the split: `files-left` is
-    /// the tree's own column now, so its width is the tree's width (the
-    /// reader's drag, or the default), not the shell's — and the reader
-    /// beside it keeps a body.
-    #[gpui::test]
-    fn the_reader_keeps_a_body_beside_the_tree(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(FileTree::new));
+    // The old fixed-column test, rewritten for the split: `files-left` is
+    // the tree's own column now, so its width is the tree's width (the
+    // reader's drag, or the default), not the shell's — and the reader
+    // beside it keeps a body.
+    crate::orion_test!(
+        fn the_reader_keeps_a_body_beside_the_tree(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(FileTree::new));
 
-        // The app gives the surface its own column; the tree takes its
-        // default width and the reader keeps the rest.
-        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
-            view.update(cx, |v, _cx| v.set_available_width(FILES_SURFACE_WIDTH_WIDE));
-            div()
-                .w(px(FILES_SURFACE_WIDTH_WIDE))
-                .h_full()
-                .child(view.clone())
-        });
+            // The app gives the surface its own column; the tree takes its
+            // default width and the reader keeps the rest.
+            cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
+                view.update(cx, |v, _cx| v.set_available_width(FILES_SURFACE_WIDTH_WIDE));
+                div()
+                    .w(px(FILES_SURFACE_WIDTH_WIDE))
+                    .h_full()
+                    .child(view.clone().into_any_element())
+            });
 
-        let tree = cx.debug_bounds("files-left").expect("the tree column");
-        assert_eq!(
-            tree.size.width,
-            px(TREE_WIDTH_DEFAULT),
-            "the tree takes its own width, not the shell's"
-        );
-        let reader = cx.debug_bounds("files-right").expect("the reader column");
-        assert!(
-            reader.size.width >= px(READER_WIDTH_MIN),
-            "the reader keeps a body to show a file in (got {})",
-            reader.size.width
-        );
-    }
+            let tree = cx.debug_bounds("files-left").expect("the tree column");
+            assert_eq!(
+                tree.size.width,
+                px(TREE_WIDTH_DEFAULT),
+                "the tree takes its own width, not the shell's"
+            );
+            let reader = cx.debug_bounds("files-right").expect("the reader column");
+            assert!(
+                reader.size.width >= px(READER_WIDTH_MIN),
+                "the reader keeps a body to show a file in (got {})",
+                reader.size.width
+            );
+        }
+    );
 
-    #[gpui::test]
-    fn the_files_surface_shows_the_tree_and_reader(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(FileTree::new));
-        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
-            view.update(cx, |v, _cx| v.set_available_width(FILES_SURFACE_WIDTH_WIDE));
-            div()
-                .w(px(FILES_SURFACE_WIDTH_WIDE))
-                .h_full()
-                .child(view.clone())
-        });
-        assert!(
-            cx.debug_bounds("file-tree").is_some(),
-            "the tree is on screen"
-        );
-        assert!(
-            cx.debug_bounds("files-right").is_some(),
-            "the reader is on screen"
-        );
-    }
-
-    #[gpui::test]
-    fn the_file_tree_expands_and_collapses_a_folder(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(FileTree::new));
-        cx.update(|_window, app| {
-            view.update(app, |v, _cx| {
-                v.apply_listing(
-                    "/proj".to_string(),
-                    listing_json("/proj", &["src", "docs"], json!([])),
-                );
-                v.toggle_folder("/proj/src".to_string());
+    crate::orion_test!(
+        fn the_files_surface_shows_the_tree_and_reader(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(FileTree::new));
+            cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
+                view.update(cx, |v, _cx| v.set_available_width(FILES_SURFACE_WIDTH_WIDE));
+                div()
+                    .w(px(FILES_SURFACE_WIDTH_WIDE))
+                    .h_full()
+                    .child(view.clone().into_any_element())
             });
             assert!(
-                view.read(app).expanded().any(|p| p == "/proj/src"),
-                "the folder is expanded"
+                cx.debug_bounds("file-tree").is_some(),
+                "the tree is on screen"
             );
-            view.update(app, |v, _cx| v.toggle_folder("/proj/src".to_string()));
             assert!(
-                !view.read(app).expanded().any(|p| p == "/proj/src"),
-                "the folder is collapsed again"
+                cx.debug_bounds("files-right").is_some(),
+                "the reader is on screen"
             );
-        });
-    }
+        }
+    );
+
+    crate::orion_test!(
+        fn the_file_tree_expands_and_collapses_a_folder(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(FileTree::new));
+            cx.update(|_window, app| {
+                view.update(app, |v, _cx| {
+                    v.apply_listing(
+                        "/proj".to_string(),
+                        listing_json("/proj", &["src", "docs"], json!([])),
+                    );
+                    v.toggle_folder("/proj/src".to_string());
+                });
+                assert!(
+                    view.read(app).expanded().any(|p| p == "/proj/src"),
+                    "the folder is expanded"
+                );
+                view.update(app, |v, _cx| v.toggle_folder("/proj/src".to_string()));
+                assert!(
+                    !view.read(app).expanded().any(|p| p == "/proj/src"),
+                    "the folder is collapsed again"
+                );
+            });
+        }
+    );
 
     /// A real root view for interaction tests: a click's down-up pair must
     /// survive the refresh the down triggers, and only a root-view render
@@ -760,217 +753,235 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn a_file_in_the_tree_opens_in_the_reader(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| FilesRoot {
-            view: cx.new(FileTree::new),
-        });
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |v, _cx| {
-                v.apply_listing(
-                    "/proj".to_string(),
-                    listing_json("/proj", &[], json!([{"name": "main.rs", "size": 123}])),
+    crate::orion_test!(
+        fn a_file_in_the_tree_opens_in_the_reader(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| FilesRoot {
+                view: cx.new(FileTree::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |v, _cx| {
+                    v.apply_listing(
+                        "/proj".to_string(),
+                        listing_json("/proj", &[], json!([{"name": "main.rs", "size": 123}])),
+                    );
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            // The listing holds one file, so the only tree row is that file's.
+            let row = cx.debug_bounds("file-tree-row").expect("the file row");
+            cx.simulate_click(row.center(), gpui_kit::Modifiers::none());
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                assert_eq!(
+                    view.read(app).selected_file(),
+                    Some("/proj/main.rs"),
+                    "the tree agrees on the open file"
+                );
+                assert_eq!(
+                    view.read(app).file_reader().read(app).path(),
+                    Some("/proj/main.rs"),
+                    "the clicked file opened in the reader"
                 );
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
+        }
+    );
 
-        // The listing holds one file, so the only tree row is that file's.
-        let row = cx.debug_bounds("file-tree-row").expect("the file row");
-        cx.simulate_click(row.center(), gpui::Modifiers::none());
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            assert_eq!(
-                view.read(app).selected_file(),
-                Some("/proj/main.rs"),
-                "the tree agrees on the open file"
-            );
-            assert_eq!(
-                view.read(app).file_reader().read(app).path(),
-                Some("/proj/main.rs"),
-                "the clicked file opened in the reader"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn a_chat_path_link_reveals_the_file_in_the_tree(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(FileTree::new));
-        cx.update(|_window, app| {
-            view.update(app, |v, cx| {
-                v.apply_listing("/proj".to_string(), listing_json("/proj", &[], json!([])));
-                v.reveal(cx, "src/main.rs".to_string());
+    crate::orion_test!(
+        fn a_chat_path_link_reveals_the_file_in_the_tree(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(FileTree::new));
+            cx.update(|_window, app| {
+                view.update(app, |v, cx| {
+                    v.apply_listing("/proj".to_string(), listing_json("/proj", &[], json!([])));
+                    v.reveal(cx, "src/main.rs".to_string());
+                });
+                let v = view.read(app);
+                assert_eq!(
+                    v.selected_file(),
+                    Some("/proj/src/main.rs"),
+                    "the relative chat path resolved against the root"
+                );
+                assert!(
+                    v.expanded().any(|p| p == "/proj/src"),
+                    "the file's folder is expanded so the file is visible"
+                );
+                assert_eq!(
+                    v.file_reader().read(app).path(),
+                    Some("/proj/src/main.rs"),
+                    "the reader holds the resolved path"
+                );
             });
-            let v = view.read(app);
-            assert_eq!(
-                v.selected_file(),
-                Some("/proj/src/main.rs"),
-                "the relative chat path resolved against the root"
-            );
-            assert!(
-                v.expanded().any(|p| p == "/proj/src"),
-                "the file's folder is expanded so the file is visible"
-            );
-            assert_eq!(
-                v.file_reader().read(app).path(),
-                Some("/proj/src/main.rs"),
-                "the reader holds the resolved path"
-            );
-        });
-    }
+        }
+    );
 
-    #[gpui::test]
-    fn the_tree_and_reader_split_drags(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(FileTree::new));
-        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
-            view.update(cx, |v, _cx| v.set_available_width(FILES_SURFACE_WIDTH_WIDE));
-            div()
-                .w(px(FILES_SURFACE_WIDTH_WIDE))
-                .h_full()
-                .child(view.clone())
-        });
-
-        let before = cx.debug_bounds("files-left").expect("the tree column");
-        assert_eq!(
-            before.size.width,
-            px(TREE_WIDTH_DEFAULT),
-            "the tree starts at its default"
-        );
-
-        // Grab the splitter and drag it 60px to the left, across the tree.
-        let splitter = cx.debug_bounds("files-splitter").expect("the splitter");
-        let grip = splitter.center();
-        let target = point(px(f32::from(grip.x) - 60.0), grip.y);
-        cx.simulate_mouse_down(grip, gpui::MouseButton::Left, gpui::Modifiers::none());
-        // The drag layer is on screen from the next frame on.
-        cx.draw(
-            point(px(0.), px(0.)),
-            size(px(1280.), px(800.)),
-            |_, _cx| {
+    crate::orion_test!(
+        fn the_tree_and_reader_split_drags(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(FileTree::new));
+            cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
+                view.update(cx, |v, _cx| v.set_available_width(FILES_SURFACE_WIDTH_WIDE));
                 div()
                     .w(px(FILES_SURFACE_WIDTH_WIDE))
                     .h_full()
-                    .child(view.clone())
-            },
-        );
-        assert!(
-            cx.debug_bounds("files-drag-layer").is_some(),
-            "the drag layer is on screen while the handle is held"
-        );
-        cx.simulate_mouse_move(
-            target,
-            Some(gpui::MouseButton::Left),
-            gpui::Modifiers::none(),
-        );
-        cx.simulate_mouse_up(target, gpui::MouseButton::Left, gpui::Modifiers::none());
-        cx.draw(
-            point(px(0.), px(0.)),
-            size(px(1280.), px(800.)),
-            |_, _cx| {
+                    .child(view.clone().into_any_element())
+            });
+
+            let before = cx.debug_bounds("files-left").expect("the tree column");
+            assert_eq!(
+                before.size.width,
+                px(TREE_WIDTH_DEFAULT),
+                "the tree starts at its default"
+            );
+
+            // Grab the splitter and drag it 60px to the left, across the tree.
+            let splitter = cx.debug_bounds("files-splitter").expect("the splitter");
+            let grip = splitter.center();
+            let target = point(px(f32::from(grip.x) - 60.0), grip.y);
+            cx.simulate_mouse_down(
+                grip,
+                gpui_kit::MouseButton::Left,
+                gpui_kit::Modifiers::none(),
+            );
+            // The drag layer is on screen from the next frame on.
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(1280.), px(800.)),
+                |_, _cx| {
+                    div()
+                        .w(px(FILES_SURFACE_WIDTH_WIDE))
+                        .h_full()
+                        .child(view.clone().into_any_element())
+                },
+            );
+            assert!(
+                cx.debug_bounds("files-drag-layer").is_some(),
+                "the drag layer is on screen while the handle is held"
+            );
+            cx.simulate_mouse_move(
+                target,
+                Some(gpui_kit::MouseButton::Left),
+                gpui_kit::Modifiers::none(),
+            );
+            cx.simulate_mouse_up(
+                target,
+                gpui_kit::MouseButton::Left,
+                gpui_kit::Modifiers::none(),
+            );
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(1280.), px(800.)),
+                |_, _cx| {
+                    div()
+                        .w(px(FILES_SURFACE_WIDTH_WIDE))
+                        .h_full()
+                        .child(view.clone().into_any_element())
+                },
+            );
+
+            let after = cx.debug_bounds("files-left").expect("the tree column");
+            assert_eq!(
+                after.size.width,
+                px(TREE_WIDTH_DEFAULT - 60.0),
+                "the drag made the tree 60px narrower"
+            );
+            let reader = cx.debug_bounds("files-right").expect("the reader column");
+            assert_eq!(
+                reader.size.width,
+                px(FILES_SURFACE_WIDTH_WIDE - (TREE_WIDTH_DEFAULT - 60.0) - SPLITTER_WIDTH_PX),
+                "the reader took the room"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn the_tree_and_reader_split_stays_usable_at_1280_and_narrow(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(FileTree::new));
+
+            // 1280px window: the app gives the surface 460px; the default split
+            // leaves the reader exactly its minimum.
+            cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
+                view.update(cx, |v, _cx| v.set_available_width(FILES_SURFACE_WIDTH_WIDE));
                 div()
                     .w(px(FILES_SURFACE_WIDTH_WIDE))
                     .h_full()
-                    .child(view.clone())
-            },
-        );
-
-        let after = cx.debug_bounds("files-left").expect("the tree column");
-        assert_eq!(
-            after.size.width,
-            px(TREE_WIDTH_DEFAULT - 60.0),
-            "the drag made the tree 60px narrower"
-        );
-        let reader = cx.debug_bounds("files-right").expect("the reader column");
-        assert_eq!(
-            reader.size.width,
-            px(FILES_SURFACE_WIDTH_WIDE - (TREE_WIDTH_DEFAULT - 60.0) - SPLITTER_WIDTH_PX),
-            "the reader took the room"
-        );
-    }
-
-    #[gpui::test]
-    fn the_tree_and_reader_split_stays_usable_at_1280_and_narrow(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(FileTree::new));
-
-        // 1280px window: the app gives the surface 460px; the default split
-        // leaves the reader exactly its minimum.
-        cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
-            view.update(cx, |v, _cx| v.set_available_width(FILES_SURFACE_WIDTH_WIDE));
-            div()
-                .w(px(FILES_SURFACE_WIDTH_WIDE))
-                .h_full()
-                .child(view.clone())
-        });
-        let reader = cx.debug_bounds("files-right").expect("the reader at 1280");
-        assert!(
-            reader.size.width >= px(READER_WIDTH_MIN),
-            "the reader keeps its minimum at 1280 (got {})",
-            reader.size.width
-        );
-
-        // Narrow: less room; the tree yields before the reader does.
-        cx.draw(point(px(0.), px(0.)), size(px(800.), px(600.)), |_, cx| {
-            view.update(cx, |v, _cx| v.set_available_width(400.0));
-            div().w(px(400.0)).h_full().child(view.clone())
-        });
-        let tree = cx.debug_bounds("files-left").expect("the tree at narrow");
-        assert_eq!(tree.size.width, px(152.0), "the tree yields first");
-        let reader = cx
-            .debug_bounds("files-right")
-            .expect("the reader at narrow");
-        assert!(
-            reader.size.width >= px(READER_WIDTH_MIN),
-            "the reader keeps its minimum at the narrow breakpoint (got {})",
-            reader.size.width
-        );
-    }
-
-    #[gpui::test]
-    fn a_lens_switch_keeps_the_open_file_and_the_expansion(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let view = cx.update(|_window, app| app.new(FileTree::new));
-        cx.update(|_window, app| {
-            view.update(app, |v, cx| {
-                v.apply_listing(
-                    "/proj".to_string(),
-                    listing_json("/proj", &["src"], json!([{"name": "main.rs", "size": 5}])),
-                );
-                v.reveal(cx, "src/main.rs".to_string());
+                    .child(view.clone().into_any_element())
             });
-            let selected = view.read(app).selected_file().map(str::to_string);
-            let expanded_had_src = view.read(app).expanded().any(|p| p == "/proj/src");
-            let reader_path = view
-                .read(app)
-                .file_reader()
-                .read(app)
-                .path()
-                .map(str::to_string);
-            assert_eq!(selected.as_deref(), Some("/proj/src/main.rs"));
-            assert!(expanded_had_src, "the folder is expanded");
-            assert_eq!(reader_path.as_deref(), Some("/proj/src/main.rs"));
-
-            // Away and back: the lens switch must not reset the tree's state.
-            view.update(app, |v, cx| v.set_visible(cx, false));
-            view.update(app, |v, cx| v.set_visible(cx, true));
-            let v = view.read(app);
-            assert_eq!(
-                v.selected_file(),
-                Some("/proj/src/main.rs"),
-                "the open file survives the lens switch"
-            );
+            let reader = cx.debug_bounds("files-right").expect("the reader at 1280");
             assert!(
-                v.expanded().any(|p| p == "/proj/src"),
-                "the expansion survives the lens switch"
+                reader.size.width >= px(READER_WIDTH_MIN),
+                "the reader keeps its minimum at 1280 (got {})",
+                reader.size.width
             );
-            assert_eq!(
-                v.file_reader().read(app).path(),
-                Some("/proj/src/main.rs"),
-                "the reader keeps the file"
+
+            // Narrow: less room; the tree yields before the reader does.
+            cx.draw(point(px(0.), px(0.)), size(px(800.), px(600.)), |_, cx| {
+                view.update(cx, |v, _cx| v.set_available_width(400.0));
+                div()
+                    .w(px(400.0))
+                    .h_full()
+                    .child(view.clone().into_any_element())
+            });
+            let tree = cx.debug_bounds("files-left").expect("the tree at narrow");
+            assert_eq!(tree.size.width, px(152.0), "the tree yields first");
+            let reader = cx
+                .debug_bounds("files-right")
+                .expect("the reader at narrow");
+            assert!(
+                reader.size.width >= px(READER_WIDTH_MIN),
+                "the reader keeps its minimum at the narrow breakpoint (got {})",
+                reader.size.width
             );
-        });
-    }
+        }
+    );
+
+    crate::orion_test!(
+        fn a_lens_switch_keeps_the_open_file_and_the_expansion(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(FileTree::new));
+            cx.update(|_window, app| {
+                view.update(app, |v, cx| {
+                    v.apply_listing(
+                        "/proj".to_string(),
+                        listing_json("/proj", &["src"], json!([{"name": "main.rs", "size": 5}])),
+                    );
+                    v.reveal(cx, "src/main.rs".to_string());
+                });
+                let selected = view.read(app).selected_file().map(str::to_string);
+                let expanded_had_src = view.read(app).expanded().any(|p| p == "/proj/src");
+                let reader_path = view
+                    .read(app)
+                    .file_reader()
+                    .read(app)
+                    .path()
+                    .map(str::to_string);
+                assert_eq!(selected.as_deref(), Some("/proj/src/main.rs"));
+                assert!(expanded_had_src, "the folder is expanded");
+                assert_eq!(reader_path.as_deref(), Some("/proj/src/main.rs"));
+
+                // Away and back: the lens switch must not reset the tree's state.
+                view.update(app, |v, cx| v.set_visible(cx, false));
+                view.update(app, |v, cx| v.set_visible(cx, true));
+                let v = view.read(app);
+                assert_eq!(
+                    v.selected_file(),
+                    Some("/proj/src/main.rs"),
+                    "the open file survives the lens switch"
+                );
+                assert!(
+                    v.expanded().any(|p| p == "/proj/src"),
+                    "the expansion survives the lens switch"
+                );
+                assert_eq!(
+                    v.file_reader().read(app).path(),
+                    Some("/proj/src/main.rs"),
+                    "the reader keeps the file"
+                );
+            });
+        }
+    );
 }
