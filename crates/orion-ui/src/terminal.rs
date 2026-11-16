@@ -20,10 +20,14 @@ use crate::terminal_grid::{
     build_row, CellScratch, CellSize, GridRow, GridSnapshot, RowCacheKey, RowOverlays, TerminalGrid,
 };
 use crate::theme::Theme;
-use gpui::prelude::*;
-use gpui::{
-    div, px, rems, white, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent,
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::status_bar::StatusBar;
+use gpui_kit::component::Selectable;
+use gpui_kit::*;
+use gpui_kit::{
+    div, px, rems, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollEvent,
     StyledText, TextStyle, TextSystem, Window,
 };
 use orion_core::runtime::PaneHandle;
@@ -96,7 +100,7 @@ fn measure_terminal_font(
         {
             continue;
         }
-        let id = text_system.resolve_font(&gpui::font(family.clone()));
+        let id = text_system.resolve_font(&gpui_kit::font(family.clone()));
         let Ok(narrow) = text_system.advance(id, font_size, 'i') else {
             continue;
         };
@@ -456,19 +460,17 @@ impl TerminalPane {
             cx.background_executor()
                 .timer(Duration::from_millis(PLACEHOLDER_TICK_MS))
                 .await;
-            let keep_ticking = cx
-                .update(|app| {
-                    weak.update(app, |view, cx| {
-                        if view.grid_has_content {
-                            view.placeholder_ticking = false;
-                            return false;
-                        }
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false)
+            let keep_ticking = cx.update(|app| {
+                weak.update(app, |view, cx| {
+                    if view.grid_has_content {
+                        view.placeholder_ticking = false;
+                        return false;
+                    }
+                    cx.notify();
+                    true
                 })
-                .unwrap_or(false);
+                .unwrap_or(false)
+            });
             if !keep_ticking {
                 break;
             }
@@ -928,7 +930,7 @@ impl TerminalPane {
     /// The position is relative to the grid's own box, not the window's: the
     /// header, the lens switch, the tab strip, the sidebar and the split pane
     /// all sit above and beside it.
-    fn pos_to_cell(&self, pos: gpui::Point<gpui::Pixels>) -> (usize, usize) {
+    fn pos_to_cell(&self, pos: gpui_kit::Point<gpui_kit::Pixels>) -> (usize, usize) {
         let Some(bounds) = self.grid_bounds.get() else {
             return (0, 0);
         };
@@ -1138,7 +1140,7 @@ impl Render for TerminalPane {
         // The grid takes the focus when the lens becomes the one on screen.
         if self.focus_wanted {
             self.focus_wanted = false;
-            self.focus_handle.focus(window);
+            self.focus_handle.focus(window, cx);
         }
 
         // The grid's own box, learned from the layout. The window's size is
@@ -1236,47 +1238,42 @@ impl Render for TerminalPane {
                         .with_default_highlights(&ghost_style, []),
                 )
                 .child(StyledText::new(label).with_default_highlights(&ghost_style, []))
+                // touch controls stay out of the tab order: the grid owns the keyboard.
                 .child(
-                    div()
-                        .id("find-prev")
-                        .flex()
-                        .size(px(TARGET_PX))
-                        .items_center()
-                        .justify_center()
-                        .text_color(white())
+                    Button::new("find-prev")
+                        .label("↑")
+                        .ghost()
+                        .h(px(TARGET_PX))
+                        .w(px(TARGET_PX))
+                        .tab_stop(false)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.find_prev();
                             cx.notify();
-                        }))
-                        .child("↑"),
+                        })),
                 )
                 .child(
-                    div()
-                        .id("find-next")
-                        .flex()
-                        .size(px(TARGET_PX))
-                        .items_center()
-                        .justify_center()
-                        .text_color(white())
+                    Button::new("find-next")
+                        .label("↓")
+                        .ghost()
+                        .h(px(TARGET_PX))
+                        .w(px(TARGET_PX))
+                        .tab_stop(false)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.find_next();
                             cx.notify();
-                        }))
-                        .child("↓"),
+                        })),
                 )
                 .child(
-                    div()
-                        .id("find-close")
-                        .flex()
-                        .size(px(TARGET_PX))
-                        .items_center()
-                        .justify_center()
-                        .text_color(white())
+                    Button::new("find-close")
+                        .label("✕")
+                        .ghost()
+                        .h(px(TARGET_PX))
+                        .w(px(TARGET_PX))
+                        .tab_stop(false)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.find_open = false;
                             cx.notify();
-                        }))
-                        .child("✕"),
+                        })),
                 )
                 .into_any_element()
         } else {
@@ -1317,18 +1314,18 @@ impl Render for TerminalPane {
             }
             for (label, chord) in all_keys {
                 let chord = chord.to_string();
+                // A literal key keeps the label exactly as the reader sees it:
+                // Kbd formats real keystrokes into platform words ("up" -> "Up").
+                let keycap = Kbd::new(Keystroke {
+                    key: label.to_string(),
+                    ..Default::default()
+                });
                 bar = bar.child(
-                    div()
-                        .id(label)
-                        .flex()
+                    Button::new(label)
+                        .ghost()
                         .h(px(TARGET_PX))
                         .min_w(px(TARGET_PX))
-                        .px_2()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.0))
-                        .bg(theme.surface_elevated)
-                        .text_color(theme.text)
+                        .tab_stop(false)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let prefix = this.sticky_prefix();
                             let full = if prefix.is_empty() {
@@ -1340,7 +1337,7 @@ impl Render for TerminalPane {
                             this.clear_sticky();
                             cx.notify();
                         }))
-                        .child(label.to_string()),
+                        .child(keycap),
                 );
             }
             let modifiers: &[&str] = if self.key_bar_extras.alt {
@@ -1355,27 +1352,21 @@ impl Render for TerminalPane {
                     _ => self.sticky_shift,
                 };
                 bar = bar.child(
-                    div()
-                        .id(label)
-                        .flex()
+                    Button::new(label)
+                        .ghost()
+                        .selected(pressed)
                         .h(px(TARGET_PX))
                         .min_w(px(TARGET_PX))
-                        .px_2()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.0))
-                        .bg(if pressed {
-                            theme.accent_tint
-                        } else {
-                            theme.surface_elevated
-                        })
-                        .text_color(theme.text_strong)
+                        .tab_stop(false)
                         .on_click(cx.listener(move |this, _, _, _cx| match label {
                             "Ctrl" => this.sticky_ctrl = !this.sticky_ctrl,
                             "Alt" => this.sticky_alt = !this.sticky_alt,
                             _ => this.sticky_shift = !this.sticky_shift,
                         }))
-                        .child(label.to_string()),
+                        .child(Kbd::new(Keystroke {
+                            key: label.to_string(),
+                            ..Default::default()
+                        })),
                 );
             }
             bar.into_any_element()
@@ -1392,15 +1383,7 @@ impl Render for TerminalPane {
         } else {
             self.status_line.clone()
         };
-        let status_bar = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(TARGET_PX * 0.75))
-            .px_2()
-            .text_size(px(11.0))
-            .text_color(theme.text_dim)
-            .child(status_line);
+        let status_bar = StatusBar::new().left(status_line).h(px(TARGET_PX * 0.75));
 
         // The grid: one custom element paints the rows; it takes its own
         // snapshot from the engine and draws it, cell for cell.
@@ -1466,10 +1449,10 @@ impl Render for TerminalPane {
                     cx.notify();
                 }
             }))
-            .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(move |this, ev: &ScrollEvent, _, cx| {
                 // A touch that reached the grid means the device has one: the
                 // key bar belongs on it.
-                if matches!(ev.touch_phase, gpui::TouchPhase::Started) {
+                if matches!(ev.touch_phase, gpui_kit::TouchPhase::Started) {
                     this.touch = true;
                 }
                 let row_height = this
@@ -1489,7 +1472,7 @@ impl Render for TerminalPane {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
-                    this.focus_handle.focus(window);
+                    this.focus_handle.focus(window, cx);
                     if ev.button == MouseButton::Left {
                         let (vis_row, col) = this.pos_to_cell(ev.position);
                         this.sel_anchor = Some(this.cell_to_content(vis_row, col));
@@ -1545,8 +1528,9 @@ impl Render for TerminalPane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::Entity;
-    use gpui::{Keystroke, Modifiers};
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::Entity;
+    use gpui_kit::{Keystroke, Modifiers};
     use orion_core::screen::ScreenState;
 
     fn ev(key: &str, shift: bool, control: bool, alt: bool) -> KeyDownEvent {
@@ -1562,10 +1546,11 @@ mod tests {
                 key_char: None,
             },
             is_held: false,
+            prefer_character_input: false,
         }
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn find_debounce_fires_at_most_twice_for_20_keystrokes_in_1s() {
         let mut debouncer = FindDebouncer::new(Duration::from_millis(FIND_DEBOUNCE_MS));
         let start = Instant::now();
@@ -1592,12 +1577,12 @@ mod tests {
         assert_eq!(searches, 1);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn resize_debounce_delay_is_50ms() {
         assert_eq!(RESIZE_DEBOUNCE_MS, 50);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn named_keys_map_to_logical_chords() {
         assert_eq!(
             linear_map_keystroke(&ev("enter", false, false, false)).as_deref(),
@@ -1625,7 +1610,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn modifier_only_and_platform_keys_are_dropped() {
         assert!(linear_map_keystroke(&ev("control", false, true, false)).is_none());
         let mut platform = ev("c", false, false, false);
@@ -1633,7 +1618,7 @@ mod tests {
         assert!(linear_map_keystroke(&platform).is_none());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn plain_letters_stay_plain() {
         assert_eq!(
             linear_map_keystroke(&ev("a", true, false, false)).as_deref(),
@@ -1648,7 +1633,7 @@ mod tests {
         event
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn ctrl_v_pastes_the_clipboard_instead_of_sending_a_control_byte() {
         assert_eq!(
             key_action(&ev("v", false, true, false), false, false),
@@ -1662,7 +1647,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_find_bar_owns_paste_while_it_is_open() {
         assert_eq!(
             key_action(&ev("v", false, true, false), true, false),
@@ -1671,7 +1656,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn cmd_c_copies_the_selection_like_ctrl_c_while_a_bare_ctrl_c_interrupts() {
         assert_eq!(
             key_action(&command_ev("c"), false, true),
@@ -1695,7 +1680,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_selection_survives_feeds_below_wrap_capacity() {
         let mut screen = ScreenState::new(4, 20);
         let mut anchor = Some((0, 0));
@@ -1716,7 +1701,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn the_selection_is_cleared_when_the_ring_wraps() {
         let mut screen = ScreenState::new(2, 20);
         let fill = "x\r\n".repeat(orion_core::screen::SCROLLBACK_ROWS + 8);
@@ -1731,7 +1716,7 @@ mod tests {
         assert_eq!(cursor, None, "selection cleared, not mis-pointed");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_selection_dragged_upward_copies_the_same_text_as_one_dragged_downward() {
         let mut screen = ScreenState::new(4, 20);
         screen.process("alpha\r\nbravo\r\ncharlie\r\n");
@@ -1767,52 +1752,54 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn the_grid_the_key_bar_and_the_find_bar_are_on_screen(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
-            view: cx.new(TerminalPane::new),
-        });
-        // The key bar is a touch affordance, and the find bar is open.
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, _cx| {
-                view.touch = true;
-                view.find_open = true;
+    crate::orion_test!(
+        fn the_grid_the_key_bar_and_the_find_bar_are_on_screen(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
+            // The key bar is a touch affordance, and the find bar is open.
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    view.touch = true;
+                    view.find_open = true;
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
 
-        assert!(cx.debug_bounds("grid").is_some(), "the grid is on screen");
-        assert!(
-            cx.debug_bounds("key-bar").is_some(),
-            "the key bar is on screen"
-        );
-        assert!(
-            cx.debug_bounds("find-bar").is_some(),
-            "the find bar is on screen"
-        );
-    }
-
-    #[gpui::test]
-    fn the_grid_learns_its_own_box_from_the_layout(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
-            view: cx.new(TerminalPane::new),
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            let bounds = view.read(app).grid_bounds.get().expect("the grid's box");
+            assert!(cx.debug_bounds("grid").is_some(), "the grid is on screen");
             assert!(
-                f32::from(bounds.size.width) > 0.0,
-                "the grid has a width of its own: {bounds:?}"
+                cx.debug_bounds("key-bar").is_some(),
+                "the key bar is on screen"
             );
             assert!(
-                f32::from(bounds.size.height) > 0.0,
-                "the grid has a height of its own: {bounds:?}"
+                cx.debug_bounds("find-bar").is_some(),
+                "the find bar is on screen"
             );
-        });
-    }
+        }
+    );
+
+    crate::orion_test!(
+        fn the_grid_learns_its_own_box_from_the_layout(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                let bounds = view.read(app).grid_bounds.get().expect("the grid's box");
+                assert!(
+                    f32::from(bounds.size.width) > 0.0,
+                    "the grid has a width of its own: {bounds:?}"
+                );
+                assert!(
+                    f32::from(bounds.size.height) > 0.0,
+                    "the grid has a height of its own: {bounds:?}"
+                );
+            });
+        }
+    );
 
     /// A pane whose `status()` must never run on the render path: it panics.
     /// `pane.status()` is a synchronous socket round-trip on the daemon path
@@ -1873,29 +1860,30 @@ mod tests {
         fn detach_all(&self, _connection: &str) {}
     }
 
-    #[gpui::test]
-    fn render_reads_the_cached_status_line_never_the_pane(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
-            view: cx.new(TerminalPane::new),
-        });
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, _cx| {
-                view.set_pane(Arc::new(StatusPanicsPane {
-                    cwd: std::path::PathBuf::from("."),
-                }));
-                assert!(view.set_status_line("working".to_string()));
+    crate::orion_test!(
+        fn render_reads_the_cached_status_line_never_the_pane(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
             });
-        });
-        // If render called pane.status(), the panic would fail this draw.
-        cx.update(|window, cx| window.draw(cx).clear());
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    view.set_pane(Arc::new(StatusPanicsPane {
+                        cwd: std::path::PathBuf::from("."),
+                    }));
+                    assert!(view.set_status_line("working".to_string()));
+                });
+            });
+            // If render called pane.status(), the panic would fail this draw.
+            cx.update(|window, cx| window.render_frame(cx));
 
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            let status = view.read(app).status_line.clone();
-            assert_eq!(status, "working", "render drew the cached status line");
-        });
-    }
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                let status = view.read(app).status_line.clone();
+                assert_eq!(status, "working", "render drew the cached status line");
+            });
+        }
+    );
 
     /// A pane that records every size it was asked to take.
     struct ResizeRecordingPane {
@@ -1959,69 +1947,70 @@ mod tests {
         fn detach_all(&self, _connection: &str) {}
     }
 
-    /// A view that watches the pane never asks the agent for a new size.
-    ///
-    /// The split canvas shares the pane's PTY with the main canvas: the size
-    /// belongs to the view that owns the pane.
-    #[gpui::test]
-    fn an_observing_view_never_resizes_the_pane(cx: &mut gpui::TestAppContext) {
-        let resizes = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
-            view: cx.new(TerminalPane::new),
-        });
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, _cx| {
-                view.set_pane(Arc::new(ResizeRecordingPane {
-                    cwd: std::path::PathBuf::from("."),
-                    resizes: Arc::clone(&resizes),
-                }));
-                // A cell the test controls: the grid's size is then the box's
-                // size divided by this cell, whatever fonts the machine has.
-                view.font = Some(TerminalFont {
-                    family: String::new(),
-                    cell: CellSize {
-                        width: 8.0,
-                        height: 16.0,
-                    },
+    // A view that watches the pane never asks the agent for a new size.
+    //
+    // The split canvas shares the pane's PTY with the main canvas: the size
+    // belongs to the view that owns the pane.
+    crate::orion_test!(
+        fn an_observing_view_never_resizes_the_pane(cx: &mut gpui_kit::TestAppContext) {
+            let resizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    view.set_pane(Arc::new(ResizeRecordingPane {
+                        cwd: std::path::PathBuf::from("."),
+                        resizes: Arc::clone(&resizes),
+                    }));
+                    // A cell the test controls: the grid's size is then the box's
+                    // size divided by this cell, whatever fonts the machine has.
+                    view.font = Some(TerminalFont {
+                        family: String::new(),
+                        cell: CellSize {
+                            width: 8.0,
+                            height: 16.0,
+                        },
+                    });
                 });
             });
-        });
-        // The first draw learns the grid's box, the second one resizes to it.
-        cx.update(|window, cx| window.draw(cx).clear());
-        cx.update(|window, cx| window.draw(cx).clear());
-        let owner = resizes.lock().expect("the recorder's lock").len();
-        assert!(owner > 0, "the owning view told the agent about its box");
+            // The first draw learns the grid's box, the second one resizes to it.
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.update(|window, cx| window.render_frame(cx));
+            let owner = resizes.lock().expect("the recorder's lock").len();
+            assert!(owner > 0, "the owning view told the agent about its box");
 
-        // The observing view takes the same box and must leave the PTY alone.
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, _cx| {
-                view.set_observe(true);
-                // A size the grid has never seen, so the render takes the
-                // resize branch, and no debounce left to wait for.
-                view.last_cols = 0;
-                view.last_rows = 0;
-                view.last_resize = Instant::now() - Duration::from_millis(RESIZE_DEBOUNCE_MS);
+            // The observing view takes the same box and must leave the PTY alone.
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    view.set_observe(true);
+                    // A size the grid has never seen, so the render takes the
+                    // resize branch, and no debounce left to wait for.
+                    view.last_cols = 0;
+                    view.last_rows = 0;
+                    view.last_resize = Instant::now() - Duration::from_millis(RESIZE_DEBOUNCE_MS);
+                });
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        let observed = resizes.lock().expect("the recorder's lock").len();
-        assert_eq!(observed, owner, "an observing view never resizes the pane");
-        // The render did take the resize branch: the grid followed its box.
-        // Only the agent's PTY was left alone.
-        let mut grid_cols = 0;
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            grid_cols = view.read(app).last_cols;
-        });
-        assert!(
-            grid_cols > 0,
-            "the observing view still followed its own box"
-        );
-    }
+            cx.update(|window, cx| window.render_frame(cx));
+            let observed = resizes.lock().expect("the recorder's lock").len();
+            assert_eq!(observed, owner, "an observing view never resizes the pane");
+            // The render did take the resize branch: the grid followed its box.
+            // Only the agent's PTY was left alone.
+            let mut grid_cols = 0;
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                grid_cols = view.read(app).last_cols;
+            });
+            assert!(
+                grid_cols > 0,
+                "the observing view still followed its own box"
+            );
+        }
+    );
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn a_face_that_draws_its_box_glyphs_full_width_cannot_carry_a_grid() {
         // A Latin monospace face: every glyph on the same advance.
         assert!(face_carries_a_grid(
@@ -2048,386 +2037,401 @@ mod tests {
         assert!(!face_carries_a_grid(7.2, 7.2, &[None]));
     }
 
-    #[gpui::test]
-    fn the_terminal_font_measures_a_monospace_cell(cx: &mut gpui::TestAppContext) {
-        let cx = cx.add_empty_window();
-        let families = terminal_font_families("");
-        let Some(font) = measure_terminal_font(cx.text_system(), &families, px(DEFAULT_FONT_PX))
-        else {
-            // A machine with no monospace font at all: the grid falls back to
-            // the system font. Nothing to measure here.
-            return;
-        };
-        assert!(font.cell.width > 0.0, "the cell has a width");
-        assert!(font.cell.height > 0.0, "the cell has a height");
+    crate::orion_test!(
+        fn the_terminal_font_measures_a_monospace_cell(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let families = terminal_font_families("");
+            let Some(font) =
+                measure_terminal_font(cx.text_system(), &families, px(DEFAULT_FONT_PX))
+            else {
+                // A machine with no monospace font at all: the grid falls back to
+                // the system font. Nothing to measure here.
+                return;
+            };
+            assert!(font.cell.width > 0.0, "the cell has a width");
+            assert!(font.cell.height > 0.0, "the cell has a height");
 
-        let text_system = cx.text_system();
-        let id = text_system.resolve_font(&gpui::font(font.family.clone()));
-        let narrow = text_system
-            .advance(id, px(DEFAULT_FONT_PX), 'i')
-            .expect("the advance of a narrow glyph");
-        let wide = text_system
-            .advance(id, px(DEFAULT_FONT_PX), 'W')
-            .expect("the advance of a wide glyph");
-        assert_eq!(
-            narrow.width, wide.width,
-            "every glyph sits on the same advance: the columns line up"
-        );
-    }
+            let text_system = cx.text_system();
+            let id = text_system.resolve_font(&gpui_kit::font(font.family.clone()));
+            let narrow = text_system
+                .advance(id, px(DEFAULT_FONT_PX), 'i')
+                .expect("the advance of a narrow glyph");
+            let wide = text_system
+                .advance(id, px(DEFAULT_FONT_PX), 'W')
+                .expect("the advance of a wide glyph");
+            assert_eq!(
+                narrow.width, wide.width,
+                "every glyph sits on the same advance: the columns line up"
+            );
+        }
+    );
 
-    #[gpui::test]
-    fn the_terminal_reads_the_clipboard_when_it_pastes(cx: &mut gpui::TestAppContext) {
-        let view = cx.update(|app| app.new(TerminalPane::new));
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string("pasted words".to_string()));
+    crate::orion_test!(
+        fn the_terminal_reads_the_clipboard_when_it_pastes(cx: &mut gpui_kit::TestAppContext) {
+            let view = cx.update(|app| app.new(TerminalPane::new));
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                "pasted words".to_string(),
+            ));
 
-        let text = cx.update(|app| view.update(app, |view, cx| view.clipboard_text(cx)));
+            let text = cx.update(|app| view.update(app, |view, cx| view.clipboard_text(cx)));
 
-        assert_eq!(
-            text.as_deref(),
-            Some("pasted words"),
-            "the paste path reads what the reader copied"
-        );
-    }
+            assert_eq!(
+                text.as_deref(),
+                Some("pasted words"),
+                "the paste path reads what the reader copied"
+            );
+        }
+    );
 
-    #[gpui::test]
-    fn new_output_keeps_the_reader_where_they_scrolled(cx: &mut gpui::TestAppContext) {
-        let view = cx.update(|app| app.new(TerminalPane::new));
-        cx.update(|app| {
-            view.update(app, |view, _cx| {
-                for line in 0..80 {
-                    view.feed(&format!("line {line}\r\n"));
-                }
-                assert!(
-                    view.screen.scrollback_len() > 10,
-                    "the feed built scrollback: {}",
-                    view.screen.scrollback_len()
-                );
-                view.screen.scroll_to(10);
+    crate::orion_test!(
+        fn new_output_keeps_the_reader_where_they_scrolled(cx: &mut gpui_kit::TestAppContext) {
+            let view = cx.update(|app| app.new(TerminalPane::new));
+            cx.update(|app| {
+                view.update(app, |view, _cx| {
+                    for line in 0..80 {
+                        view.feed(&format!("line {line}\r\n"));
+                    }
+                    assert!(
+                        view.screen.scrollback_len() > 10,
+                        "the feed built scrollback: {}",
+                        view.screen.scrollback_len()
+                    );
+                    view.screen.scroll_to(10);
 
-                view.feed("late output\r\n");
+                    view.feed("late output\r\n");
 
-                assert_eq!(
-                    view.screen.offset_from_bottom(),
-                    10,
-                    "the viewport stayed where the reader put it"
-                );
+                    assert_eq!(
+                        view.screen.offset_from_bottom(),
+                        10,
+                        "the viewport stayed where the reader put it"
+                    );
+                });
             });
-        });
-    }
+        }
+    );
 
-    #[gpui::test]
-    fn new_output_follows_when_the_reader_is_at_the_bottom(cx: &mut gpui::TestAppContext) {
-        let view = cx.update(|app| app.new(TerminalPane::new));
-        cx.update(|app| {
-            view.update(app, |view, _cx| {
-                for line in 0..80 {
-                    view.feed(&format!("line {line}\r\n"));
-                }
-                assert_eq!(view.screen.offset_from_bottom(), 0);
+    crate::orion_test!(
+        fn new_output_follows_when_the_reader_is_at_the_bottom(cx: &mut gpui_kit::TestAppContext) {
+            let view = cx.update(|app| app.new(TerminalPane::new));
+            cx.update(|app| {
+                view.update(app, |view, _cx| {
+                    for line in 0..80 {
+                        view.feed(&format!("line {line}\r\n"));
+                    }
+                    assert_eq!(view.screen.offset_from_bottom(), 0);
 
-                view.feed("more output\r\n");
+                    view.feed("more output\r\n");
 
-                assert_eq!(
-                    view.screen.offset_from_bottom(),
-                    0,
-                    "a reader at the live bottom keeps following the output"
-                );
+                    assert_eq!(
+                        view.screen.offset_from_bottom(),
+                        0,
+                        "a reader at the live bottom keeps following the output"
+                    );
+                });
             });
-        });
-    }
+        }
+    );
 
-    #[gpui::test]
-    fn the_cache_hit_path_borrows_the_cached_rows(cx: &mut gpui::TestAppContext) {
-        let view = cx.update(|app| app.new(TerminalPane::new));
-        cx.update(|app| {
-            view.update(app, |view, _cx| {
-                for line in 0..80 {
-                    view.feed(&format!("line {line}\r\n"));
-                }
-                view.refresh_viewport_cache();
-                let cached = view.viewport_cells().as_ptr();
-                let cached_revision = view.cached_viewport_revision;
+    crate::orion_test!(
+        fn the_cache_hit_path_borrows_the_cached_rows(cx: &mut gpui_kit::TestAppContext) {
+            let view = cx.update(|app| app.new(TerminalPane::new));
+            cx.update(|app| {
+                view.update(app, |view, _cx| {
+                    for line in 0..80 {
+                        view.feed(&format!("line {line}\r\n"));
+                    }
+                    view.refresh_viewport_cache();
+                    let cached = view.viewport_cells().as_ptr();
+                    let cached_revision = view.cached_viewport_revision;
 
-                view.refresh_viewport_cache();
+                    view.refresh_viewport_cache();
 
-                assert_eq!(
-                    cached,
-                    view.viewport_cells().as_ptr(),
-                    "an unchanged (revision, offset) reuses the cached allocation"
-                );
-                assert_eq!(view.cached_viewport_revision, cached_revision);
+                    assert_eq!(
+                        cached,
+                        view.viewport_cells().as_ptr(),
+                        "an unchanged (revision, offset) reuses the cached allocation"
+                    );
+                    assert_eq!(view.cached_viewport_revision, cached_revision);
 
-                // A feed after a scroll changes the revision: the cache is
-                // rebuilt and the new output is on screen.
-                view.screen.scroll_to(5);
-                view.feed("late output\r\n");
-                view.refresh_viewport_cache();
+                    // A feed after a scroll changes the revision: the cache is
+                    // rebuilt and the new output is on screen.
+                    view.screen.scroll_to(5);
+                    view.feed("late output\r\n");
+                    view.refresh_viewport_cache();
 
-                assert_ne!(
-                    view.cached_viewport_revision, cached_revision,
-                    "a feed after a scroll invalidates the cache"
-                );
-                assert_eq!(
-                    view.screen.offset_from_bottom(),
-                    5,
-                    "the reader stays where they scrolled"
-                );
-                let text: String = view
+                    assert_ne!(
+                        view.cached_viewport_revision, cached_revision,
+                        "a feed after a scroll invalidates the cache"
+                    );
+                    assert_eq!(
+                        view.screen.offset_from_bottom(),
+                        5,
+                        "the reader stays where they scrolled"
+                    );
+                    let text: String = view
+                        .viewport_cells()
+                        .iter()
+                        .flat_map(|(_, cells)| cells.iter().map(|cell| cell.text.as_str()))
+                        .collect();
+                    assert!(
+                        !text.contains("late output"),
+                        "the rebuilt cache shows the scrolled viewport, not the live bottom"
+                    );
+                });
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn a_cache_hit_frame_does_not_rebuild_rows(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    for line in 0..40 {
+                        view.feed(&format!("line {line}\r\n"));
+                    }
+                });
+            });
+            // Warm up: the first draws build the cache and learn the grid's box.
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.update(|window, cx| window.render_frame(cx));
+            let mut calls = 0;
+            cx.update(|_window, app| {
+                calls = root.read(app).view.read(app).rows_built();
+            });
+            assert!(calls > 0, "the warm-up draws built the rows");
+
+            // Force a re-render with no content change: the cache must serve it.
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |_view, cx| cx.notify());
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            let mut after = 0;
+            cx.update(|_window, app| {
+                after = root.read(app).view.read(app).rows_built();
+            });
+            assert_eq!(
+                calls, after,
+                "an unchanged frame reuses the cached rows instead of re-building them"
+            );
+            // The cached frame still paints the fed content.
+            let mut text = String::new();
+            cx.update(|_window, app| {
+                text = root
+                    .read(app)
+                    .view
+                    .read(app)
                     .viewport_cells()
                     .iter()
                     .flat_map(|(_, cells)| cells.iter().map(|cell| cell.text.as_str()))
                     .collect();
-                assert!(
-                    !text.contains("late output"),
-                    "the rebuilt cache shows the scrolled viewport, not the live bottom"
-                );
             });
-        });
-    }
+            assert!(
+                text.contains("line 39"),
+                "the cached frame paints the content"
+            );
+        }
+    );
 
-    #[gpui::test]
-    fn a_cache_hit_frame_does_not_rebuild_rows(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
-            view: cx.new(TerminalPane::new),
-        });
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, _cx| {
-                for line in 0..40 {
-                    view.feed(&format!("line {line}\r\n"));
-                }
+    crate::orion_test!(
+        fn the_row_cache_invalidates_on_feed_scroll_selection_and_find(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
             });
-        });
-        // Warm up: the first draws build the cache and learn the grid's box.
-        cx.update(|window, cx| window.draw(cx).clear());
-        cx.update(|window, cx| window.draw(cx).clear());
-        let mut calls = 0;
-        cx.update(|_window, app| {
-            calls = root.read(app).view.read(app).rows_built();
-        });
-        assert!(calls > 0, "the warm-up draws built the rows");
-
-        // Force a re-render with no content change: the cache must serve it.
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |_view, cx| cx.notify());
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        let mut after = 0;
-        cx.update(|_window, app| {
-            after = root.read(app).view.read(app).rows_built();
-        });
-        assert_eq!(
-            calls, after,
-            "an unchanged frame reuses the cached rows instead of re-building them"
-        );
-        // The cached frame still paints the fed content.
-        let mut text = String::new();
-        cx.update(|_window, app| {
-            text = root
-                .read(app)
-                .view
-                .read(app)
-                .viewport_cells()
-                .iter()
-                .flat_map(|(_, cells)| cells.iter().map(|cell| cell.text.as_str()))
-                .collect();
-        });
-        assert!(
-            text.contains("line 39"),
-            "the cached frame paints the content"
-        );
-    }
-
-    #[gpui::test]
-    fn the_row_cache_invalidates_on_feed_scroll_selection_and_find(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
-            view: cx.new(TerminalPane::new),
-        });
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, _cx| {
-                for line in 0..40 {
-                    view.feed(&format!("line {line}\r\n"));
-                }
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    for line in 0..40 {
+                        view.feed(&format!("line {line}\r\n"));
+                    }
+                });
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        cx.update(|window, cx| window.draw(cx).clear());
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.update(|window, cx| window.render_frame(cx));
 
-        // A feed bumps the content revision: every visible row rebuilds.
-        let mut before = 0;
-        cx.update(|_window, app| {
-            before = root.read(app).view.read(app).rows_built();
-        });
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, cx| {
-                view.feed("fresh output\r\n");
-                cx.notify();
+            // A feed bumps the content revision: every visible row rebuilds.
+            let mut before = 0;
+            cx.update(|_window, app| {
+                before = root.read(app).view.read(app).rows_built();
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        let mut after_feed = 0;
-        cx.update(|_window, app| {
-            after_feed = root.read(app).view.read(app).rows_built();
-        });
-        assert!(after_feed > before, "a feed invalidates the cached rows");
-
-        // A scroll changes the offset: the cached rows rebuild.
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, cx| {
-                view.screen.scroll_to(3);
-                cx.notify();
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, cx| {
+                    view.feed("fresh output\r\n");
+                    cx.notify();
+                });
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        let mut after_scroll = 0;
-        cx.update(|_window, app| {
-            after_scroll = root.read(app).view.read(app).rows_built();
-        });
-        assert!(
-            after_scroll > after_feed,
-            "a scroll invalidates the cached rows"
-        );
-
-        // A selection on one visible row rebuilds exactly that row.
-        let mut before_selection = 0;
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, cx| {
-                let row = view.viewport_cells()[0].0;
-                view.sel_anchor = Some((row, 0));
-                view.sel_cursor = Some((row, 4));
-                cx.notify();
-                before_selection = view.rows_built();
+            cx.update(|window, cx| window.render_frame(cx));
+            let mut after_feed = 0;
+            cx.update(|_window, app| {
+                after_feed = root.read(app).view.read(app).rows_built();
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        let mut after_selection = 0;
-        cx.update(|_window, app| {
-            after_selection = root.read(app).view.read(app).rows_built();
-        });
-        assert_eq!(
-            after_selection - before_selection,
-            1,
-            "a one-row selection rebuilds exactly the selected row"
-        );
+            assert!(after_feed > before, "a feed invalidates the cached rows");
 
-        // A find refresh bumps the find revision even when the matches are
-        // identical - the count is not the fingerprint.
-        let mut rev = 0;
-        let mut before_find = 0;
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, cx| {
-                view.find_query = "line".to_string();
-                view.refresh_find_matches();
-                cx.notify();
-                rev = view.find_revision;
-                before_find = view.rows_built();
+            // A scroll changes the offset: the cached rows rebuild.
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, cx| {
+                    view.screen.scroll_to(3);
+                    cx.notify();
+                });
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        let mut after_find = 0;
-        cx.update(|_window, app| {
-            after_find = root.read(app).view.read(app).rows_built();
-        });
-        assert!(
-            after_find > before_find,
-            "a find refresh invalidates the cached rows"
-        );
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, _cx| view.refresh_find_matches());
-        });
-        let mut rev_after = 0;
-        cx.update(|_window, app| {
-            rev_after = root.read(app).view.read(app).find_revision;
-        });
-        assert_eq!(
-            rev_after,
-            rev + 1,
-            "every refresh bumps the find revision, even with identical matches"
-        );
-
-        // Clearing the query bumps the revision too.
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, cx| {
-                view.find_query.clear();
-                view.schedule_find_refresh(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            let mut after_scroll = 0;
+            cx.update(|_window, app| {
+                after_scroll = root.read(app).view.read(app).rows_built();
             });
-        });
-        let mut rev_cleared = 0;
-        cx.update(|_window, app| {
-            rev_cleared = root.read(app).view.read(app).find_revision;
-        });
-        assert_eq!(
-            rev_cleared,
-            rev + 2,
-            "the empty-query clear bumps the find revision"
-        );
-    }
-    /// The snapshot the element paints for a fed grid contains the same
-    /// cells, cursor and selection the row-based path produced: the rows the
-    /// grid paints are the rows the engine puts on the screen, with the
-    /// selection painted as background spans across those cells.
-    #[gpui::test]
-    fn the_grid_snapshot_contains_the_content_the_engine_shows(cx: &mut gpui::TestAppContext) {
-        let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
-            view: cx.new(TerminalPane::new),
-        });
-        cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, _cx| {
-                view.feed("alpha[31m red[0m beta");
-                view.sel_anchor = Some((0, 0));
-                view.sel_cursor = Some((0, 5));
+            assert!(
+                after_scroll > after_feed,
+                "a scroll invalidates the cached rows"
+            );
+
+            // A selection on one visible row rebuilds exactly that row.
+            let mut before_selection = 0;
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, cx| {
+                    let row = view.viewport_cells()[0].0;
+                    view.sel_anchor = Some((row, 0));
+                    view.sel_cursor = Some((row, 4));
+                    cx.notify();
+                    before_selection = view.rows_built();
+                });
             });
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
+            cx.update(|window, cx| window.render_frame(cx));
+            let mut after_selection = 0;
+            cx.update(|_window, app| {
+                after_selection = root.read(app).view.read(app).rows_built();
+            });
+            assert_eq!(
+                after_selection - before_selection,
+                1,
+                "a one-row selection rebuilds exactly the selected row"
+            );
 
-        let (lines, cursor, selection_row) = cx.update(|_window, app| {
-            let view = root.read(app).view.clone();
-            view.update(app, |view, _cx| {
-                let snapshot = view.grid_snapshot(
-                    Theme::dark(),
-                    Some(crate::terminal_grid::CellSize {
-                        width: 8.0,
-                        height: 16.0,
-                    }),
-                    32,
-                );
-                let lines: Vec<String> = snapshot
-                    .rows
-                    .iter()
-                    .take(1)
-                    .map(|row| row.text.trim_end().to_string())
-                    .collect();
-                let selection: Vec<crate::terminal_grid::BgSpan> =
-                    snapshot.rows[0].bgs.iter().copied().collect();
-                (lines, snapshot.cursor, selection)
-            })
-        });
+            // A find refresh bumps the find revision even when the matches are
+            // identical - the count is not the fingerprint.
+            let mut rev = 0;
+            let mut before_find = 0;
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, cx| {
+                    view.find_query = "line".to_string();
+                    view.refresh_find_matches();
+                    cx.notify();
+                    rev = view.find_revision;
+                    before_find = view.rows_built();
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            let mut after_find = 0;
+            cx.update(|_window, app| {
+                after_find = root.read(app).view.read(app).rows_built();
+            });
+            assert!(
+                after_find > before_find,
+                "a find refresh invalidates the cached rows"
+            );
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| view.refresh_find_matches());
+            });
+            let mut rev_after = 0;
+            cx.update(|_window, app| {
+                rev_after = root.read(app).view.read(app).find_revision;
+            });
+            assert_eq!(
+                rev_after,
+                rev + 1,
+                "every refresh bumps the find revision, even with identical matches"
+            );
 
-        assert_eq!(lines.len(), 1, "the snapshot holds the fed viewport rows");
-        assert!(
-            lines[0].contains("red"),
-            "the fed colour reaches the snapshot: {lines:?}"
-        );
-        assert_eq!(
-            cursor,
-            Some((0, 14)),
-            "the cursor sits after the fed text, on the live screen"
-        );
-        assert!(
-            selection_row.iter().any(|span| span.first_col == 0
-                && span.end_col == 6
-                && span.color == Theme::dark().term_selection),
-            "the fed selection lands on the snapshot row: {selection_row:?}"
-        );
-    }
+            // Clearing the query bumps the revision too.
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, cx| {
+                    view.find_query.clear();
+                    view.schedule_find_refresh(cx);
+                });
+            });
+            let mut rev_cleared = 0;
+            cx.update(|_window, app| {
+                rev_cleared = root.read(app).view.read(app).find_revision;
+            });
+            assert_eq!(
+                rev_cleared,
+                rev + 2,
+                "the empty-query clear bumps the find revision"
+            );
+        }
+    );
+    // The snapshot the element paints for a fed grid contains the same
+    // cells, cursor and selection the row-based path produced: the rows the
+    // grid paints are the rows the engine puts on the screen, with the
+    // selection painted as background spans across those cells.
+    crate::orion_test!(
+        fn the_grid_snapshot_contains_the_content_the_engine_shows(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    view.feed("alpha[31m red[0m beta");
+                    view.sel_anchor = Some((0, 0));
+                    view.sel_cursor = Some((0, 5));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            let (lines, cursor, selection_row) = cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    let snapshot = view.grid_snapshot(
+                        Theme::dark(),
+                        Some(crate::terminal_grid::CellSize {
+                            width: 8.0,
+                            height: 16.0,
+                        }),
+                        32,
+                    );
+                    let lines: Vec<String> = snapshot
+                        .rows
+                        .iter()
+                        .take(1)
+                        .map(|row| row.text.trim_end().to_string())
+                        .collect();
+                    let selection: Vec<crate::terminal_grid::BgSpan> =
+                        snapshot.rows[0].bgs.to_vec();
+                    (lines, snapshot.cursor, selection)
+                })
+            });
+
+            assert_eq!(lines.len(), 1, "the snapshot holds the fed viewport rows");
+            assert!(
+                lines[0].contains("red"),
+                "the fed colour reaches the snapshot: {lines:?}"
+            );
+            assert_eq!(
+                cursor,
+                Some((0, 14)),
+                "the cursor sits after the fed text, on the live screen"
+            );
+            assert!(
+                selection_row.iter().any(|span| span.first_col == 0
+                    && span.end_col == 6
+                    && span.color == Theme::dark().term_selection),
+                "the fed selection lands on the snapshot row: {selection_row:?}"
+            );
+        }
+    );
 }
