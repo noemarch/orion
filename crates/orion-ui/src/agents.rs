@@ -81,7 +81,7 @@ pub fn agent_rows(snapshot: &Value) -> Vec<AgentRow> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn status_word_is_written_not_color_only() {
         let snapshot = serde_json::json!({
             "panes": [{ "pane_id": "p1", "agent_status": "working" }],
@@ -96,7 +96,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn missing_agent_fields_are_unavailable_not_defaulted() {
         let snapshot =
             serde_json::json!({ "panes": [{ "pane_id": "p1" }], "tabs": [], "workspaces": [] });
