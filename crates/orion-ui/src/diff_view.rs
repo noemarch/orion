@@ -499,6 +499,55 @@ impl ChangesView {
         self.error.as_deref()
     }
 
+    /// The last changed-file list a fetch answered (read-only; the review pane
+    /// mirrors it).
+    pub fn file_list(&self) -> Option<&RepoDiffFileList> {
+        self.list.as_ref()
+    }
+
+    /// The selected file's patch, once a fetch answered (read-only).
+    pub fn current_patch(&self) -> Option<&RepoDiffFilePatch> {
+        self.patch.as_ref()
+    }
+
+    /// The commit base being compared: the server's echo when the list names
+    /// one, otherwise the commit-scope input.
+    pub fn base(&self) -> Option<&str> {
+        self.list
+            .as_ref()
+            .and_then(|list| list.base.as_deref())
+            .or_else(|| (!self.base.trim().is_empty()).then_some(self.base.as_str()))
+    }
+
+    /// The commit head being compared: the server's echo when the list names
+    /// one, otherwise the commit-scope input.
+    pub fn head(&self) -> Option<&str> {
+        self.list
+            .as_ref()
+            .and_then(|list| list.head.as_deref())
+            .or_else(|| (!self.head.trim().is_empty()).then_some(self.head.as_str()))
+    }
+
+    /// Ask for fresh list and patch data (the review pane's Re-analyze): the
+    /// cached bodies are dropped so identical answers are re-parsed.
+    pub fn reanalyze(&mut self) {
+        self.retry();
+    }
+
+    /// Select the changed file at `index` in the current list, the way a click
+    /// in the list does. The review pane's tab strip selects through this seam.
+    pub fn select_file_at(&mut self, index: usize) {
+        let Some(file) = self
+            .list
+            .as_ref()
+            .and_then(|list| list.files.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        self.select_file(&file);
+    }
+
     /// The width the reader chose for the file list, if they chose one.
     pub fn list_width(&self) -> Option<f32> {
         self.list_width
