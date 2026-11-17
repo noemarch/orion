@@ -58,52 +58,52 @@ Only tokens overridden by `[data-theme="light"]` have a light value. Both column
 <!-- BEGIN GENERATED THEMES -->
 | Role | Token | Dark | Light |
 |------|-------|------|-------|
-| Surface/base | `--bg` | `#221d27` | `#faf5fa` |
-| Surface/panel | `--bg-panel` | `#221d27` | `#ffffff` |
-| Surface/elevated | `--bg-elevated` | `#2a2430` | `#f3ebf1` |
-| Surface/hover | `--bg-hover` | `#2e2a33` | `#ece1e9` |
-| Surface/input | `--bg-input` | `#28232e` | `#ffffff` |
-| Border | `--border` | `rgba(255, 255, 255, 0.06)` | `#e4d8e0` |
-| Border/strong | `--border-strong` | `rgba(255, 255, 255, 0.12)` | `#cbbcc7` |
+| Surface/base | `--bg` | `#0d1117` | `#faf5fa` |
+| Surface/panel | `--bg-panel` | `#10151d` | `#ffffff` |
+| Surface/elevated | `--bg-elevated` | `#151b24` | `#f3ebf1` |
+| Surface/hover | `--bg-hover` | `#1b2431` | `#ece1e9` |
+| Surface/input | `--bg-input` | `#0e131a` | `#ffffff` |
+| Border | `--border` | `#222b38` | `#e4d8e0` |
+| Border/strong | `--border-strong` | `#39434f` | `#cbbcc7` |
 | Chat bubble edge | `--bubble-border` | `var(--border)` | `var(--border)` |
-| Text/primary | `--text` | `#f2eef5` | `#501854` |
-| Text/dim | `--text-dim` | `#9a90a3` | `#7a5570` |
-| Text/strong | `--text-strong` | `#f2eef5` | `#2e0d31` |
-| Accent | `--accent` | `#a3185a` | `#a84370` |
-| Accent/tint | `--accent-tint` | `rgba(163, 24, 90, 0.12)` | `rgba(168, 67, 112, 0.1)` |
-| Primary | `--primary` | `#8f1a52` | `#a84370` |
-| Primary/hover | `--primary-hover` | `#a3185a` | `#c25081` |
-| Primary/text | `--primary-text` | `#f2eef5` | `#fff7fa` |
-| Primary/tint | `--primary-tint` | `rgba(143, 26, 82, 0.28)` | `rgba(168, 67, 112, 0.14)` |
-| Status/idle | `--status-idle` | `#9a93a6` | `#7a5570` |
-| Status/working | `--status-working` | `#7fc4de` | `#155a72` |
-| Status/blocked | `--status-blocked` | `#ff9a92` | `#a82323` |
-| Status/done | `--status-done` | `#8fd07a` | `#2f6317` |
-| Working/tint | `--status-working-tint` | `rgba(127, 196, 222, 0.14)` | `rgba(21, 90, 114, 0.12)` |
-| Blocked/tint | `--status-blocked-tint` | `rgba(255, 154, 146, 0.1)` | `rgba(168, 35, 35, 0.12)` |
-| Done/tint | `--status-done-tint` | `rgba(143, 208, 122, 0.14)` | `rgba(47, 99, 23, 0.12)` |
-| Indicator/working | `--indicator-working` | `#a3185a` | `#a84370` |
+| Text/primary | `--text` | `#c9d1d9` | `#501854` |
+| Text/dim | `--text-dim` | `#8b949e` | `#7a5570` |
+| Text/strong | `--text-strong` | `#e6edf3` | `#2e0d31` |
+| Accent | `--accent` | `#f778ba` | `#a84370` |
+| Accent/tint | `--accent-tint` | `rgba(247, 120, 186, 0.12)` | `rgba(168, 67, 112, 0.1)` |
+| Primary | `--primary` | `#f778ba` | `#a84370` |
+| Primary/hover | `--primary-hover` | `#ff90c8` | `#c25081` |
+| Primary/text | `--primary-text` | `#0d1117` | `#fff7fa` |
+| Primary/tint | `--primary-tint` | `rgba(247, 120, 186, 0.16)` | `rgba(168, 67, 112, 0.14)` |
+| Status/idle | `--status-idle` | `#8b949e` | `#7a5570` |
+| Status/working | `--status-working` | `#58a6ff` | `#155a72` |
+| Status/blocked | `--status-blocked` | `#d29922` | `#a82323` |
+| Status/done | `--status-done` | `#56d364` | `#2f6317` |
+| Working/tint | `--status-working-tint` | `rgba(88, 166, 255, 0.14)` | `rgba(21, 90, 114, 0.12)` |
+| Blocked/tint | `--status-blocked-tint` | `rgba(210, 153, 34, 0.14)` | `rgba(168, 35, 35, 0.12)` |
+| Done/tint | `--status-done-tint` | `rgba(86, 211, 100, 0.14)` | `rgba(47, 99, 23, 0.12)` |
+| Indicator/working | `--indicator-working` | `#58a6ff` | `#a84370` |
 | Indicator/blocked | `--indicator-blocked` | `#f85149` | `#cf222e` |
 | Indicator/done | `--indicator-done` | `#3fb950` | `#1a7f37` |
-| Indicator/idle | `--indicator-idle` | `#9a90a3` | `#7a5570` |
-| Indicator/unknown | `--indicator-unknown` | `#6c7086` | `#9ca0b0` |
+| Indicator/idle | `--indicator-idle` | `#8b949e` | `#7a5570` |
+| Indicator/unknown | `--indicator-unknown` | `#6e7681` | `#9ca0b0` |
 | Danger/tint | `--danger-tint` | `rgba(248, 81, 73, 0.12)` | `rgba(168, 35, 35, 0.1)` |
-| Danger/text | `--danger-text` | `#ffd9d4` | `#8f1d1d` |
-| Notice | `--notice` | `#d9a7ba` | `#a84370` |
-| Overlay/scrim | `--scrim` | `rgba(6, 4, 8, 0.64)` | `rgba(60, 30, 50, 0.32)` |
+| Danger/text | `--danger-text` | `#ffd0cf` | `#8f1d1d` |
+| Notice | `--notice` | `#d29922` | `#a84370` |
+| Overlay/scrim | `--scrim` | `rgba(1, 4, 9, 0.8)` | `rgba(60, 30, 50, 0.32)` |
 | Drawer shadow | `--shadow-drawer` | `0 0 40px rgba(0, 0, 0, 0.7)` | `0 0 40px rgba(40, 48, 60, 0.22)` |
 | Popover shadow | `--shadow-pop` | `0 16px 48px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--border)` | `0 16px 48px rgba(40, 48, 60, 0.16), 0 0 0 1px var(--border)` |
 | Card shadow | `--shadow-card` | `0 4px 16px rgba(0, 0, 0, 0.45)` | `0 4px 16px rgba(40, 48, 60, 0.07)` |
 | Document surface | `--pdf-page` | `#ffffff` | `#ffffff` |
-| Terminal/background | `--term-bg` | `#121016` | `#ffffff` |
-| Terminal/foreground | `--term-fg` | `#ecebf1` | `#501854` |
-| Terminal/cursor | `--term-cursor` | `#a3185a` | `#a84370` |
-| Terminal/selection | `--term-selection` | `#3a2433` | `#f2dbe6` |
-| Syntax/keyword | `--syntax-keyword` | `#ff8fa8` | `#a33a17` |
-| Syntax/string | `--syntax-string` | `#a8d48a` | `#4b6b18` |
-| Syntax/number | `--syntax-number` | `#d2a8ff` | `#8a3f7a` |
-| Syntax/type | `--syntax-type` | `#79c0ff` | `#155a72` |
-| Syntax/variable | `--syntax-variable` | `#ffb86b` | `#7a5418` |
+| Terminal/background | `--term-bg` | `#0d1117` | `#ffffff` |
+| Terminal/foreground | `--term-fg` | `#c9d1d9` | `#501854` |
+| Terminal/cursor | `--term-cursor` | `#f778ba` | `#a84370` |
+| Terminal/selection | `--term-selection` | `#1b2431` | `#f2dbe6` |
+| Syntax/keyword | `--syntax-keyword` | `#bb9af7` | `#a33a17` |
+| Syntax/string | `--syntax-string` | `#9ece6a` | `#4b6b18` |
+| Syntax/number | `--syntax-number` | `#ff9e64` | `#8a3f7a` |
+| Syntax/type | `--syntax-type` | `#7dcfff` | `#155a72` |
+| Syntax/variable | `--syntax-variable` | `#c0caf5` | `#7a5418` |
 | Syntax/meta | `--syntax-meta` | `#b49dd6` | `#5d4791` |
 | Alert/background | `--droplet-bg` | `#000` | `#000` |
 | Alert/text | `--droplet-text` | `#f5f5f7` | `#f5f5f7` |
@@ -113,6 +113,41 @@ Only tokens overridden by `[data-theme="light"]` have a light value. Both column
 | Alert/mark background | `--droplet-mark-bg` | `rgba(255, 255, 255, 0.1)` | `rgba(255, 255, 255, 0.1)` |
 | Alert/ring | `--droplet-ring` | `rgba(255, 255, 255, 0.1)` | `rgba(255, 255, 255, 0.1)` |
 | Alert/shadow | `--droplet-shadow` | `rgba(0, 0, 0, 0.35)` | `rgba(0, 0, 0, 0.35)` |
+| Surface/canvas | `--surface-canvas` | `#0d1117` | `#faf5fa` |
+| Surface/subtle | `--surface-subtle` | `#10151d` | `#ffffff` |
+| Surface/raised | `--surface-raised` | `#151b24` | `#f3ebf1` |
+| Surface/raised 2 | `--surface-raised-2` | `#1b2431` | `#ece1e9` |
+| Surface/raised 3 | `--surface-raised-3` | `#202a38` | `#e4d8e0` |
+| Border/soft | `--border-soft` | `#1a222d` | `#e4d8e0` |
+| Text/muted | `--text-muted` | `#8b949e` | `#7a5570` |
+| Text/faint | `--text-faint` | `#5e6671` | `#9ca0b0` |
+| Accent/emphasis | `--accent-emphasis` | `#f778ba` | `#a84370` |
+| Info/blue | `--info-blue` | `#6cb6ff` | `#155a72` |
+| Diff/add | `--diff-add` | `#56d364` | `#2f6317` |
+| Diff/del | `--diff-del` | `#f85149` | `#a82323` |
+| Warning/amber | `--warning-amber` | `#d29922` | `#8a5300` |
+| Review/purple | `--review-purple` | `#bc8cff` | `#8a3f7a` |
+| Diff/add fill | `--diff-add-fill` | `rgba(84, 160, 74, 0.16)` | `rgba(47, 99, 23, 0.12)` |
+| Diff/del fill | `--diff-del-fill` | `rgba(248, 81, 73, 0.13)` | `rgba(168, 35, 35, 0.1)` |
+| Diff/gutter | `--diff-gutter` | `#10151d` | `#f6f8fa` |
+| Diff/hunk background | `--diff-hunk-bg` | `#182031` | `#eef2f8` |
+| Diff/hunk text | `--diff-hunk-text` | `#8ea7c9` | `#57606a` |
+| Diff/code | `--diff-code` | `#c0caf5` | `#24292f` |
+| Diff/add text | `--diff-add-text` | `#c6f0c8` | `#1a7f37` |
+| Diff/del text | `--diff-del-text` | `#ffd0cf` | `#a82323` |
+| Composer/background | `--composer-bg` | `#0e131a` | `#ffffff` |
+| Composer/border | `--composer-border` | `#39434f` | `#d0d7de` |
+| Status/link | `--status-link` | `#7d9fc4` | `#0969da` |
+| Tab/active background | `--tab-active-bg` | `#111720` | `#f6f8fa` |
+| Tab/active marker | `--tab-active-marker` | `#a6d189` | `#2f6317` |
+| Inline code/background | `--inline-code-bg` | `#263044` | `#eff1f3` |
+| Inline code/text | `--inline-code-text` | `#ffb4d8` | `#a84370` |
+| Link/blue | `--link-blue` | `#a5c9ff` | `#0969da` |
+| Scrollbar/thumb | `--scrollbar-thumb` | `#2a3441` | `#d0d7de` |
+| Chip/border | `--chip-border` | `#6b7480` | `#8c959f` |
+| Badge/border | `--badge-border` | `#5c4a1f` | `#d4a72c` |
+| Badge/background | `--badge-bg` | `#2a2313` | `#fff8c5` |
+| Code/comment | `--code-comment` | `#6a7385` | `#6e7781` |
 
 ### Light terminal ANSI colours
 
