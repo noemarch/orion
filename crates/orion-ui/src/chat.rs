@@ -567,6 +567,13 @@ fn bounded_lines(lines: &[DiffLine]) -> (Vec<DiffLine>, bool) {
     (kept, false)
 }
 
+/// The Herd reference's chat reading size: 12.5px at comfortable density.
+/// `Theme::chat_prose_size()` keeps its design-table value (pinned by its own
+/// test); this local scale is what the chat lens actually draws prose at.
+fn chat_prose_px(theme: Theme) -> f32 {
+    12.5 * theme.density_scale()
+}
+
 /// The text style of one span: the Quiet Slate type scale, plus the span's own
 /// character (inline code, a link, bold, italic).
 fn span_style(base: &TextStyle, span: &TextSpan, theme: Theme, inline_code_size: f32) -> TextStyle {
@@ -575,10 +582,11 @@ fn span_style(base: &TextStyle, span: &TextSpan, theme: Theme, inline_code_size:
         style.font_family = "JetBrains Mono".into();
         // Inline code is `0.87em` of its line (DESIGN.md §Faces).
         style.font_size = px(inline_code_size).into();
-        style.background_color = Some(theme.surface_hover.into());
+        style.background_color = Some(theme.inline_code_bg.into());
+        style.color = theme.inline_code_text.into();
     }
     if span.link && span.target.as_deref().is_some_and(opens_in_browser) {
-        style.color = theme.accent.into();
+        style.color = theme.link_blue.into();
         style.underline = Some(gpui_kit::UnderlineStyle {
             thickness: px(1.0),
             ..Default::default()
@@ -598,18 +606,22 @@ fn render_markdown_line(
     line: &MarkdownLine,
     theme: Theme,
     row_seq: &mut usize,
+    thinking: bool,
 ) -> impl IntoElement {
     let style = block_style(&line.style);
     let scale = theme.density_scale();
-    // The reading scale (DESIGN.md §Scale): prose on `--fs-chat`, a code
-    // block on `--fs-sm`, headings on `--fs-xl`/`--fs-lg`.
+    // The reading scale (DESIGN.md §Scale): prose on the Herd reference's
+    // 12.5px mono scale, a code block on `--fs-sm`, headings on
+    // `--fs-xl`/`--fs-lg` so they stay bold and larger than prose.
     let size = match &line.style {
         BlockKind::Heading(level) => theme.chat_heading_size(*level),
         BlockKind::Code => theme.chat_code_size(),
-        _ => theme.chat_prose_size(),
+        _ => chat_prose_px(theme),
     };
     let mut base = TextStyle {
-        color: crate::theme::hsla(if style.quote {
+        color: crate::theme::hsla(if thinking {
+            theme.text_faint
+        } else if style.quote {
             theme.text_dim
         } else if style.bold {
             theme.text_strong
@@ -618,13 +630,14 @@ fn render_markdown_line(
         }),
         font_size: px(size).into(),
         line_height: gpui_kit::relative(CHAT_LINE_HEIGHT),
+        font_family: "JetBrains Mono".into(),
         ..Default::default()
     };
+    if thinking {
+        base.font_style = FontStyle::Italic;
+    }
     if style.bold {
         base.font_weight = FontWeight::BOLD;
-    }
-    if style.mono {
-        base.font_family = "JetBrains Mono".into();
     }
 
     // A list item draws its own bullet; the marker is not part of the prose.
@@ -658,7 +671,11 @@ fn render_markdown_line(
     if line.style.list_depth().is_some() {
         row = row.child(
             div()
-                .text_color(theme.text_dim)
+                .text_color(if thinking {
+                    theme.text_faint
+                } else {
+                    theme.text_dim
+                })
                 .text_size(px(size))
                 .child("• "),
         );
@@ -706,7 +723,7 @@ fn render_code_block(lines: &[MarkdownLine], theme: Theme) -> impl IntoElement {
         .flex()
         .flex_col()
         .rounded_md()
-        .bg(theme.surface_elevated)
+        .bg(theme.surface_raised)
         .px_2()
         .py_1()
         .debug_selector(|| "chat-code-block".to_string());
@@ -720,11 +737,22 @@ fn render_code_block(lines: &[MarkdownLine], theme: Theme) -> impl IntoElement {
 
 /// A horizontal rule: a quiet line, not three dashes.
 fn render_rule(theme: Theme) -> impl IntoElement {
-    div().h(px(1.0)).w_full().mt_1().mb_1().bg(theme.border)
+    div()
+        .h(px(1.0))
+        .w_full()
+        .mt_1()
+        .mb_1()
+        .bg(theme.border_soft)
 }
 
-/// Markdown prose, in the Quiet Slate type scale.
-fn render_text_block(text: &str, theme: Theme, row_seq: &mut usize) -> Vec<gpui_kit::AnyElement> {
+/// Markdown prose, in the Quiet Slate type scale. `thinking` paints the body
+/// of a thinking row in faint italic mono instead of ordinary prose.
+fn render_text_block(
+    text: &str,
+    theme: Theme,
+    row_seq: &mut usize,
+    thinking: bool,
+) -> Vec<gpui_kit::AnyElement> {
     let lines = parse_markdown(text);
     let mut blocks: Vec<gpui_kit::AnyElement> = Vec::new();
     let mut index = 0;
@@ -742,7 +770,7 @@ fn render_text_block(text: &str, theme: Theme, row_seq: &mut usize) -> Vec<gpui_
         if line.style.is_rule() {
             blocks.push(render_rule(theme).into_any_element());
         } else {
-            blocks.push(render_markdown_line(line, theme, row_seq).into_any_element());
+            blocks.push(render_markdown_line(line, theme, row_seq, thinking).into_any_element());
         }
         index += 1;
     }
@@ -767,7 +795,7 @@ impl Render for ChatView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme.surface_base)
+            .bg(theme.surface_canvas)
             .text_color(theme.text)
             .on_scroll(cx.listener(|this, ev: &ScrollEvent, window, cx| {
                 let delta = f32::from(ev.delta.pixel_delta(window.line_height()).y);
@@ -833,7 +861,15 @@ impl Render for ChatView {
             );
         }
 
-        root = root.child(self.composer.clone());
+        root = root.child(
+            div()
+                .id("chat-composer-slot")
+                .debug_selector(|| "chat-composer-slot".to_string())
+                .flex()
+                .justify_center()
+                .w_full()
+                .child(self.composer.clone()),
+        );
 
         // The focus follows the conversation: the card when the agent asks, the
         // composer's box when it is the reader's turn again.
@@ -858,6 +894,7 @@ impl Render for ChatView {
 
 impl ChatView {
     fn render_status_bar(&self) -> impl IntoElement {
+        let theme = Theme::current();
         let source = if self.model.is_loading() {
             "loading…".to_string()
         } else {
@@ -877,9 +914,13 @@ impl ChatView {
             .gap(px(8.0))
             .h(px(28.0))
             .px_3()
-            .text_size(px(11.0 * Theme::current().density_scale()))
-            .text_color(Theme::current().text_dim)
-            .child(format!("{source} · {count} turns · {status}"))
+            .border_t_1()
+            .border_color(theme.border_soft)
+            .font_family("JetBrains Mono")
+            .text_size(px(11.0 * theme.density_scale()))
+            .text_color(theme.text_faint)
+            .child(div().text_color(theme.status_link).child(source))
+            .child(format!(" · {count} turns · {status}"))
     }
 
     /// The loading state: a skeleton of the turns that are on their way.
@@ -977,16 +1018,12 @@ impl ChatView {
             .p_3()
             .rounded_md()
             .bg(if is_user {
-                theme.surface_elevated
+                theme.surface_raised_2
             } else {
-                theme.surface_panel
+                theme.surface_raised
             })
             .border_1()
-            .border_color(if is_user {
-                theme.border_strong
-            } else {
-                theme.border
-            });
+            .border_color(theme.border_soft);
 
         // The role and the time it happened: a turn without them is a rumour.
         let stamp = format_timestamp(turn.ts.as_deref().or(turn.end_ts.as_deref()));
@@ -1018,7 +1055,7 @@ impl ChatView {
     fn render_prose(&mut self, text: &str, theme: Theme) -> gpui_kit::AnyElement {
         let mut column = div().id(self.next_row_id()).flex().flex_col();
         let mut row_seq = self.row_seq;
-        for line in render_text_block(text, theme, &mut row_seq) {
+        for line in render_text_block(text, theme, &mut row_seq, false) {
             column = column.child(line);
         }
         self.row_seq = row_seq;
@@ -1043,7 +1080,7 @@ impl ChatView {
                     .flex_col()
                     .gap(px(4.0))
                     .rounded_md()
-                    .bg(theme.surface_elevated);
+                    .bg(theme.surface_raised);
                 folded = folded.child(
                     Button::new(format!("chat-thinking-{turn_index}-{part_index}"))
                         .debug_selector(|| "chat-thinking".to_string())
@@ -1066,7 +1103,7 @@ impl ChatView {
                         .px_2()
                         .py_1();
                     let mut row_seq = self.row_seq;
-                    for line in render_text_block(&text, theme, &mut row_seq) {
+                    for line in render_text_block(&text, theme, &mut row_seq, true) {
                         body = body.child(line);
                     }
                     self.row_seq = row_seq;
@@ -1170,7 +1207,7 @@ impl ChatView {
             .flex_col()
             .gap(px(4.0))
             .rounded_md()
-            .bg(theme.surface_panel)
+            .bg(theme.surface_raised)
             .p_2();
 
         // The header: caret, verb, object (DESIGN.md §5).
@@ -1312,7 +1349,7 @@ impl ChatView {
             .flex()
             .flex_col()
             .rounded_md()
-            .bg(theme.surface_elevated)
+            .bg(theme.surface_raised_2)
             .px_2()
             .py_1()
             // A long line stays inside the panel; the whole output is in the
@@ -1378,14 +1415,14 @@ impl ChatView {
             .flex()
             .flex_col()
             .rounded_md()
-            .bg(theme.surface_elevated)
+            .bg(theme.surface_raised_2)
             .px_2()
             .py_1();
         for line in lines {
             let color = match line {
-                DiffLine::Added(_) => theme.status_done,
-                DiffLine::Removed(_) => theme.status_blocked,
-                DiffLine::Context(_) => theme.text_dim,
+                DiffLine::Added(_) => theme.diff_add,
+                DiffLine::Removed(_) => theme.diff_del,
+                DiffLine::Context(_) => theme.text_muted,
             };
             let text_style = TextStyle {
                 color: crate::theme::hsla(color),
@@ -1509,7 +1546,9 @@ impl ChatView {
                 .flex_col()
                 .gap(px(4.0))
                 .rounded_md()
-                .bg(theme.surface_panel)
+                .bg(theme.surface_raised)
+                .border_1()
+                .border_color(theme.border_soft)
                 .p_2()
                 .cursor_pointer()
                 .child(header)

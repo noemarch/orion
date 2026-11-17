@@ -21,21 +21,18 @@
 //! `workspace.rs` now re-exports this module's `WorkspaceSidebar` so
 //! existing imports keep working.
 
-use crate::agents::agent_rows;
+use crate::agents::{agent_rows, AgentRow};
 use crate::terminal_tree::{status_token, terminal_rows, TerminalRow, TerminalSource};
 use crate::theme::Theme;
-use gpui_kit::component::{avatar::Avatar, button::Button, button::ButtonVariants, Sizable};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::{avatar::Avatar, button::Button, button::ButtonVariants, Icon, Sizable};
 use gpui_kit::*;
-use gpui_kit::{div, px, Context, FocusHandle, Render, Styled, StyledText, TextStyle, Window};
+use gpui_kit::{div, px, Context, FocusHandle, Render, Styled, Window};
 use orion_core::protocol::AgentStatus;
 use orion_core::runtime::Runtime;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Sidebar width (matches `app.rs`'s column and `terminal.rs`'s
-/// `SIDEBAR_WIDTH_PX`).
-pub const SIDEBAR_WIDTH_PX: f32 = 280.0;
 
 /// One workspace row of the sidebar: mark + title + status on a single row.
 #[derive(Debug, Clone)]
@@ -417,6 +414,561 @@ impl WorkspaceSidebar {
             _ => base,
         }
     }
+
+    /// A 12px platform window light. The four colors come from status and
+    /// indicator tokens, so the traffic-light motif stays inside the palette
+    /// instead of hardcoding hex in view code.
+    fn window_light(color: gpui_kit::Rgba) -> impl IntoElement {
+        div().size(px(12.0)).rounded_full().bg(color)
+    }
+
+    /// The 48px titlebar: four window lights, the brand mark, the "Orion"
+    /// wordmark and the two leading view icons.
+    fn render_titlebar(&self, theme: &Theme, scale: f32) -> impl IntoElement {
+        div()
+            .id("sidebar-titlebar")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(9.0 * scale))
+            .h(px(48.0))
+            .flex_shrink_0()
+            .px(px(16.0 * scale))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0 * scale))
+                    .mr(px(8.0 * scale))
+                    .child(Self::window_light(theme.indicator_blocked))
+                    .child(Self::window_light(theme.warning_amber))
+                    .child(Self::window_light(theme.status_done))
+                    .child(Self::window_light(theme.text_faint)),
+            )
+            .child(
+                div()
+                    .size(px(18.0 * scale))
+                    .rounded(px(5.0 * scale))
+                    .bg(theme.accent_emphasis)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .size(px(4.0 * scale))
+                            .rounded_full()
+                            .bg(theme.surface_canvas),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(14.0 * scale))
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(theme.text_strong)
+                    .child(if self.rail {
+                        String::new()
+                    } else {
+                        "Orion".to_string()
+                    }),
+            )
+            .child(div().flex_1())
+            .child(
+                Icon::new(IconName::Menu)
+                    .size(px(15.0 * scale))
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                Icon::new(IconName::PanelLeft)
+                    .size(px(15.0 * scale))
+                    .text_color(theme.text_muted),
+            )
+    }
+
+    /// The 44px search row: magnifier, placeholder and three trailing tools.
+    /// The square-plus tool is the live New Workspace control; the other two
+    /// are the reference's quiet affordances.
+    fn render_search_row(
+        &self,
+        theme: &Theme,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("sidebar-search")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0 * scale))
+            .h(px(44.0))
+            .flex_shrink_0()
+            .px(px(16.0 * scale))
+            .border_b_1()
+            .border_color(theme.border_soft)
+            .child(
+                Icon::new(IconName::Search)
+                    .size(px(15.0 * scale))
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_size(px(13.0 * scale))
+                    .text_color(theme.text_faint)
+                    .child(if self.rail {
+                        String::new()
+                    } else {
+                        "Search".to_string()
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0 * scale))
+                    .child(
+                        Icon::new(IconName::Settings2)
+                            .size(px(15.0 * scale))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        Button::new("new-workspace-button")
+                            .ghost()
+                            .icon(IconName::Plus)
+                            .min_h(px(44.0))
+                            .min_w(px(44.0))
+                            .on_click(cx.listener(|_this, _, _, cx| {
+                                cx.emit(SidebarEvent::NewWorkspace);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Icon::new(IconName::SquareTerminal)
+                            .size(px(15.0 * scale))
+                            .text_color(theme.text_muted),
+                    ),
+            )
+    }
+
+    /// A quiet section label with a real count badge. The caller passes an
+    /// already-blanked label in rail mode.
+    fn section_header(label: &str, count: usize, theme: &Theme, scale: f32) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0 * scale))
+            .h(px(30.0 * scale))
+            .px(px(16.0 * scale))
+            .text_size(px(11.0 * scale))
+            .text_color(theme.text_muted)
+            .child(label.to_string())
+            .child(div().flex_1())
+            .child(
+                div()
+                    .px(px(6.0 * scale))
+                    .py(px(1.0 * scale))
+                    .rounded(px(4.0 * scale))
+                    .bg(theme.badge_bg)
+                    .border_1()
+                    .border_color(theme.badge_border)
+                    .text_color(theme.text_faint)
+                    .child(count.to_string()),
+            )
+    }
+
+    /// A workspace rendered as a reference-style session row: agent mark and
+    /// label on top, real cwd/agent below, status dot on the right. Clicking
+    /// the row focuses its pane; the close control stops propagation.
+    fn render_workspace_row(
+        &mut self,
+        ws: &WorkspaceEntry,
+        theme: &Theme,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_chosen = ws.focused;
+        let mark = ws
+            .agent
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_ascii_uppercase()
+            .to_string();
+        let pane_id = ws.focus_pane.clone();
+        let ws_id = ws.id.clone();
+        let sub = if self.rail {
+            String::new()
+        } else {
+            ws.cwd.clone().unwrap_or_else(|| ws.agent.clone())
+        };
+        let mut row = div()
+            .id(self.next_row_id())
+            .flex()
+            .flex_col()
+            .gap(px(4.0 * scale))
+            .min_h(px(44.0))
+            .px(px(14.0 * scale))
+            .py(px(9.0 * scale))
+            .border_l_2()
+            .border_color(if is_chosen {
+                theme.accent_emphasis
+            } else {
+                Theme::transparent()
+            })
+            .bg(if is_chosen {
+                theme.surface_raised_2
+            } else {
+                Theme::transparent()
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0 * scale))
+                    .child(Avatar::new().name(mark).with_size(px(20.0 * scale)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .text_size(px(13.0 * scale))
+                            .text_color(if is_chosen {
+                                theme.text_strong
+                            } else {
+                                theme.text
+                            })
+                            .child(if self.rail {
+                                String::new()
+                            } else {
+                                ws.label.clone()
+                            }),
+                    )
+                    .child(if self.rail {
+                        div().id(self.next_row_id()).into_any_element()
+                    } else {
+                        Button::new(self.next_row_id())
+                            .text()
+                            .child(
+                                div()
+                                    .text_size(px(11.0 * scale))
+                                    .text_color(theme.text_faint)
+                                    .child("×"),
+                            )
+                            .min_h(px(44.0))
+                            .min_w(px(44.0))
+                            .on_click(cx.listener(move |_this, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(SidebarEvent::CloseWorkspace(ws_id.clone()));
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    })
+                    .child(
+                        div()
+                            .size(px(8.0))
+                            .rounded_full()
+                            .bg(Self::status_color(ws.status, theme, self.pulse_phase))
+                            .id(self.next_row_id()),
+                    ),
+            )
+            .child(
+                div()
+                    .pl(px(28.0 * scale))
+                    .truncate()
+                    .text_size(px(11.0 * scale))
+                    .text_color(theme.text_muted)
+                    .child(sub),
+            );
+
+        if let Some(pane_id) = pane_id {
+            row = row.on_click(cx.listener(move |this, _, _, cx| {
+                this.focus_pane(&pane_id);
+                cx.emit(SidebarEvent::PaneFocused(pane_id.clone()));
+                cx.notify();
+            }));
+        }
+        row
+    }
+
+    /// An agent rendered as a session row: title, real context, written status
+    /// word and a non-rose status dot. Clicking focuses the agent's pane.
+    fn render_agent_row(
+        &mut self,
+        agent: &AgentRow,
+        theme: &Theme,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let pane_id = agent.pane_id.clone();
+        let mark = agent
+            .title
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_ascii_uppercase()
+            .to_string();
+        div()
+            .id(self.next_row_id())
+            .flex()
+            .flex_col()
+            .gap(px(4.0 * scale))
+            .min_h(px(44.0))
+            .px(px(14.0 * scale))
+            .py(px(9.0 * scale))
+            .border_l_2()
+            .border_color(if agent.selected {
+                theme.accent_emphasis
+            } else {
+                Theme::transparent()
+            })
+            .bg(if agent.selected {
+                theme.surface_raised_2
+            } else {
+                Theme::transparent()
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0 * scale))
+                    .child(Avatar::new().name(mark).with_size(px(20.0 * scale)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .text_size(px(13.0 * scale))
+                            .text_color(if agent.selected {
+                                theme.text_strong
+                            } else {
+                                theme.text
+                            })
+                            .child(if self.rail {
+                                String::new()
+                            } else {
+                                agent.title.clone()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.0 * scale))
+                            .text_color(theme.text_muted)
+                            .child(if self.rail {
+                                String::new()
+                            } else {
+                                agent.status_word().to_string()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .size(px(8.0))
+                            .rounded_full()
+                            .bg(Self::status_color(agent.status, theme, self.pulse_phase))
+                            .id(self.next_row_id()),
+                    ),
+            )
+            .child(
+                div()
+                    .pl(px(28.0 * scale))
+                    .truncate()
+                    .text_size(px(11.0 * scale))
+                    .text_color(theme.text_muted)
+                    .child(if self.rail {
+                        String::new()
+                    } else {
+                        agent.context.clone()
+                    }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.focus_pane(&pane_id);
+                cx.emit(SidebarEvent::PaneFocused(pane_id.clone()));
+                cx.notify();
+            }))
+    }
+
+    /// A terminal rendered as a quiet indented row with its real status badge.
+    fn render_terminal_row(
+        &mut self,
+        row: &TerminalRow,
+        theme: &Theme,
+        scale: f32,
+    ) -> impl IntoElement {
+        let label = terminal_label(row);
+        let status = status_token(row.status.as_deref()).and_then(AgentStatus::from_wire);
+        let badge = status.map(|status| Self::status_color(status, theme, self.pulse_phase));
+        div()
+            .id(self.next_row_id())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0 * scale))
+            .min_h(px(44.0))
+            .pl(px((14.0 + row.depth as f32 * 12.0) * scale))
+            .pr(px(14.0 * scale))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_size(px(12.0 * scale))
+                    .text_color(theme.text)
+                    .child(if self.rail { String::new() } else { label }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .children(badge.map(|color| div().size(px(8.0)).rounded_full().bg(color))),
+            )
+    }
+
+    /// The reference's bottom side-section: Working and Settled counts derived
+    /// from live agent statuses, with real agent titles in the side-item slots.
+    /// The screenshot's time labels are fabricated and are never reproduced.
+    fn render_status_section(
+        &self,
+        agents: &[AgentRow],
+        working: usize,
+        settled: usize,
+        theme: &Theme,
+        scale: f32,
+    ) -> impl IntoElement {
+        let mut section = div()
+            .id("sidebar-status-section")
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0 * scale))
+                    .h(px(45.0))
+                    .px(px(16.0 * scale))
+                    .text_size(px(12.0 * scale))
+                    .text_color(theme.text_muted)
+                    .child(if self.rail {
+                        String::new()
+                    } else {
+                        "Working".to_string()
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .px(px(6.0 * scale))
+                            .rounded(px(4.0 * scale))
+                            .bg(theme.badge_bg)
+                            .border_1()
+                            .border_color(theme.badge_border)
+                            .text_color(theme.text_faint)
+                            .child(working.to_string()),
+                    )
+                    .child(
+                        Icon::new(IconName::ChevronRight)
+                            .size(px(13.0 * scale))
+                            .text_color(theme.text_faint),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0 * scale))
+                    .h(px(45.0))
+                    .px(px(16.0 * scale))
+                    .text_size(px(12.0 * scale))
+                    .text_color(theme.text_muted)
+                    .child(if self.rail {
+                        String::new()
+                    } else {
+                        "Settled".to_string()
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .px(px(6.0 * scale))
+                            .rounded(px(4.0 * scale))
+                            .bg(theme.badge_bg)
+                            .border_1()
+                            .border_color(theme.badge_border)
+                            .text_color(theme.text_faint)
+                            .child(settled.to_string()),
+                    ),
+            );
+
+        for agent in agents.iter().take(3) {
+            section = section.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0 * scale))
+                    .h(px(45.0))
+                    .pl(px(28.0 * scale))
+                    .pr(px(16.0 * scale))
+                    .text_size(px(12.0 * scale))
+                    .text_color(theme.text)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .child(if self.rail {
+                                String::new()
+                            } else {
+                                agent.title.clone()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.0 * scale))
+                            .text_color(theme.text_faint)
+                            .child(if self.rail {
+                                String::new()
+                            } else {
+                                agent.status_word().to_string()
+                            }),
+                    ),
+            );
+        }
+        section
+    }
+
+    /// The 40px bottom icon bar.
+    fn render_bottom_bar(&self, theme: &Theme, scale: f32) -> impl IntoElement {
+        div()
+            .id("sidebar-bottom-bar")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(18.0 * scale))
+            .h(px(40.0))
+            .flex_shrink_0()
+            .px(px(16.0 * scale))
+            .border_t_1()
+            .border_color(theme.border_soft)
+            .child(
+                Icon::new(IconName::SquareTerminal)
+                    .size(px(15.0 * scale))
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                Icon::new(IconName::LayoutDashboard)
+                    .size(px(15.0 * scale))
+                    .text_color(theme.text_muted),
+            )
+    }
 }
 
 fn parse_status(raw: Option<&str>) -> AgentStatus {
@@ -473,322 +1025,92 @@ impl Render for WorkspaceSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         let scale = theme.density_scale();
-        let row_h = theme.row_height() * scale;
-        let focused_id = self
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.get("focused_pane_id"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
         let workspaces = self.workspaces();
         let agents = self.snapshot.as_ref().map(agent_rows).unwrap_or_default();
         let terminal_entries = self.runtime_terminals();
 
-        let empty = workspaces.is_empty();
-        let list = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px_2()
-            .py_2()
-            .children(workspaces.iter().map(|ws| {
-                let is_chosen = ws.focused;
-                let mark = ws
-                    .agent
-                    .chars()
-                    .next()
-                    .unwrap_or('?')
-                    .to_ascii_uppercase()
-                    .to_string();
-                let pane_id = ws.focus_pane.clone();
-                let ws_id = ws.id.clone();
-                let row = div()
-                    .id(self.next_row_id())
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0 * scale))
-                    .min_h(px(row_h.max(44.0)))
-                    .px_2()
-                    .rounded_md()
-                    .bg(if is_chosen {
-                        theme.surface_hover
-                    } else {
-                        Theme::transparent()
-                    })
-                    // Kit avatar carries the agent initial; it picks its own
-                    // identity tint from the initial instead of the old
-                    // hand-rolled accent tile.
-                    .child(Avatar::new().name(mark).with_size(px(22.0 * scale)))
-                    .child(
-                        div().flex_1().min_w(px(0.0)).overflow_hidden().child(
-                            StyledText::new(if self.rail {
-                                String::new()
-                            } else {
-                                ws.label.clone()
-                            })
-                            .with_default_highlights(
-                                &TextStyle {
-                                    color: if is_chosen {
-                                        theme.text_strong.into()
-                                    } else {
-                                        theme.text.into()
-                                    },
-                                    font_size: gpui_kit::rems(0.875).into(),
-                                    ..Default::default()
-                                },
-                                [],
-                            ),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_end()
-                            .gap(px(4.0 * scale))
-                            .child(if self.rail {
-                                div().id(self.next_row_id()).into_any_element()
-                            } else {
-                                // Kit text button for the close glyph: the
-                                // text variant stays transparent on hover (the
-                                // ghost variant would wash rose), and the
-                                // 20px box keeps the old hit target.
-                                Button::new(self.next_row_id())
-                                    .text()
-                                    .child(
-                                        div()
-                                            .text_size(px(11.0 * scale))
-                                            .text_color(theme.text_dim)
-                                            .child("×"),
-                                    )
-                                    .size(px(20.0 * scale))
-                                    .on_click(cx.listener(move |_this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        cx.emit(SidebarEvent::CloseWorkspace(ws_id.clone()));
-                                        cx.notify();
-                                    }))
-                                    .into_any_element()
-                            })
-                            .child(
-                                div()
-                                    .size(px(8.0))
-                                    .rounded_full()
-                                    .bg(Self::status_color(ws.status, &theme, self.pulse_phase))
-                                    .id(self.next_row_id()),
-                            ),
-                    );
-                let row = if let Some(pane_id) = pane_id {
-                    row.on_click(cx.listener(move |this, _, _, cx| {
-                        this.focus_pane(&pane_id);
-                        cx.emit(SidebarEvent::PaneFocused(pane_id.clone()));
-                        cx.notify();
-                    }))
-                } else {
-                    row
-                };
-                row
-            }));
+        // Counts come from live agent statuses; no number here is invented.
+        let working = agents
+            .iter()
+            .filter(|a| matches!(a.status, AgentStatus::Working | AgentStatus::Blocked))
+            .count();
+        let settled = agents
+            .iter()
+            .filter(|a| matches!(a.status, AgentStatus::Done | AgentStatus::Idle))
+            .count();
 
-        let _ = focused_id;
-        let mut sidebar = div()
+        let mut sessions = div()
+            .id("sidebar-sessions")
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .pb(px(8.0 * scale))
+            .child(Self::section_header(
+                if self.rail { "" } else { "WORKSPACES" },
+                workspaces.len(),
+                &theme,
+                scale,
+            ))
+            .children(
+                workspaces
+                    .iter()
+                    .map(|ws| self.render_workspace_row(ws, &theme, scale, cx)),
+            )
+            .child(Self::section_header(
+                if self.rail { "" } else { "AGENTS" },
+                agents.len(),
+                &theme,
+                scale,
+            ))
+            .children(
+                agents
+                    .iter()
+                    .map(|agent| self.render_agent_row(agent, &theme, scale, cx)),
+            );
+
+        // The terminal section stays conditional on non-empty real data.
+        if !terminal_entries.is_empty() {
+            sessions = sessions
+                .child(Self::section_header(
+                    if self.rail { "" } else { "TERMINALS" },
+                    terminal_entries.len(),
+                    &theme,
+                    scale,
+                ))
+                .children(
+                    terminal_entries
+                        .iter()
+                        .map(|row| self.render_terminal_row(row, &theme, scale)),
+                );
+        }
+
+        if workspaces.is_empty() {
+            sessions = sessions.child(
+                div()
+                    .px(px(16.0 * scale))
+                    .py(px(10.0 * scale))
+                    .text_size(px(12.0 * scale))
+                    .text_color(theme.text_faint)
+                    .child(if self.rail {
+                        String::new()
+                    } else {
+                        "No workspaces yet — open a workspace to begin.".to_string()
+                    }),
+            );
+        }
+
+        div()
             .id("workspace-sidebar")
             .track_focus(&self.focus_handle)
             .flex()
-            .flex()
             .flex_col()
             .size_full()
-            .bg(theme.surface_panel)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .px_2()
-                    .py_1()
-                    .text_size(px(11.0 * scale))
-                    .text_color(theme.text_dim)
-                    .child("WORKSPACES")
-                    .child(div().flex_1())
-                    // Kit secondary button: `sync_gpui_kit` maps the kit
-                    // secondary token to `surface_elevated`/`text`, so this
-                    // paints exactly like the old hand-rolled tile. The 44px
-                    // minimums keep the touch target.
-                    .child(
-                        Button::new("new-workspace-button")
-                            .secondary()
-                            .child(div().text_size(px(11.0 * scale)).child("+"))
-                            .min_h(px(44.0))
-                            .min_w(px(44.0))
-                            .on_click(cx.listener(|_this, _, _, cx| {
-                                cx.emit(SidebarEvent::NewWorkspace);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(list)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .px_2()
-                    .py_1()
-                    .text_size(px(11.0 * scale))
-                    .text_color(theme.text_dim)
-                    .child("AGENTS"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .px_2()
-                    .py_2()
-                    .children(agents.iter().map(|agent| {
-                        let pane_id = agent.pane_id.clone();
-                        div()
-                            .id(self.next_row_id())
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0 * scale))
-                            .min_h(px(row_h.max(44.0)))
-                            .px_2()
-                            .rounded_md()
-                            .bg(if agent.selected {
-                                theme.surface_hover
-                            } else {
-                                Theme::transparent()
-                            })
-                            // Kit avatar for the agent initial, same as the
-                            // workspace rows above.
-                            .child(
-                                Avatar::new()
-                                    .name(
-                                        agent
-                                            .title
-                                            .chars()
-                                            .next()
-                                            .unwrap_or('?')
-                                            .to_ascii_uppercase()
-                                            .to_string(),
-                                    )
-                                    .with_size(px(22.0 * scale)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(12.0 * scale))
-                                            .text_color(theme.text)
-                                            .child(agent.title.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(11.0 * scale))
-                                            .text_color(theme.text_dim)
-                                            .child(agent.context.clone()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(6.0 * scale))
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_size(px(10.0 * scale))
-                                            .text_color(theme.text_dim)
-                                            .child(agent.status_word()),
-                                    )
-                                    .child(
-                                        div()
-                                            .size(px(8.0))
-                                            .rounded_full()
-                                            .bg(Self::status_color(
-                                                agent.status,
-                                                &theme,
-                                                self.pulse_phase,
-                                            ))
-                                            .id(self.next_row_id()),
-                                    ),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.focus_pane(&pane_id);
-                                cx.emit(SidebarEvent::PaneFocused(pane_id.clone()));
-                                cx.notify();
-                            }))
-                    })),
-            );
-
-        if !terminal_entries.is_empty() {
-            sidebar = sidebar
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .px_2()
-                        .py_1()
-                        .text_size(px(11.0 * scale))
-                        .text_color(theme.text_dim)
-                        .child("TERMINALS"),
-                )
-                .child(div().flex().flex_col().gap_1().px_2().py_2().children(
-                    terminal_entries.iter().map(|row| {
-                        let label = terminal_label(row);
-                        let status =
-                            status_token(row.status.as_deref()).and_then(AgentStatus::from_wire);
-                        let badge = status
-                            .map(|status| Self::status_color(status, &theme, self.pulse_phase));
-                        div()
-                            .id(self.next_row_id())
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0 * scale))
-                            .min_h(px(row_h.max(44.0)))
-                            .pl(px(row.depth as f32 * 12.0 * scale))
-                            .pr_2()
-                            .rounded_md()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .truncate()
-                                    .text_size(px(12.0 * scale))
-                                    .text_color(theme.text)
-                                    .child(label),
-                            )
-                            .child(div().flex_none().flex().items_center().children(
-                                badge.map(|color| div().size(px(8.0)).rounded_full().bg(color)),
-                            ))
-                    }),
-                ));
-        }
-
-        sidebar.child(div().flex_1().child(if empty {
-            div()
-                .px_2()
-                .py_1()
-                .text_size(px(12.0 * scale))
-                .text_color(theme.text_dim)
-                .child("No workspaces yet — open a workspace to begin.")
-        } else {
-            div()
-        }))
+            .bg(theme.surface_canvas)
+            .child(self.render_titlebar(&theme, scale))
+            .child(self.render_search_row(&theme, scale, cx))
+            .child(sessions)
+            .child(self.render_status_section(&agents, working, settled, &theme, scale))
+            .child(self.render_bottom_bar(&theme, scale))
     }
 }
 
@@ -801,7 +1123,7 @@ mod tests {
         fn sidebar_renders_empty_state_without_panic(cx: &mut gpui_kit::TestAppContext) {
             use gpui_kit::{point, size};
             let cx = cx.add_empty_window();
-            cx.draw(point(px(0.), px(0.)), size(px(280.), px(800.)), |_, cx| {
+            cx.draw(point(px(0.), px(0.)), size(px(264.), px(800.)), |_, cx| {
                 cx.new(WorkspaceSidebar::new).into_any_element()
             });
         }
@@ -839,7 +1161,7 @@ mod tests {
         );
         assert_eq!(
             WorkspaceSidebar::status_color(AgentStatus::Working, &theme, 8),
-            rgb(0x7fc4de)
+            rgb(0x58a6ff)
         );
     }
 }

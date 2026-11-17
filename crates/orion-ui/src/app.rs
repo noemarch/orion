@@ -20,8 +20,12 @@ use crate::diff_view::ChangesView;
 use crate::files_view::FileTree;
 use crate::new_workspace::{recent_directory, NewWorkspaceEvent, NewWorkspaceModal};
 use crate::pane_seam::seam_of;
+use crate::review_pane::ReviewPane;
 use crate::settings::{KeyBarExtras, SettingsModal};
-use crate::shell_model::{HeaderModel, LensBook, ShellLayout, FILES_SURFACE_WIDTH_WIDE};
+use crate::shell_model::{
+    reference_layout, HeaderModel, LensBook, ShellLayout, FILES_SURFACE_WIDTH_WIDE,
+    HEADER_HEIGHT_WIDE_PX,
+};
 use crate::sidebar::SidebarEvent;
 use crate::terminal::TerminalPane;
 use crate::theme::Theme;
@@ -50,6 +54,12 @@ pub struct OrionApp {
     chat_view: Entity<ChatView>,
     file_tree: Entity<FileTree>,
     changes_view: Entity<ChangesView>,
+    /// The reference layout's right-hand review column, a presentation over the
+    /// same [`ChangesView`] the Changes lens renders.
+    review_pane: Entity<ReviewPane>,
+    /// Whether the review column is wanted; it still collapses when the window
+    /// is too narrow or a split pane is up.
+    review_open: bool,
     settings: Entity<SettingsModal>,
     new_workspace: Entity<NewWorkspaceModal>,
     /// The runtime the shell talks to: the engine in this process, or one in
@@ -376,6 +386,7 @@ impl OrionApp {
         let chat_view = cx.new(ChatView::new);
         let file_tree = cx.new(FileTree::new);
         let changes_view = cx.new(ChangesView::new);
+        let review_pane = cx.new(|cx| ReviewPane::new(changes_view.clone(), cx));
         let settings = cx.new(SettingsModal::new);
         let new_workspace = cx.new(NewWorkspaceModal::new);
         let split_chat_view = cx.new(ChatView::new);
@@ -408,6 +419,8 @@ impl OrionApp {
             chat_view,
             file_tree,
             changes_view,
+            review_pane,
+            review_open: true,
             settings,
             new_workspace,
             engine,
@@ -857,7 +870,7 @@ impl OrionApp {
         // the flexible spacer pushes the connection and the settings control
         // to the trailing edge.
         Toolbar::new("app-header")
-            .h(px(48.0))
+            .h(px(HEADER_HEIGHT_WIDE_PX))
             .px_3()
             .gap(px(12.0))
             .bg(theme.surface_panel)
@@ -897,6 +910,164 @@ impl OrionApp {
                         cx.notify();
                     })),
             )
+    }
+
+    /// The compact Chat|Terminal switch of the three-panel layout. The review
+    /// column owns the diff there, so the middle column only needs the two
+    /// lenses that share the focused pane's live views.
+    fn render_middle_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::current();
+        // The Changes lens keeps the conversation on screen in this layout, so
+        // Chat is the selected tab for it too.
+        let lens_index = match self.current_lens() {
+            Lens::Terminal => 1,
+            Lens::Chat | Lens::Changes => 0,
+        };
+        let focused_pane_id = self.workspace_sidebar.update(cx, |view, _cx| {
+            view.snapshot().and_then(|snapshot| {
+                snapshot
+                    .get("focused_pane_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+        });
+        let focused_pane_id_zoom = focused_pane_id.clone();
+        div()
+            .id("middle-switcher")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .h(px(40.0))
+            .px_3()
+            .w_full()
+            .bg(theme.surface_panel)
+            .child(
+                TabBar::new("middle-switch")
+                    .segmented()
+                    .selected_index(lens_index)
+                    .child(
+                        Tab::new()
+                            .debug_selector(|| "middle-chat".into())
+                            .label("Chat")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_lens(Lens::Chat, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Tab::new()
+                            .debug_selector(|| "middle-terminal".into())
+                            .label("Terminal")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_lens(Lens::Terminal, cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("middle-pane-zoom")
+                    .label("Zoom")
+                    .secondary()
+                    .small()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(pane_id) = focused_pane_id_zoom.clone() {
+                            this.call_route(
+                                "/api/pane/zoom",
+                                &json!({ "pane_id": pane_id, "mode": "toggle" }),
+                            );
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("middle-pane-close")
+                    .label("Close")
+                    .secondary()
+                    .small()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(pane_id) = focused_pane_id.clone() {
+                            this.call_route("/api/pane/close", &json!({ "pane_id": pane_id }));
+                        }
+                        this.workspace_sidebar
+                            .update(cx, |view, _cx| view.refresh());
+                        cx.notify();
+                    })),
+            )
+    }
+
+    /// The thin bar under the middle column. Every field comes from the live
+    /// sidebar snapshot: the focused workspace's path, label, agent and status,
+    /// plus the focused pane id. No token counts or other invented metrics.
+    fn render_conversation_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::current();
+        let (label, cwd, agent, status, pane_id) =
+            self.workspace_sidebar.update(cx, |view, _cx| {
+                let workspaces = view.workspaces();
+                let focused = workspaces
+                    .iter()
+                    .find(|workspace| workspace.focused)
+                    .or_else(|| workspaces.first());
+                let label = focused.map(|ws| ws.label.clone()).unwrap_or_default();
+                let cwd = focused.and_then(|ws| ws.cwd.clone()).unwrap_or_default();
+                let agent = focused.map(|ws| ws.agent.clone()).unwrap_or_default();
+                let status = focused
+                    .map(|ws| ws.status.as_wire().to_string())
+                    .unwrap_or_default();
+                let pane_id = view.snapshot().and_then(|snapshot| {
+                    snapshot
+                        .get("focused_pane_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+                (label, cwd, agent, status, pane_id)
+            });
+        let location = if cwd.is_empty() { label } else { cwd };
+        let mut row = div()
+            .id("conversation-status")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(14.0))
+            .h(px(28.0))
+            .flex_shrink_0()
+            .px_3()
+            .border_t_1()
+            .border_color(theme.border_soft)
+            .bg(theme.surface_canvas)
+            .font_family("JetBrains Mono")
+            .text_size(px(11.0))
+            .text_color(theme.text_faint)
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .child(
+                div()
+                    .id("conversation-status-location")
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(theme.status_link)
+                    .child(location),
+            );
+        if !agent.is_empty() {
+            row = row.child(div().text_color(theme.text_muted).child(agent));
+        }
+        if !status.is_empty() {
+            row = row.child(div().text_color(theme.text_muted).child(status));
+        }
+        if let Some(pane_id) = pane_id {
+            row = row.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .text_color(theme.text_muted)
+                    .child(pane_id),
+            );
+        }
+        row
     }
 
     fn render_lens_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -987,20 +1158,6 @@ impl OrionApp {
                         }
                         this.workspace_sidebar
                             .update(cx, |view, _cx| view.refresh());
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("settings-button")
-                    .label("Settings")
-                    .secondary()
-                    .small()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let settings = this.settings.clone();
-                        settings.update(cx, |view, cx| {
-                            view.set_open(true);
-                            cx.notify();
-                        });
                         cx.notify();
                     })),
             )
@@ -1221,16 +1378,6 @@ impl Render for OrionApp {
 
         // The Changes lens' 2s polls run only while it is active; views are
         // preserved between lens switches (entities stay mounted above).
-        let changes_active = self.current_lens() == Lens::Changes;
-        self.file_tree
-            .update(cx, |view, cx| view.set_visible(cx, changes_active));
-        self.changes_view
-            .update(cx, |view, _cx| view.set_visible(changes_active));
-        // The Chat lens reads the agent's whole transcript on its poll, so it
-        // only reads it while it is the lens on screen.
-        let chat_active = self.current_lens() == Lens::Chat;
-        self.chat_view
-            .update(cx, |view, cx| view.set_visible(cx, chat_active));
         let prefs = self.settings.update(cx, |view, _cx| view.prefs().clone());
         Theme::set_current(Theme::for_mode(prefs.theme, prefs.density));
         crate::theme::sync_gpui_kit(cx);
@@ -1293,7 +1440,49 @@ impl Render for OrionApp {
             .is_some_and(|pane_id| self.lens_book.lens_for(Some(pane_id)) == Lens::Chat);
         self.split_chat_view
             .update(cx, |view, cx| view.set_visible(cx, split_chat_active));
-        let lens_body = if !has_workspaces {
+
+        // The reference layout needs the window width and the split state, so
+        // the lens visibility is decided here rather than before the split is
+        // resolved. The review column reads the same Changes view as the
+        // classic lens, so that view polls in either mode.
+        let reference = reference_layout(window_w);
+        let review_visible = !reference.collapse_review
+            && has_workspaces
+            && split_second.is_none()
+            && self.review_open;
+        let changes_active = self.current_lens() == Lens::Changes;
+        self.file_tree
+            .update(cx, |view, cx| view.set_visible(cx, changes_active));
+        self.changes_view.update(cx, |view, _cx| {
+            view.set_visible(changes_active || review_visible)
+        });
+        // The Chat lens reads the agent's whole transcript on its poll, so it
+        // only reads it while it is the lens on screen. In the three-panel
+        // layout the Changes lens keeps the conversation in the middle column,
+        // so the chat is on screen there too and must keep polling.
+        let chat_active = self.current_lens() == Lens::Chat;
+        let chat_on_screen = chat_active || (review_visible && changes_active);
+        self.chat_view
+            .update(cx, |view, cx| view.set_visible(cx, chat_on_screen));
+
+        let lens_body = if review_visible {
+            // The review column owns the diff here; the middle column keeps
+            // the conversation, or the live terminal, as its lens.
+            match self.current_lens() {
+                Lens::Terminal => div()
+                    .id("main-content")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .child(self.terminal_pane.clone()),
+                Lens::Chat | Lens::Changes => div()
+                    .id("main-content")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .child(self.chat_view.clone()),
+            }
+        } else if !has_workspaces {
             div()
                 .id("main-content")
                 .flex()
@@ -1470,7 +1659,7 @@ impl Render for OrionApp {
             }
         };
         let notice = self.notice.clone();
-        div()
+        let mut root = div()
             .id("app")
             .flex()
             .flex_row()
@@ -1478,64 +1667,121 @@ impl Render for OrionApp {
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
                 this.handle_editing_key(ev, cx)
-            }))
-            .child(
+            }));
+
+        if review_visible {
+            // Three persistent columns: sessions, conversation, review. The
+            // middle column keeps the same header and the same live lens views;
+            // only the switcher and the status bar are new.
+            root = root
+                .child(
+                    div()
+                        .id("sidebar")
+                        .flex()
+                        .flex_col()
+                        .w(px(reference.sidebar_w))
+                        .flex_shrink_0()
+                        .child(self.workspace_sidebar.clone()),
+                )
+                .child(
+                    div()
+                        .id("conversation-column")
+                        .flex()
+                        .flex_col()
+                        .w(px(reference.conversation_w))
+                        .flex_shrink_0()
+                        .min_w(px(0.0))
+                        .child(self.render_header(cx))
+                        .child(self.render_middle_switcher(cx))
+                        .children(notice.map(|message| {
+                            div()
+                                .id("command-notice")
+                                .px_3()
+                                .py_1()
+                                .bg(Theme::current().surface_panel)
+                                .text_size(px(11.0))
+                                .text_color(Theme::current().indicator_blocked)
+                                .child(message)
+                                .into_any_element()
+                        }))
+                        .child(lens_body)
+                        .child(self.render_conversation_status(cx)),
+                )
+                .child(
+                    div()
+                        .id("review-column")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .bg(Theme::current().surface_canvas)
+                        .child(self.review_pane.clone()),
+                );
+        } else {
+            // The classic two-column shell, unchanged: narrow windows and
+            // split panes keep the full three-lens canvas.
+            root = root
+                .child(
+                    div()
+                        .id("sidebar")
+                        .flex()
+                        .flex_col()
+                        .w(px(sidebar_w))
+                        .child(self.workspace_sidebar.clone()),
+                )
+                .child(
+                    div()
+                        .id("main-column")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(self.render_header(cx))
+                        // The tab strip and lens switcher act on a selected pane;
+                        // with no workspace they would be dead chrome.
+                        .children(
+                            has_workspaces.then(|| self.render_lens_toggle(cx).into_any_element()),
+                        )
+                        .children(
+                            has_workspaces.then(|| self.render_tab_strip(cx).into_any_element()),
+                        )
+                        .children(notice.map(|message| {
+                            div()
+                                .id("command-notice")
+                                .px_3()
+                                .py_1()
+                                // The notice sits on the column's own background:
+                                // without one it shows the window's black.
+                                .bg(Theme::current().surface_panel)
+                                .text_size(px(11.0))
+                                .text_color(Theme::current().indicator_blocked)
+                                .child(message)
+                                .into_any_element()
+                        }))
+                        .child(lens_body),
+                );
+        }
+
+        root.child(if self.settings.update(cx, |view, _cx| view.is_open()) {
+            div()
+                .id("modal-host")
+                .absolute()
+                .inset_0()
+                .child(self.settings.clone())
+        } else {
+            div().id("no-modal")
+        })
+        .child(
+            if self.new_workspace.update(cx, |view, _cx| view.is_open()) {
                 div()
-                    .id("sidebar")
-                    .flex()
-                    .flex_col()
-                    .w(px(sidebar_w))
-                    .child(self.workspace_sidebar.clone()),
-            )
-            .child(
-                div()
-                    .id("main-column")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(self.render_header(cx))
-                    // The tab strip and lens switcher act on a selected pane;
-                    // with no workspace they would be dead chrome.
-                    .children(
-                        has_workspaces.then(|| self.render_lens_toggle(cx).into_any_element()),
-                    )
-                    .children(has_workspaces.then(|| self.render_tab_strip(cx).into_any_element()))
-                    .children(notice.map(|message| {
-                        div()
-                            .id("command-notice")
-                            .px_3()
-                            .py_1()
-                            // The notice sits on the column's own background:
-                            // without one it shows the window's black.
-                            .bg(Theme::current().surface_panel)
-                            .text_size(px(11.0))
-                            .text_color(Theme::current().indicator_blocked)
-                            .child(message)
-                            .into_any_element()
-                    }))
-                    .child(lens_body),
-            )
-            .child(if self.settings.update(cx, |view, _cx| view.is_open()) {
-                div()
-                    .id("modal-host")
+                    .id("new-workspace-host")
                     .absolute()
                     .inset_0()
-                    .child(self.settings.clone())
+                    .child(self.new_workspace.clone())
             } else {
-                div().id("no-modal")
-            })
-            .child(
-                if self.new_workspace.update(cx, |view, _cx| view.is_open()) {
-                    div()
-                        .id("new-workspace-host")
-                        .absolute()
-                        .inset_0()
-                        .child(self.new_workspace.clone())
-                } else {
-                    div().id("no-new-workspace-modal")
-                },
-            )
+                div().id("no-new-workspace-modal")
+            },
+        )
     }
 }
 
@@ -1547,7 +1793,7 @@ pub fn run() {
             gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::centered(
-                        Size::new(px(1280.0), px(800.0)),
+                        Size::new(px(1600.0), px(900.0)),
                         cx,
                     )),
                     ..Default::default()

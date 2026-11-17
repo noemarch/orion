@@ -31,8 +31,8 @@ use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::*;
 use gpui_kit::{
-    div, px, white, Context, Div, Entity, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Render, ScrollHandle, Stateful, Window,
+    div, px, Context, Div, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Render, ScrollHandle, Stateful, Window,
 };
 use orion_core::runtime::{PaneHandle, Runtime};
 use serde_json::Value;
@@ -375,7 +375,7 @@ impl FileTree {
             .flex_col()
             .size_full()
             .bg(theme.surface_base)
-            .text_color(white());
+            .text_color(theme.text);
 
         let label = self.root_path.clone().unwrap_or_else(|| "…".to_string());
         tree = tree.child(

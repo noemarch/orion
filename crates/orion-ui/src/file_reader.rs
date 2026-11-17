@@ -25,7 +25,7 @@ use crate::theme::Theme;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::*;
-use gpui_kit::{div, px, white, Context, Render, ScrollHandle, TextAlign, TextSystem, Window};
+use gpui_kit::{div, px, Context, Render, ScrollHandle, TextAlign, TextSystem, Window};
 use orion_core::runtime::Runtime;
 use serde_json::Value;
 use std::sync::Arc;
@@ -279,7 +279,7 @@ impl Render for FileReader {
             .flex_col()
             .size_full()
             .bg(Theme::current().surface_base)
-            .text_color(white());
+            .text_color(Theme::current().text);
 
         let Some(path) = self.path.clone() else {
             return root.child(

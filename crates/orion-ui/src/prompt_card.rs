@@ -19,9 +19,7 @@ use crate::theme::Theme;
 use gpui_kit::base::component_traits::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::*;
-use gpui_kit::{
-    div, px, white, App, Context, FocusHandle, IntoElement, KeyDownEvent, Render, Window,
-};
+use gpui_kit::{div, px, App, Context, FocusHandle, IntoElement, KeyDownEvent, Render, Window};
 use std::sync::Arc;
 
 /// What the card tells the shell.
@@ -208,9 +206,12 @@ pub fn answer_error_message(code: &str) -> String {
 }
 
 impl Render for PromptCard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::current();
         let prompt = self.prompt.clone();
         let pending = self.pending;
+        // Rose marks the focused card alone; the resting edge is a quiet hairline.
+        let focused = self.focus_handle.is_focused(window);
         let mut card = div()
             .id("prompt-card")
             .debug_selector(|| "prompt-card".to_string())
@@ -219,15 +220,21 @@ impl Render for PromptCard {
             .p_3()
             .rounded_md()
             .border_1()
-            .border_color(Theme::current().accent)
-            .bg(Theme::current().surface_elevated)
-            .text_color(white())
+            .border_color(if focused {
+                theme.accent_emphasis
+            } else {
+                theme.border_soft
+            })
+            .bg(theme.surface_raised_2)
+            .font_family("JetBrains Mono")
+            .text_color(theme.text)
             .child(
                 div()
                     .id("prompt-title")
                     .debug_selector(|| "prompt-title".to_string())
-                    .text_size(px(12.0 * Theme::current().density_scale()))
+                    .text_size(px(12.0 * theme.density_scale()))
                     .font_weight(gpui_kit::FontWeight::BOLD)
+                    .text_color(theme.text_muted)
                     .child(format!("{} · {}", prompt.agent, prompt.title)),
             )
             .child(
@@ -243,7 +250,8 @@ impl Render for PromptCard {
                 card = card.child(
                     div()
                         .id("prompt-body")
-                        .text_size(px(12.0 * Theme::current().density_scale()))
+                        .text_size(px(12.0 * theme.density_scale()))
+                        .text_color(theme.text_muted)
                         .child(body.to_string()),
                 );
             }
@@ -346,8 +354,8 @@ impl Render for PromptCard {
                 div()
                     .id("prompt-error")
                     .debug_selector(|| "prompt-error".to_string())
-                    .text_size(px(12.0 * Theme::current().density_scale()))
-                    .text_color(Theme::current().danger_text)
+                    .text_size(px(12.0 * theme.density_scale()))
+                    .text_color(theme.danger_text)
                     .child(error.clone()),
             );
         }

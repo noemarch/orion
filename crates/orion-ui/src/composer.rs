@@ -605,20 +605,17 @@ impl Render for Composer {
             .flex_col()
             .gap(px(4.0))
             .w_full()
-            .min_h(px(44.0))
+            .min_h(px(50.0))
             .px_3()
             .py_2()
             .rounded_md()
             .border_1()
-            .border_color(if self.blocked {
-                theme.border
-            } else {
-                theme.border_strong
-            })
-            .bg(theme.surface_input)
+            .border_color(theme.composer_border)
+            .bg(theme.composer_bg)
+            .font_family("JetBrains Mono")
             .text_size(px(13.0 * theme.density_scale()))
             .text_color(if self.blocked {
-                theme.text_dim
+                theme.text_faint
             } else {
                 theme.text
             })
@@ -684,12 +681,15 @@ impl Render for Composer {
             .debug_selector(|| "chat-composer".to_string())
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .gap(px(8.0))
             .w_full()
+            .max_w(px(820.0))
             .p_3()
-            .border_t_1()
-            .border_color(theme.border)
-            .bg(theme.surface_panel);
+            .mb_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border_soft)
+            .bg(theme.surface_canvas);
 
         column = column.child(input);
         if let Some(note) = self.render_note(cx) {
