@@ -12,6 +12,11 @@ pub struct ShellLayout {
 /// layout. One definition, so every view reads the same breakpoint.
 pub const NARROW_BREAKPOINT_PX: f32 = 900.0;
 
+/// App header height at wide widths (`--header-h-wide`, DESIGN.md §tokens).
+pub const HEADER_HEIGHT_WIDE_PX: f32 = 46.0;
+/// Default wide sidebar width (`--sidebar-w`, DESIGN.md §tokens).
+pub const SIDEBAR_WIDTH_WIDE_PX: f32 = 264.0;
+
 impl ShellLayout {
     pub fn for_width(width: f32) -> Self {
         if width < NARROW_BREAKPOINT_PX {
@@ -22,7 +27,7 @@ impl ShellLayout {
             }
         } else {
             Self {
-                sidebar_width_px: 280.0,
+                sidebar_width_px: SIDEBAR_WIDTH_WIDE_PX,
                 rail: false,
                 touch_target_px: 44.0,
             }
@@ -151,6 +156,46 @@ pub fn apply_text_key(
     TextEdit::Ignored
 }
 
+/// Session list width in the reference 3-panel layout (px).
+pub const SIDEBAR_WIDTH_REFERENCE_PX: f32 = 300.0;
+/// Conversation column width in the reference 3-panel layout (px).
+pub const CONVERSATION_WIDTH_PX: f32 = 670.0;
+/// Narrowest the diff review pane may get before it is unreadable (px).
+pub const REVIEW_MIN_WIDTH_PX: f32 = 320.0;
+/// Window width below which the review pane collapses away (px).
+pub const REVIEW_COLLAPSE_BREAKPOINT_PX: f32 = 1200.0;
+
+/// The three columns of the reference layout: session list, conversation, and
+/// diff review. When the window is too narrow for all three, the review pane
+/// collapses and its room goes to the conversation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReferenceLayout {
+    pub sidebar_w: f32,
+    pub conversation_w: f32,
+    pub review_w: f32,
+    pub collapse_review: bool,
+}
+
+/// Split one window width into the reference layout's three columns.
+pub fn reference_layout(width: f32) -> ReferenceLayout {
+    if width < REVIEW_COLLAPSE_BREAKPOINT_PX {
+        ReferenceLayout {
+            sidebar_w: SIDEBAR_WIDTH_REFERENCE_PX,
+            conversation_w: (width - SIDEBAR_WIDTH_REFERENCE_PX).max(0.0),
+            review_w: 0.0,
+            collapse_review: true,
+        }
+    } else {
+        ReferenceLayout {
+            sidebar_w: SIDEBAR_WIDTH_REFERENCE_PX,
+            conversation_w: CONVERSATION_WIDTH_PX,
+            review_w: (width - SIDEBAR_WIDTH_REFERENCE_PX - CONVERSATION_WIDTH_PX)
+                .max(REVIEW_MIN_WIDTH_PX),
+            collapse_review: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,7 +212,7 @@ mod tests {
     fn desktop_window_uses_orbit_sidebar_width() {
         let layout = ShellLayout::for_width(1280.0);
         assert!(!layout.rail);
-        assert_eq!(layout.sidebar_width_px, 280.0);
+        assert_eq!(layout.sidebar_width_px, 264.0);
     }
 
     #[::core::prelude::v1::test]
@@ -300,5 +345,39 @@ mod tests {
         book.retain_panes(&["p2".to_string()]);
         assert_eq!(book.lens_for(Some("p1")), crate::app::Lens::Chat);
         assert_eq!(book.lens_for(Some("p2")), crate::app::Lens::Changes);
+    }
+
+    #[::core::prelude::v1::test]
+    fn reference_layout_at_1600_splits_three_panels() {
+        let layout = reference_layout(1600.0);
+        assert_eq!(layout.sidebar_w, 300.0);
+        assert_eq!(layout.conversation_w, 670.0);
+        assert_eq!(layout.review_w, 630.0);
+        assert!(!layout.collapse_review);
+    }
+
+    #[::core::prelude::v1::test]
+    fn reference_layout_at_1280_clamps_review_to_its_minimum() {
+        // 1280 - 300 - 670 = 310, under REVIEW_MIN_WIDTH_PX, so it clamps.
+        let layout = reference_layout(1280.0);
+        assert_eq!(layout.sidebar_w, 300.0);
+        assert_eq!(layout.conversation_w, 670.0);
+        assert_eq!(layout.review_w, REVIEW_MIN_WIDTH_PX);
+        assert_eq!(layout.review_w, 320.0);
+        assert!(!layout.collapse_review);
+    }
+
+    #[::core::prelude::v1::test]
+    fn reference_layout_at_1100_collapses_review_into_conversation() {
+        let layout = reference_layout(1100.0);
+        assert_eq!(layout.sidebar_w, 300.0);
+        assert_eq!(layout.conversation_w, 800.0);
+        assert_eq!(layout.review_w, 0.0);
+        assert!(layout.collapse_review);
+    }
+
+    #[::core::prelude::v1::test]
+    fn reference_layout_keeps_the_classic_wide_sidebar_width() {
+        assert_eq!(SIDEBAR_WIDTH_WIDE_PX, 264.0);
     }
 }

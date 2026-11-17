@@ -37,8 +37,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Sidebar width in app.rs; mouse x-coordinates are window-relative.
-pub const SIDEBAR_WIDTH_PX: f32 = 280.0;
 /// The default terminal font size, from Orbit's `DEFAULT_SETTINGS`.
 const DEFAULT_FONT_PX: f32 = 13.0;
 /// Touch target height for key-bar and find-bar controls (DESIGN.md minimum).
