@@ -1,5 +1,8 @@
-//! Quiet Slate theme tokens (DESIGN.md §2, the generated table — the source of
-//! truth; values mirrored value-for-value).
+//! Theme tokens (DESIGN.md §2, the generated table — the source of truth;
+//! values mirrored value-for-value). The default dark palette is the blue-gray
+//! "Quiet Canvas" generation; the earlier plum values were replaced as the
+//! default while the additive `surface_canvas`/`diff_*` tokens keep their own
+//! names for callers that want the reference palette explicitly.
 //!
 //! Usage: views call [`Theme::current()`] in `render` and bind its tokens to
 //! backgrounds/text. The app sets the current theme from saved preferences.
@@ -149,6 +152,80 @@ pub struct Theme {
     pub term_cursor: Rgba,
     /// Terminal/selection `--term-selection`.
     pub term_selection: Rgba,
+
+    // The Herd-reference palette (DESIGN.md §2, generated table). Additive:
+    // every token above keeps its Quiet Slate value, so existing views are
+    // untouched.
+    /// App canvas `--surface-canvas`: the deepest ground, behind every panel.
+    pub surface_canvas: Rgba,
+    /// Bare surface `--surface-subtle`: gutters and inset fills one step off the canvas.
+    pub surface_subtle: Rgba,
+    /// Raised card `--surface-raised`: a panel lifted off the canvas.
+    pub surface_raised: Rgba,
+    /// Raised card, level 2 `--surface-raised-2`: a panel nested in a raised card.
+    pub surface_raised_2: Rgba,
+    /// Raised card, level 3 `--surface-raised-3`: the deepest nesting before an edge is needed.
+    pub surface_raised_3: Rgba,
+    /// Hairline divider `--border-soft`: the quiet edge between adjacent rows.
+    pub border_soft: Rgba,
+    /// Secondary text `--text-muted`: labels and metadata beside primary text.
+    pub text_muted: Rgba,
+    /// Tertiary text `--text-faint`: placeholders, counts and disabled labels.
+    pub text_faint: Rgba,
+    /// Accent emphasis `--accent-emphasis`: the loud end of the accent, for selected marks.
+    pub accent_emphasis: Rgba,
+    /// Informational blue `--info-blue`: hints and neutral notices.
+    pub info_blue: Rgba,
+    /// Diff add `--diff-add`: the added-line marker and its `+` glyph.
+    pub diff_add: Rgba,
+    /// Diff del `--diff-del`: the removed-line marker and its `-` glyph.
+    pub diff_del: Rgba,
+    /// Warning amber `--warning-amber`: cautions that are not errors.
+    pub warning_amber: Rgba,
+    /// Review purple `--review-purple`: review and comment affordances in a diff.
+    pub review_purple: Rgba,
+    /// Diff add fill `--diff-add-fill`: the added-line background wash.
+    pub diff_add_fill: Rgba,
+    /// Diff del fill `--diff-del-fill`: the removed-line background wash.
+    pub diff_del_fill: Rgba,
+    /// Diff gutter `--diff-gutter`: the line-number gutter background.
+    pub diff_gutter: Rgba,
+    /// Diff hunk background `--diff-hunk-bg`: the `@@` hunk-header strip.
+    pub diff_hunk_bg: Rgba,
+    /// Diff hunk text `--diff-hunk-text`: the `@@` hunk-header label.
+    pub diff_hunk_text: Rgba,
+    /// Diff code `--diff-code`: unchanged code text.
+    pub diff_code: Rgba,
+    /// Diff add text `--diff-add-text`: added code text on [`Theme::diff_add_fill`].
+    pub diff_add_text: Rgba,
+    /// Diff del text `--diff-del-text`: removed code text on [`Theme::diff_del_fill`].
+    pub diff_del_text: Rgba,
+    /// Composer background `--composer-bg`: the prompt input's ground.
+    pub composer_bg: Rgba,
+    /// Composer border `--composer-border`: the prompt input's edge.
+    pub composer_border: Rgba,
+    /// Status link `--status-link`: connection and session text in the status bar.
+    pub status_link: Rgba,
+    /// Tab active background `--tab-active-bg`: the selected tab's ground.
+    pub tab_active_bg: Rgba,
+    /// Tab active marker `--tab-active-marker`: the selected tab's top marker.
+    pub tab_active_marker: Rgba,
+    /// Inline code background `--inline-code-bg`: a code span in prose.
+    pub inline_code_bg: Rgba,
+    /// Inline code text `--inline-code-text`: a code span's text in prose.
+    pub inline_code_text: Rgba,
+    /// Link blue `--link-blue`: links inside prose and the review pane.
+    pub link_blue: Rgba,
+    /// Scrollbar thumb `--scrollbar-thumb`: the draggable scrollbar thumb.
+    pub scrollbar_thumb: Rgba,
+    /// Chip border `--chip-border`: the edge of a filter or label chip.
+    pub chip_border: Rgba,
+    /// Badge border `--badge-border`: the edge of a count badge.
+    pub badge_border: Rgba,
+    /// Badge background `--badge-bg`: the ground of a count badge.
+    pub badge_bg: Rgba,
+    /// Code comment `--code-comment`: comments and doc lines in highlighted code.
+    pub code_comment: Rgba,
 }
 
 fn tint(hex: u32, alpha_pct: u8) -> Rgba {
@@ -173,48 +250,83 @@ impl Theme {
             ThemeMode::Dark => Theme {
                 mode,
                 density,
-                surface_base: rgb(0x221d27),
-                surface_panel: rgb(0x221d27),
-                surface_elevated: rgb(0x2a2430),
-                surface_hover: rgb(0x2e2a33),
-                surface_input: rgb(0x28232e),
-                border: tint(0xffffff, 6),
-                border_strong: tint(0xffffff, 12),
-                text: rgb(0xf2eef5),
-                text_dim: rgb(0x9a90a3),
-                text_strong: rgb(0xf2eef5),
-                accent: rgb(0xa3185a),
-                accent_tint: tint(0xa3185a, 12),
-                primary: rgb(0x8f1a52),
-                primary_hover: rgb(0xa3185a),
-                primary_text: rgb(0xf2eef5),
-                primary_tint: tint(0x8f1a52, 28),
-                syntax_keyword: rgb(0xff8fa8),
-                syntax_string: rgb(0xa8d48a),
-                syntax_number: rgb(0xd2a8ff),
-                syntax_type: rgb(0x79c0ff),
-                syntax_variable: rgb(0xffb86b),
+                surface_base: rgb(0x0d1117),
+                surface_panel: rgb(0x10151d),
+                surface_elevated: rgb(0x151b24),
+                surface_hover: rgb(0x1b2431),
+                surface_input: rgb(0x0e131a),
+                border: rgb(0x222b38),
+                border_strong: rgb(0x39434f),
+                text: rgb(0xc9d1d9),
+                text_dim: rgb(0x8b949e),
+                text_strong: rgb(0xe6edf3),
+                accent: rgb(0xf778ba),
+                accent_tint: tint(0xf778ba, 12),
+                primary: rgb(0xf778ba),
+                primary_hover: rgb(0xff90c8),
+                primary_text: rgb(0x0d1117),
+                primary_tint: tint(0xf778ba, 16),
+                syntax_keyword: rgb(0xbb9af7),
+                syntax_string: rgb(0x9ece6a),
+                syntax_number: rgb(0xff9e64),
+                syntax_type: rgb(0x7dcfff),
+                syntax_variable: rgb(0xc0caf5),
                 syntax_meta: rgb(0xb49dd6),
-                status_idle: rgb(0x9a93a6),
-                status_working: rgb(0x7fc4de),
-                status_blocked: rgb(0xff9a92),
-                status_done: rgb(0x8fd07a),
-                status_working_tint: tint(0x7fc4de, 14),
-                status_blocked_tint: tint(0xff9a92, 10),
-                status_done_tint: tint(0x8fd07a, 14),
-                indicator_working: rgb(0xa3185a),
+                status_idle: rgb(0x8b949e),
+                status_working: rgb(0x58a6ff),
+                status_blocked: rgb(0xd29922),
+                status_done: rgb(0x56d364),
+                status_working_tint: tint(0x58a6ff, 14),
+                status_blocked_tint: tint(0xd29922, 14),
+                status_done_tint: tint(0x56d364, 14),
+                indicator_working: rgb(0x58a6ff),
                 indicator_blocked: rgb(0xf85149),
                 indicator_done: rgb(0x3fb950),
-                indicator_idle: rgb(0x9a90a3),
-                indicator_unknown: rgb(0x6c7086),
-                danger_text: rgb(0xffd9d4),
+                indicator_idle: rgb(0x8b949e),
+                indicator_unknown: rgb(0x6e7681),
+                danger_text: rgb(0xffd0cf),
                 danger_tint: tint(0xf85149, 12),
-                notice: rgb(0xd9a7ba),
-                scrim: rgba(0x060408a3),
-                term_bg: rgb(0x121016),
-                term_fg: rgb(0xecebf1),
-                term_cursor: rgb(0xa3185a),
-                term_selection: rgb(0x3a2433),
+                notice: rgb(0xd29922),
+                scrim: rgba(0x010409cc),
+                term_bg: rgb(0x0d1117),
+                term_fg: rgb(0xc9d1d9),
+                term_cursor: rgb(0xf778ba),
+                term_selection: rgb(0x1b2431),
+                surface_canvas: rgb(0x0d1117),
+                surface_subtle: rgb(0x10151d),
+                surface_raised: rgb(0x151b24),
+                surface_raised_2: rgb(0x1b2431),
+                surface_raised_3: rgb(0x202a38),
+                border_soft: rgb(0x1a222d),
+                text_muted: rgb(0x8b949e),
+                text_faint: rgb(0x5e6671),
+                accent_emphasis: rgb(0xf778ba),
+                info_blue: rgb(0x6cb6ff),
+                diff_add: rgb(0x56d364),
+                diff_del: rgb(0xf85149),
+                warning_amber: rgb(0xd29922),
+                review_purple: rgb(0xbc8cff),
+                diff_add_fill: tint(0x54a04a, 16),
+                diff_del_fill: tint(0xf85149, 13),
+                diff_gutter: rgb(0x10151d),
+                diff_hunk_bg: rgb(0x182031),
+                diff_hunk_text: rgb(0x8ea7c9),
+                diff_code: rgb(0xc0caf5),
+                diff_add_text: rgb(0xc6f0c8),
+                diff_del_text: rgb(0xffd0cf),
+                composer_bg: rgb(0x0e131a),
+                composer_border: rgb(0x39434f),
+                status_link: rgb(0x7d9fc4),
+                tab_active_bg: rgb(0x111720),
+                tab_active_marker: rgb(0xa6d189),
+                inline_code_bg: rgb(0x263044),
+                inline_code_text: rgb(0xffb4d8),
+                link_blue: rgb(0xa5c9ff),
+                scrollbar_thumb: rgb(0x2a3441),
+                chip_border: rgb(0x6b7480),
+                badge_border: rgb(0x5c4a1f),
+                badge_bg: rgb(0x2a2313),
+                code_comment: rgb(0x6a7385),
             },
             ThemeMode::Light => Theme {
                 mode,
@@ -261,6 +373,41 @@ impl Theme {
                 term_fg: rgb(0x501854),
                 term_cursor: rgb(0xa84370),
                 term_selection: rgb(0xf2dbe6),
+                surface_canvas: rgb(0xfaf5fa),
+                surface_subtle: rgb(0xffffff),
+                surface_raised: rgb(0xf3ebf1),
+                surface_raised_2: rgb(0xece1e9),
+                surface_raised_3: rgb(0xe4d8e0),
+                border_soft: rgb(0xe4d8e0),
+                text_muted: rgb(0x7a5570),
+                text_faint: rgb(0x9ca0b0),
+                accent_emphasis: rgb(0xa84370),
+                info_blue: rgb(0x155a72),
+                diff_add: rgb(0x2f6317),
+                diff_del: rgb(0xa82323),
+                warning_amber: rgb(0x8a5300),
+                review_purple: rgb(0x8a3f7a),
+                diff_add_fill: tint(0x2f6317, 12),
+                diff_del_fill: tint(0xa82323, 10),
+                diff_gutter: rgb(0xf6f8fa),
+                diff_hunk_bg: rgb(0xeef2f8),
+                diff_hunk_text: rgb(0x57606a),
+                diff_code: rgb(0x24292f),
+                diff_add_text: rgb(0x1a7f37),
+                diff_del_text: rgb(0xa82323),
+                composer_bg: rgb(0xffffff),
+                composer_border: rgb(0xd0d7de),
+                status_link: rgb(0x0969da),
+                tab_active_bg: rgb(0xf6f8fa),
+                tab_active_marker: rgb(0x2f6317),
+                inline_code_bg: rgb(0xeff1f3),
+                inline_code_text: rgb(0xa84370),
+                link_blue: rgb(0x0969da),
+                scrollbar_thumb: rgb(0xd0d7de),
+                chip_border: rgb(0x8c959f),
+                badge_border: rgb(0xd4a72c),
+                badge_bg: rgb(0xfff8c5),
+                code_comment: rgb(0x6e7781),
             },
         }
     }
@@ -536,9 +683,9 @@ mod tests {
     #[::core::prelude::v1::test]
     fn dark_defaults_match_design_table() {
         let theme = Theme::dark();
-        assert_eq!(theme.surface_base, rgb(0x221d27));
-        assert_eq!(theme.status_working, rgb(0x7fc4de));
-        assert_eq!(theme.accent, rgb(0xa3185a));
+        assert_eq!(theme.surface_base, rgb(0x0d1117));
+        assert_eq!(theme.status_working, rgb(0x58a6ff));
+        assert_eq!(theme.accent, rgb(0xf778ba));
         assert_eq!(theme.density, Density::Comfortable);
         assert_eq!(theme.density_scale(), 1.0);
     }
@@ -554,9 +701,9 @@ mod tests {
     #[::core::prelude::v1::test]
     fn orbit_token_table_matches_design_doc() {
         let theme = Theme::dark();
-        assert_eq!(theme.primary_hover, gpui_kit::rgb(0xa3185a));
-        assert_eq!(theme.primary_text, gpui_kit::rgb(0xf2eef5));
-        assert_eq!(theme.syntax_keyword, gpui_kit::rgb(0xff8fa8));
+        assert_eq!(theme.primary_hover, gpui_kit::rgb(0xff90c8));
+        assert_eq!(theme.primary_text, gpui_kit::rgb(0x0d1117));
+        assert_eq!(theme.syntax_keyword, gpui_kit::rgb(0xbb9af7));
     }
 
     #[::core::prelude::v1::test]
@@ -635,5 +782,87 @@ mod tests {
         assert_eq!(rgb_color(10, 20, 30), rgb(0x0a141e));
         assert_eq!(rgb_color(0, 0, 0), rgb(0x000000));
         assert_eq!(rgb_color(255, 255, 255), rgb(0xffffff));
+    }
+
+    #[::core::prelude::v1::test]
+    fn herd_reference_dark_tokens_match_design_table() {
+        let theme = Theme::dark();
+        assert_eq!(theme.surface_canvas, rgb(0x0d1117));
+        assert_eq!(theme.surface_subtle, rgb(0x10151d));
+        assert_eq!(theme.surface_raised, rgb(0x151b24));
+        assert_eq!(theme.surface_raised_2, rgb(0x1b2431));
+        assert_eq!(theme.surface_raised_3, rgb(0x202a38));
+        assert_eq!(theme.border_soft, rgb(0x1a222d));
+        assert_eq!(theme.text_muted, rgb(0x8b949e));
+        assert_eq!(theme.text_faint, rgb(0x5e6671));
+        assert_eq!(theme.accent_emphasis, rgb(0xf778ba));
+        assert_eq!(theme.info_blue, rgb(0x6cb6ff));
+        assert_eq!(theme.diff_add, rgb(0x56d364));
+        assert_eq!(theme.diff_del, rgb(0xf85149));
+        assert_eq!(theme.warning_amber, rgb(0xd29922));
+        assert_eq!(theme.review_purple, rgb(0xbc8cff));
+        // 16% of #54a04a is alpha 41, 13% of #f85149 is alpha 33.
+        assert_eq!(theme.diff_add_fill, rgba(0x54a04a29));
+        assert_eq!(theme.diff_del_fill, rgba(0xf8514921));
+        assert_eq!(theme.diff_gutter, rgb(0x10151d));
+        assert_eq!(theme.diff_hunk_bg, rgb(0x182031));
+        assert_eq!(theme.diff_hunk_text, rgb(0x8ea7c9));
+        assert_eq!(theme.diff_code, rgb(0xc0caf5));
+        assert_eq!(theme.diff_add_text, rgb(0xc6f0c8));
+        assert_eq!(theme.diff_del_text, rgb(0xffd0cf));
+        assert_eq!(theme.composer_bg, rgb(0x0e131a));
+        assert_eq!(theme.composer_border, rgb(0x39434f));
+        assert_eq!(theme.status_link, rgb(0x7d9fc4));
+        assert_eq!(theme.tab_active_bg, rgb(0x111720));
+        assert_eq!(theme.tab_active_marker, rgb(0xa6d189));
+        assert_eq!(theme.inline_code_bg, rgb(0x263044));
+        assert_eq!(theme.inline_code_text, rgb(0xffb4d8));
+        assert_eq!(theme.link_blue, rgb(0xa5c9ff));
+        assert_eq!(theme.scrollbar_thumb, rgb(0x2a3441));
+        assert_eq!(theme.chip_border, rgb(0x6b7480));
+        assert_eq!(theme.badge_border, rgb(0x5c4a1f));
+        assert_eq!(theme.badge_bg, rgb(0x2a2313));
+        assert_eq!(theme.code_comment, rgb(0x6a7385));
+    }
+
+    #[::core::prelude::v1::test]
+    fn herd_reference_light_tokens_match_design_table() {
+        let theme = Theme::light();
+        assert_eq!(theme.surface_canvas, rgb(0xfaf5fa));
+        assert_eq!(theme.surface_subtle, rgb(0xffffff));
+        assert_eq!(theme.surface_raised, rgb(0xf3ebf1));
+        assert_eq!(theme.surface_raised_2, rgb(0xece1e9));
+        assert_eq!(theme.surface_raised_3, rgb(0xe4d8e0));
+        assert_eq!(theme.border_soft, rgb(0xe4d8e0));
+        assert_eq!(theme.text_muted, rgb(0x7a5570));
+        assert_eq!(theme.text_faint, rgb(0x9ca0b0));
+        assert_eq!(theme.accent_emphasis, rgb(0xa84370));
+        assert_eq!(theme.info_blue, rgb(0x155a72));
+        assert_eq!(theme.diff_add, rgb(0x2f6317));
+        assert_eq!(theme.diff_del, rgb(0xa82323));
+        assert_eq!(theme.warning_amber, rgb(0x8a5300));
+        assert_eq!(theme.review_purple, rgb(0x8a3f7a));
+        // 12% of #2f6317 is alpha 31, 10% of #a82323 is alpha 26.
+        assert_eq!(theme.diff_add_fill, rgba(0x2f63171f));
+        assert_eq!(theme.diff_del_fill, rgba(0xa823231a));
+        assert_eq!(theme.diff_gutter, rgb(0xf6f8fa));
+        assert_eq!(theme.diff_hunk_bg, rgb(0xeef2f8));
+        assert_eq!(theme.diff_hunk_text, rgb(0x57606a));
+        assert_eq!(theme.diff_code, rgb(0x24292f));
+        assert_eq!(theme.diff_add_text, rgb(0x1a7f37));
+        assert_eq!(theme.diff_del_text, rgb(0xa82323));
+        assert_eq!(theme.composer_bg, rgb(0xffffff));
+        assert_eq!(theme.composer_border, rgb(0xd0d7de));
+        assert_eq!(theme.status_link, rgb(0x0969da));
+        assert_eq!(theme.tab_active_bg, rgb(0xf6f8fa));
+        assert_eq!(theme.tab_active_marker, rgb(0x2f6317));
+        assert_eq!(theme.inline_code_bg, rgb(0xeff1f3));
+        assert_eq!(theme.inline_code_text, rgb(0xa84370));
+        assert_eq!(theme.link_blue, rgb(0x0969da));
+        assert_eq!(theme.scrollbar_thumb, rgb(0xd0d7de));
+        assert_eq!(theme.chip_border, rgb(0x8c959f));
+        assert_eq!(theme.badge_border, rgb(0xd4a72c));
+        assert_eq!(theme.badge_bg, rgb(0xfff8c5));
+        assert_eq!(theme.code_comment, rgb(0x6e7781));
     }
 }
