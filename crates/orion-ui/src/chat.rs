@@ -1082,7 +1082,7 @@ impl ChatView {
                 .gap(px(SPACE_2))
                 .text_size(px(11.0 * theme.density_scale()))
                 .text_color(theme.token_text_dim())
-                .child(role_label)
+                .child(div().min_w(px(0.0)).truncate().child(role_label))
                 .child(stamp),
         );
 
@@ -1336,6 +1336,7 @@ impl ChatView {
                     .text_size(px(11.0 * theme.density_scale()))
                     .font_family("JetBrains Mono")
                     .text_color(theme.token_text_dim())
+                    .truncate()
                     .child(card.name.clone()),
             );
             if !card.input.is_empty() {
