@@ -108,18 +108,28 @@ impl Terminal {
         let watch_state = Arc::downgrade(&state);
         let watch_session = Arc::clone(&session);
         let watch_id = id.clone();
+        // Back off from 25ms to a 400ms ceiling: an idle terminal wakes this thread ~2.5x/s
+        // instead of 10x/s, while a process that exits after the ceiling is reached is still
+        // reaped within one 400ms interval. The schedule is 25, 50, 100, 200, 400, 400, ... ms.
+        const MAX_EXIT_POLL: Duration = Duration::from_millis(400);
         thread::Builder::new()
             .name(format!("orion-terminal-exit-{watch_id}"))
-            .spawn(move || loop {
-                match watch_session.try_wait() {
-                    Ok(Some(code)) => {
-                        if let Some(state) = watch_state.upgrade() {
-                            state.lock().exited = Some(code);
+            .spawn(move || {
+                let mut backoff = Duration::from_millis(25);
+                loop {
+                    match watch_session.try_wait() {
+                        Ok(Some(code)) => {
+                            if let Some(state) = watch_state.upgrade() {
+                                state.lock().exited = Some(code);
+                            }
+                            return;
                         }
-                        return;
+                        Ok(None) => {
+                            thread::sleep(backoff);
+                            backoff = (backoff * 2).min(MAX_EXIT_POLL);
+                        }
+                        Err(_) => return,
                     }
-                    Ok(None) => thread::sleep(Duration::from_millis(100)),
-                    Err(_) => return,
                 }
             })
             .map_err(|error| {

@@ -162,34 +162,44 @@ impl Pane {
         let watch_session = Arc::clone(&pane.session);
         let watch_id = pane_id;
         let watch_events = Arc::clone(&on_event);
+        // Back off from 25ms to a 400ms ceiling: an idle agent wakes this thread ~2.5x/s instead
+        // of 4x/s, while a process that exits after the ceiling is reached is still reaped within
+        // one 400ms interval. The schedule is 25, 50, 100, 200, 400, 400, ... ms.
+        const MAX_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(400);
         std::thread::Builder::new()
             .name(format!("orion-pane-exit-{watch_id}"))
-            .spawn(move || loop {
-                match watch_session.try_wait() {
-                    Ok(Some(code)) => {
-                        let status = status_after_exit(code);
-                        {
-                            let mut state = watch_state.lock();
-                            state.exit = Some(code);
-                            state.status = status;
-                            state.state_change_seq += 1;
-                            if status == AgentStatus::Done {
-                                state.completion_seq += 1;
+            .spawn(move || {
+                let mut backoff = std::time::Duration::from_millis(25);
+                loop {
+                    match watch_session.try_wait() {
+                        Ok(Some(code)) => {
+                            let status = status_after_exit(code);
+                            {
+                                let mut state = watch_state.lock();
+                                state.exit = Some(code);
+                                state.status = status;
+                                state.state_change_seq += 1;
+                                if status == AgentStatus::Done {
+                                    state.completion_seq += 1;
+                                }
                             }
+                            watch_events(PaneEvent::Status {
+                                pane_id: watch_id.clone(),
+                                status,
+                                completion: status == AgentStatus::Done,
+                            });
+                            watch_events(PaneEvent::Exited {
+                                pane_id: watch_id.clone(),
+                                code: Some(code),
+                            });
+                            return;
                         }
-                        watch_events(PaneEvent::Status {
-                            pane_id: watch_id.clone(),
-                            status,
-                            completion: status == AgentStatus::Done,
-                        });
-                        watch_events(PaneEvent::Exited {
-                            pane_id: watch_id.clone(),
-                            code: Some(code),
-                        });
-                        return;
+                        Ok(None) => {
+                            std::thread::sleep(backoff);
+                            backoff = (backoff * 2).min(MAX_EXIT_POLL);
+                        }
+                        Err(_) => return,
                     }
-                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(250)),
-                    Err(_) => return,
                 }
             })
             .map_err(|error| OrionError::Process(format!("failed to watch the agent: {error}")))?;
