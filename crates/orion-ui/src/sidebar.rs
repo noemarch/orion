@@ -25,7 +25,10 @@ use crate::agents::{agent_rows, AgentRow};
 use crate::terminal_tree::{status_token, terminal_rows, TerminalRow, TerminalSource};
 use crate::theme::Theme;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{avatar::Avatar, button::Button, button::ButtonVariants, Icon, Sizable};
+use gpui_kit::component::{
+    avatar::Avatar, button::Button, button::ButtonCustomVariant, button::ButtonVariants, Icon,
+    Sizable,
+};
 use gpui_kit::*;
 use gpui_kit::{div, px, Context, FocusHandle, Render, Styled, Window};
 use orion_core::protocol::AgentStatus;
@@ -433,7 +436,7 @@ impl WorkspaceSidebar {
         div().size(px(12.0)).rounded_full().bg(color)
     }
 
-    /// The 48px titlebar: four window lights, the brand mark, the "Orion"
+    /// The 40px titlebar: four window lights, the brand mark, the "Orion"
     /// wordmark and two trailing decorative glyphs.
     fn render_titlebar(&self, theme: &Theme, scale: f32) -> impl IntoElement {
         div()
@@ -442,7 +445,7 @@ impl WorkspaceSidebar {
             .flex_row()
             .items_center()
             .gap(px(SPACE_2 * scale))
-            .h(px(48.0))
+            .h(px(40.0))
             .flex_shrink_0()
             .px(px(SPACE_4 * scale))
             .child(
@@ -517,8 +520,6 @@ impl WorkspaceSidebar {
             .h(px(TOUCH_TARGET))
             .flex_shrink_0()
             .px(px(SPACE_4 * scale))
-            .border_b_1()
-            .border_color(theme.border_soft)
             .child(
                 Icon::new(IconName::Search)
                     .size(px(15.0 * scale))
@@ -530,7 +531,7 @@ impl WorkspaceSidebar {
                     .min_w(px(0.0))
                     .truncate()
                     .text_size(px(13.0 * scale))
-                    .text_color(theme.text_faint)
+                    .text_color(theme.token_text_dim())
                     .child(if self.rail {
                         String::new()
                     } else {
@@ -567,36 +568,9 @@ impl WorkspaceSidebar {
             )
     }
 
-    /// A quiet section label with a real count badge. The caller passes an
-    /// already-blanked label in rail mode.
-    fn section_header(label: &str, count: usize, theme: &Theme, scale: f32) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(SPACE_2 * scale))
-            .h(px(30.0 * scale))
-            .px(px(SPACE_4 * scale))
-            .text_size(px(11.0 * scale))
-            .text_color(theme.text_muted)
-            .child(label.to_string())
-            .child(div().flex_1())
-            .child(
-                div()
-                    .px(px(SPACE_2 * scale))
-                    .py(px(1.0 * scale))
-                    .rounded(px(RADIUS_SM * scale))
-                    .bg(theme.badge_bg)
-                    .border_1()
-                    .border_color(theme.badge_border)
-                    .text_color(theme.text_faint)
-                    .child(count.to_string()),
-            )
-    }
-
-    /// A workspace rendered as a reference-style session row: agent mark and
-    /// label on top, real cwd/agent below, status dot on the right. Clicking
-    /// the row focuses its pane; the close control stops propagation.
+    /// A workspace rendered as a rounded session card: agent mark and project
+    /// on top, title and cwd/agent below, status word and dot on the right.
+    /// Clicking the card focuses its pane; the close control stops propagation.
     fn render_workspace_row(
         &mut self,
         ws: &WorkspaceEntry,
@@ -614,58 +588,64 @@ impl WorkspaceSidebar {
             .to_string();
         let pane_id = ws.focus_pane.clone();
         let ws_id = ws.id.clone();
+        let project = if self.rail {
+            String::new()
+        } else {
+            ws.agent.clone()
+        };
+        let title = if self.rail {
+            String::new()
+        } else {
+            ws.label.clone()
+        };
         let sub = if self.rail {
             String::new()
         } else {
             ws.cwd.clone().unwrap_or_else(|| ws.agent.clone())
         };
+        let status_area = Self::status_area(ws.status, self.rail, theme);
         let mut row = Button::new(self.next_row_id())
-            .text()
+            .custom(
+                ButtonCustomVariant::new(cx)
+                    .color(if is_chosen {
+                        theme.selected_bg().into()
+                    } else {
+                        Theme::transparent().into()
+                    })
+                    .hover(if is_chosen {
+                        theme.selected_bg().into()
+                    } else {
+                        theme.hover_bg().into()
+                    }),
+            )
             .w_full()
-            .min_h(px(TOUCH_TARGET))
-            .px(px(14.0 * scale))
-            .py(px(SPACE_2 * scale))
-            .border_l_2()
-            .border_color(if is_chosen {
-                theme.accent_emphasis
-            } else {
-                Theme::transparent()
-            })
-            .bg(if is_chosen {
-                theme.surface_raised_2
-            } else {
-                Theme::transparent()
-            })
+            .h(px(88.0 * scale))
+            .px(px(theme.space_3()))
+            .py(px(theme.space_3()))
+            .rounded(px(theme.radius_card()))
             .child(
                 div()
                     .w_full()
                     .flex()
                     .flex_col()
-                    .gap(px(SPACE_1 * scale))
+                    .gap(px(theme.space_1()))
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(px(SPACE_2 * scale))
-                            .child(Avatar::new().name(mark).with_size(px(20.0 * scale)))
+                            .gap(px(theme.space_2()))
+                            .child(Self::avatar_chip(&mark, theme, scale))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w(px(0.0))
                                     .truncate()
-                                    .text_size(px(13.0 * scale))
-                                    .text_color(if is_chosen {
-                                        theme.text_strong
-                                    } else {
-                                        theme.text
-                                    })
-                                    .child(if self.rail {
-                                        String::new()
-                                    } else {
-                                        ws.label.clone()
-                                    }),
+                                    .text_size(px(theme.font_ui_secondary()))
+                                    .text_color(theme.token_text_muted())
+                                    .child(project),
                             )
+                            .child(status_area)
                             .child(if self.rail {
                                 div().id(self.next_row_id()).into_any_element()
                             } else {
@@ -677,8 +657,9 @@ impl WorkspaceSidebar {
                                             .text_color(theme.text_faint)
                                             .child("×"),
                                     )
-                                    .min_h(px(TOUCH_TARGET))
-                                    .min_w(px(TOUCH_TARGET))
+                                    // Wide-layout only: rail swaps this for an empty slot and keeps the 44px targets.
+                                    .min_h(px(28.0 * scale))
+                                    .min_w(px(28.0 * scale))
                                     .on_click(cx.listener(move |_this, _, _, cx| {
                                         cx.stop_propagation();
                                         cx.emit(SidebarEvent::CloseWorkspace(ws_id.clone()));
@@ -696,10 +677,19 @@ impl WorkspaceSidebar {
                     )
                     .child(
                         div()
-                            .pl(px(ROW_SUB_INDENT * scale))
+                            .w_full()
                             .truncate()
-                            .text_size(px(11.0 * scale))
-                            .text_color(theme.text_muted)
+                            .text_size(px(theme.font_ui_body()))
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .text_color(theme.text_primary())
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_size(px(theme.font_ui_secondary()))
+                            .text_color(theme.token_text_muted())
                             .child(sub),
                     ),
             );
@@ -714,8 +704,9 @@ impl WorkspaceSidebar {
         row
     }
 
-    /// An agent rendered as a session row: title, real context, written status
-    /// word and a non-rose status dot. Clicking focuses the agent's pane.
+    /// An agent rendered as a session card: project, title and context split
+    /// across three lines, written status word and a non-rose status dot.
+    /// Clicking focuses the agent's pane.
     fn render_agent_row(
         &mut self,
         agent: &AgentRow,
@@ -731,64 +722,63 @@ impl WorkspaceSidebar {
             .unwrap_or('?')
             .to_ascii_uppercase()
             .to_string();
+        let (project, sub) = match agent.context.split_once(" · ") {
+            Some((project, rest)) => (project.to_string(), rest.to_string()),
+            None => (agent.context.clone(), String::new()),
+        };
+        let (project, sub) = if self.rail {
+            (String::new(), String::new())
+        } else {
+            (project, sub)
+        };
+        let title = if self.rail {
+            String::new()
+        } else {
+            agent.title.clone()
+        };
+        let status_area = Self::status_area(agent.status, self.rail, theme);
         Button::new(self.next_row_id())
-            .text()
+            .custom(
+                ButtonCustomVariant::new(cx)
+                    .color(if agent.selected {
+                        theme.selected_bg().into()
+                    } else {
+                        Theme::transparent().into()
+                    })
+                    .hover(if agent.selected {
+                        theme.selected_bg().into()
+                    } else {
+                        theme.hover_bg().into()
+                    }),
+            )
             .w_full()
-            .min_h(px(TOUCH_TARGET))
-            .px(px(14.0 * scale))
-            .py(px(SPACE_2 * scale))
-            .border_l_2()
-            .border_color(if agent.selected {
-                theme.accent_emphasis
-            } else {
-                Theme::transparent()
-            })
-            .bg(if agent.selected {
-                theme.surface_raised_2
-            } else {
-                Theme::transparent()
-            })
+            .h(px(88.0 * scale))
+            .px(px(theme.space_3()))
+            .py(px(theme.space_3()))
+            .rounded(px(theme.radius_card()))
             .child(
                 div()
                     .w_full()
                     .flex()
                     .flex_col()
-                    .gap(px(SPACE_1 * scale))
+                    .gap(px(theme.space_1()))
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(px(SPACE_2 * scale))
-                            .child(Avatar::new().name(mark).with_size(px(20.0 * scale)))
+                            .gap(px(theme.space_2()))
+                            .child(Self::avatar_chip(&mark, theme, scale))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w(px(0.0))
                                     .truncate()
-                                    .text_size(px(13.0 * scale))
-                                    .text_color(if agent.selected {
-                                        theme.text_strong
-                                    } else {
-                                        theme.text
-                                    })
-                                    .child(if self.rail {
-                                        String::new()
-                                    } else {
-                                        agent.title.clone()
-                                    }),
+                                    .text_size(px(theme.font_ui_secondary()))
+                                    .text_color(theme.token_text_muted())
+                                    .child(project),
                             )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(10.0 * scale))
-                                    .text_color(theme.text_muted)
-                                    .child(if self.rail {
-                                        String::new()
-                                    } else {
-                                        agent.status_word().to_string()
-                                    }),
-                            )
+                            .child(status_area)
                             .child(
                                 div()
                                     .size(px(8.0))
@@ -799,15 +789,20 @@ impl WorkspaceSidebar {
                     )
                     .child(
                         div()
-                            .pl(px(ROW_SUB_INDENT * scale))
+                            .w_full()
                             .truncate()
-                            .text_size(px(11.0 * scale))
-                            .text_color(theme.text_muted)
-                            .child(if self.rail {
-                                String::new()
-                            } else {
-                                agent.context.clone()
-                            }),
+                            .text_size(px(theme.font_ui_body()))
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .text_color(theme.text_primary())
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_size(px(theme.font_ui_secondary()))
+                            .text_color(theme.token_text_muted())
+                            .child(sub),
                     ),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -817,7 +812,54 @@ impl WorkspaceSidebar {
             }))
     }
 
-    /// A terminal rendered as a quiet indented row with its real status badge.
+    /// The small rounded-square avatar chip that leads every session card.
+    fn avatar_chip(mark: &str, theme: &Theme, scale: f32) -> impl IntoElement {
+        div()
+            .flex_none()
+            .rounded(px(theme.radius_control()))
+            .bg(theme.hover_bg())
+            .p(px(theme.space_1()))
+            .child(
+                Avatar::new()
+                    .name(mark.to_string())
+                    .with_size(px(16.0 * scale)),
+            )
+    }
+
+    /// The trailing status of a session card: a tinted "Waiting" pill when the
+    /// agent is blocked, otherwise the plain status word in dim text.
+    fn status_area(status: AgentStatus, rail: bool, theme: &Theme) -> gpui_kit::AnyElement {
+        let word = status_word(status);
+        if status == AgentStatus::Blocked {
+            div()
+                .flex_none()
+                .px(px(theme.space_2()))
+                .py(px(theme.space_1()))
+                .rounded(px(theme.radius_control()))
+                .bg(theme.status_blocked_tint)
+                .text_size(px(theme.font_ui_secondary()))
+                .text_color(theme.state_attention())
+                .child(if rail {
+                    String::new()
+                } else {
+                    word.to_string()
+                })
+                .into_any_element()
+        } else {
+            div()
+                .flex_none()
+                .text_size(px(theme.font_ui_secondary()))
+                .text_color(theme.token_text_dim())
+                .child(if rail {
+                    String::new()
+                } else {
+                    word.to_string()
+                })
+                .into_any_element()
+        }
+    }
+
+    /// A terminal rendered as a quiet one-line row in the flat session list.
     fn render_terminal_row(
         &mut self,
         row: &TerminalRow,
@@ -842,7 +884,7 @@ impl WorkspaceSidebar {
                     .min_w(px(0.0))
                     .truncate()
                     .text_size(px(12.0 * scale))
-                    .text_color(theme.text)
+                    .text_color(theme.text_primary())
                     .child(if self.rail { String::new() } else { label }),
             )
             .child(
@@ -888,12 +930,8 @@ impl WorkspaceSidebar {
                     .child(div().flex_1())
                     .child(
                         div()
-                            .px(px(SPACE_2 * scale))
-                            .rounded(px(RADIUS_SM * scale))
-                            .bg(theme.badge_bg)
-                            .border_1()
-                            .border_color(theme.badge_border)
-                            .text_color(theme.text_faint)
+                            .text_size(px(12.0 * scale))
+                            .text_color(theme.token_text_dim())
                             .child(working.to_string()),
                     )
                     .child(
@@ -920,17 +958,20 @@ impl WorkspaceSidebar {
                     .child(div().flex_1())
                     .child(
                         div()
-                            .px(px(SPACE_2 * scale))
-                            .rounded(px(RADIUS_SM * scale))
-                            .bg(theme.badge_bg)
-                            .border_1()
-                            .border_color(theme.badge_border)
-                            .text_color(theme.text_faint)
+                            .text_size(px(12.0 * scale))
+                            .text_color(theme.token_text_dim())
                             .child(settled.to_string()),
                     ),
             );
 
         for agent in agents.iter().take(3) {
+            let mark = agent
+                .title
+                .chars()
+                .next()
+                .unwrap_or('?')
+                .to_ascii_uppercase()
+                .to_string();
             section = section.child(
                 div()
                     .flex()
@@ -942,11 +983,13 @@ impl WorkspaceSidebar {
                     .pr(px(SPACE_4 * scale))
                     .text_size(px(12.0 * scale))
                     .text_color(theme.text)
+                    .child(Self::avatar_chip(&mark, theme, scale))
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.0))
                             .truncate()
+                            .text_color(theme.token_text_muted())
                             .child(if self.rail {
                                 String::new()
                             } else {
@@ -957,7 +1000,7 @@ impl WorkspaceSidebar {
                         div()
                             .flex_none()
                             .text_size(px(11.0 * scale))
-                            .text_color(theme.text_faint)
+                            .text_color(theme.token_text_dim())
                             .child(if self.rail {
                                 String::new()
                             } else {
@@ -980,17 +1023,15 @@ impl WorkspaceSidebar {
             .h(px(40.0))
             .flex_shrink_0()
             .px(px(SPACE_4 * scale))
-            .border_t_1()
-            .border_color(theme.border_soft)
             .child(
                 Icon::new(IconName::SquareTerminal)
                     .size(px(15.0 * scale))
-                    .text_color(theme.text_muted),
+                    .text_color(theme.token_text_dim()),
             )
             .child(
                 Icon::new(IconName::LayoutDashboard)
                     .size(px(15.0 * scale))
-                    .text_color(theme.text_muted),
+                    .text_color(theme.token_text_dim()),
             )
     }
 }
@@ -998,6 +1039,19 @@ impl WorkspaceSidebar {
 fn parse_status(raw: Option<&str>) -> AgentStatus {
     raw.and_then(AgentStatus::from_wire)
         .unwrap_or(AgentStatus::Idle)
+}
+
+/// The written status word for a protocol `AgentStatus`, matching the roster's
+/// `AgentRow::status_word` vocabulary ("Waiting" for blocked).
+fn status_word(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Working => "Working",
+        AgentStatus::Blocked => "Waiting",
+        AgentStatus::Done => "Done",
+        AgentStatus::Error => "Error",
+        AgentStatus::Idle => "Idle",
+        AgentStatus::Unknown => "Unknown",
+    }
 }
 
 /// The tab's pane ids in the engine's order. Snapshots carry `pane_ids`; older
@@ -1069,23 +1123,11 @@ impl Render for WorkspaceSidebar {
             .min_h(px(0.0))
             .overflow_y_scroll()
             .pb(px(SPACE_2 * scale))
-            .child(Self::section_header(
-                if self.rail { "" } else { "WORKSPACES" },
-                workspaces.len(),
-                &theme,
-                scale,
-            ))
             .children(
                 workspaces
                     .iter()
                     .map(|ws| self.render_workspace_row(ws, &theme, scale, cx)),
             )
-            .child(Self::section_header(
-                if self.rail { "" } else { "AGENTS" },
-                agents.len(),
-                &theme,
-                scale,
-            ))
             .children(
                 agents
                     .iter()
@@ -1094,18 +1136,11 @@ impl Render for WorkspaceSidebar {
 
         // The terminal section stays conditional on non-empty real data.
         if !terminal_entries.is_empty() {
-            sessions = sessions
-                .child(Self::section_header(
-                    if self.rail { "" } else { "TERMINALS" },
-                    terminal_entries.len(),
-                    &theme,
-                    scale,
-                ))
-                .children(
-                    terminal_entries
-                        .iter()
-                        .map(|row| self.render_terminal_row(row, &theme, scale)),
-                );
+            sessions = sessions.children(
+                terminal_entries
+                    .iter()
+                    .map(|row| self.render_terminal_row(row, &theme, scale)),
+            );
         }
 
         if workspaces.is_empty() {
@@ -1129,7 +1164,8 @@ impl Render for WorkspaceSidebar {
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme.surface_canvas)
+            .bg(theme.panel_bg())
+            .rounded(px(theme.radius_panel()))
             .child(self.render_titlebar(&theme, scale))
             .child(self.render_search_row(&theme, scale, cx))
             .child(sessions)
