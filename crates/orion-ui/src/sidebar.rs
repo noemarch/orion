@@ -429,15 +429,7 @@ impl WorkspaceSidebar {
         }
     }
 
-    /// A 12px platform window light. The four colors come from status and
-    /// indicator tokens, so the traffic-light motif stays inside the palette
-    /// instead of hardcoding hex in view code.
-    fn window_light(color: gpui_kit::Rgba) -> impl IntoElement {
-        div().size(px(12.0)).rounded_full().bg(color)
-    }
-
-    /// The 40px titlebar: four window lights, the brand mark, the "Orion"
-    /// wordmark and two trailing decorative glyphs.
+    /// The 40px titlebar: the brand mark, the "Orion" wordmark and two trailing decorative glyphs.
     fn render_titlebar(&self, theme: &Theme, scale: f32) -> impl IntoElement {
         div()
             .id("sidebar-titlebar")
@@ -448,18 +440,6 @@ impl WorkspaceSidebar {
             .h(px(40.0))
             .flex_shrink_0()
             .px(px(SPACE_4 * scale))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SPACE_2 * scale))
-                    .mr(px(SPACE_2 * scale))
-                    .child(Self::window_light(theme.indicator_blocked))
-                    .child(Self::window_light(theme.warning_amber))
-                    .child(Self::window_light(theme.status_done))
-                    .child(Self::window_light(theme.text_faint)),
-            )
             .child(
                 div()
                     .size(px(18.0 * scale))
