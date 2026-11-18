@@ -31,9 +31,16 @@ impl ConversationResponse {
     /// Keep only the most recent `cap` turns, newest last. A scrollable column is
     /// used instead of GPUI virtualization (cap documented in `chat.rs`).
     pub fn recent(&self, cap: usize) -> Vec<&ChatTurn> {
-        let start = self.turns.len().saturating_sub(cap);
-        self.turns[start..].iter().collect()
+        recent_turns(&self.turns, cap)
     }
+}
+
+/// Borrow only the most recent `cap` turns from a turn slice, newest last.
+/// Zero-copy: the returned references point into `turns`. The chat view uses
+/// this to select its visible slice before deciding how to own it.
+pub fn recent_turns(turns: &[ChatTurn], cap: usize) -> Vec<&ChatTurn> {
+    let start = turns.len().saturating_sub(cap);
+    turns[start..].iter().collect()
 }
 
 /// Keep the most recent `cap` items, preserving order. Used to bound rendered
