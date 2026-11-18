@@ -264,7 +264,7 @@ impl ReviewPane {
                     .small()
                     .text_color(theme.token_text_dim()),
             )
-            .child(label)
+            .child(div().min_w(px(0.0)).truncate().child(label))
     }
 
     fn render_toolbar(
