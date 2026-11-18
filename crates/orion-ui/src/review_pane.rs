@@ -36,6 +36,16 @@ const GUTTER_WIDTH: f32 = 34.0;
 /// One code row's height (px, before density scaling).
 const CODE_ROW_HEIGHT: f32 = 19.0;
 
+// Spacing scale from DESIGN.md §4 (4px base). The Rust theme exposes density
+// scaling but no spacing tokens, so keep the scale named and local instead of
+// repeating bare literals across the view (matches sidebar.rs).
+const SPACE_1: f32 = 4.0; // --space-1: tight icon and control gaps
+const SPACE_2: f32 = 8.0; // --space-2: row and menu gaps
+const SPACE_4: f32 = 16.0; // --space-4: section padding
+/// Upper bound for one review tab: the review column's 320px minimum, so a
+/// single tab never outgrows the column at 1280x800 with the sidebar shown.
+const TAB_MAX_WIDTH: f32 = 320.0;
+
 /// What one rendered row means to the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
@@ -305,7 +315,7 @@ impl ReviewPane {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(6.0 * scale))
+                        .gap(px(SPACE_2 * scale))
                         .text_color(theme.text_muted)
                         .child(
                             div()
@@ -360,59 +370,47 @@ impl ReviewPane {
 
         for (index, file) in files.iter().enumerate() {
             let is_active = active == Some(index);
-            let mut tab = div()
-                .id(ElementId::Name(format!("review-tab:{}", file.path).into()))
-                .debug_selector(|| "review-tab".to_string())
-                .relative()
-                .flex()
-                .flex_col()
-                .gap(px(3.0 * scale))
-                .w(px(TAB_WIDTH * scale))
-                .flex_shrink_0()
-                .px(px(16.0 * scale))
-                .pt(px(9.0 * scale))
-                .pb(px(7.0 * scale))
-                .border_r_1()
-                .border_color(theme.border)
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)));
-            if is_active {
-                tab = tab.bg(theme.tab_active_bg);
-            }
-
             let title_color = if is_active {
                 theme.text
             } else {
                 theme.text_muted
             };
-            tab = tab.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0 * scale))
-                    .text_size(px(12.5 * scale))
-                    .child(
-                        Icon::new(IconName::FileText)
-                            .small()
-                            .text_color(theme.text_faint),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_color(title_color)
-                            .child(file_basename(&file.path).to_string()),
-                    ),
-            );
+
+            let mut content = div()
+                .relative()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_1 * scale))
+                .w_full()
+                .h_full()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(SPACE_2 * scale))
+                        .text_size(px(12.5 * scale))
+                        .child(
+                            Icon::new(IconName::FileText)
+                                .small()
+                                .text_color(theme.text_faint),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_color(title_color)
+                                .child(file_basename(&file.path).to_string()),
+                        ),
+                );
 
             let mut stats = div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(7.0 * scale))
+                .gap(px(SPACE_2 * scale))
                 .font_family(MONO)
                 .text_size(px(11.0 * scale))
                 .text_color(theme.text_faint);
@@ -435,10 +433,10 @@ impl ReviewPane {
                     stats = stats.child(label);
                 }
             }
-            tab = tab.child(stats);
+            content = content.child(stats);
 
             if is_active {
-                tab = tab.child(
+                content = content.child(
                     div()
                         .absolute()
                         .left_0()
@@ -448,7 +446,24 @@ impl ReviewPane {
                         .bg(theme.tab_active_marker),
                 );
             }
-            strip = strip.child(tab);
+
+            let mut tab = Button::new(ElementId::Name(format!("review-tab:{}", file.path).into()))
+                .debug_selector(|| "review-tab".to_string())
+                .text()
+                .min_w(px(TAB_WIDTH * scale))
+                .w(px(TAB_WIDTH * scale))
+                .max_w(px(TAB_MAX_WIDTH * scale))
+                .flex_shrink_0()
+                .px(px(SPACE_4 * scale))
+                .pt(px(SPACE_2 * scale))
+                .pb(px(SPACE_2 * scale))
+                .border_r_1()
+                .border_color(theme.border)
+                .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)));
+            if is_active {
+                tab = tab.bg(theme.tab_active_bg);
+            }
+            strip = strip.child(tab.child(content));
         }
 
         strip

@@ -18,6 +18,13 @@ use gpui_kit::{
 };
 use std::sync::Arc;
 
+// Spacing tokens (DESIGN.md §4), as in chat.rs and sidebar.rs.
+const SPACE_1: f32 = 4.0; // --space-1: tight control gaps
+const SPACE_2: f32 = 8.0; // --space-2: row and action gaps
+const SPACE_3: f32 = 12.0; // --space-3: control padding
+const TOUCH_TARGET: f32 = 44.0; // --touch-target: coarse-pointer minimum
+const CONTENT_W: f32 = 820.0; // --content-w: composer column width
+
 /// What the composer's send is doing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendState {
@@ -528,7 +535,7 @@ impl Composer {
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .gap(px(12.0))
+                .gap(px(SPACE_3))
                 .px_3()
                 .text_size(px(12.0 * theme.density_scale()))
                 .text_color(theme.danger_text)
@@ -541,18 +548,17 @@ impl Composer {
                         .id("composer-retry")
                         .debug_selector(|| "composer-retry".to_string())
                         .flex()
-                        .items_center()
-                        .justify_center()
-                        .min_h(px(44.0))
-                        .px_3()
-                        .rounded_md()
-                        .bg(theme.primary)
-                        .text_color(theme.primary_text)
-                        .child("Try again")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.retry(cx);
-                            cx.notify();
-                        })),
+                        .child(
+                            Button::new("composer-retry")
+                                .label("Try again")
+                                .primary()
+                                .min_h(px(TOUCH_TARGET))
+                                .min_w(px(TOUCH_TARGET))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.retry(cx);
+                                    cx.notify();
+                                })),
+                        ),
                 );
             }
             return Some(note.into_any_element());
@@ -603,7 +609,7 @@ impl Render for Composer {
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .gap(px(SPACE_1))
             .w_full()
             .min_h(px(50.0))
             .px_3()
@@ -652,7 +658,8 @@ impl Render for Composer {
                 Button::new("composer-send")
                     .label("Send")
                     .primary()
-                    .h(px(44.0))
+                    .min_h(px(TOUCH_TARGET))
+                    .min_w(px(TOUCH_TARGET))
                     .disabled(!can_send)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.send(cx);
@@ -668,7 +675,8 @@ impl Render for Composer {
                 Button::new("composer-stop")
                     .label("Stop")
                     .secondary()
-                    .h(px(44.0))
+                    .min_h(px(TOUCH_TARGET))
+                    .min_w(px(TOUCH_TARGET))
                     .disabled(!can_stop)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.stop(cx);
@@ -681,9 +689,9 @@ impl Render for Composer {
             .debug_selector(|| "chat-composer".to_string())
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(SPACE_2))
             .w_full()
-            .max_w(px(820.0))
+            .max_w(px(CONTENT_W))
             .p_3()
             .mb_3()
             .rounded_lg()
@@ -703,7 +711,7 @@ impl Render for Composer {
                 .flex_row()
                 .items_center()
                 .justify_end()
-                .gap(px(8.0))
+                .gap(px(SPACE_2))
                 .child(stop)
                 .child(send),
         )

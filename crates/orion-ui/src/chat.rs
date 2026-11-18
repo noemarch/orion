@@ -22,7 +22,8 @@
 //! screen.
 
 use crate::chat_entities::{
-    cap_turns, delegated_terminals, ChatPart, ChatPrompt, ChatRole, ChatTurn, ConversationResponse,
+    delegated_terminals, recent_turns, ChatPart, ChatPrompt, ChatRole, ChatTurn,
+    ConversationResponse,
 };
 use crate::chat_model::{at_bottom, format_timestamp, ChatModel};
 use crate::composer::Composer;
@@ -41,6 +42,7 @@ use crate::tool_card::{
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyTitle};
+use gpui_kit::component::link::Link;
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::*;
 use gpui_kit::{
@@ -60,6 +62,18 @@ pub const MAX_RECENT_TURNS: usize = 200;
 /// back and block the composer. After the grace, the same menu is a new
 /// question.
 pub const ANSWERED_PROMPT_GRACE: Duration = Duration::from_secs(3);
+
+/// Spacing tokens from DESIGN.md §4 (4px base). GPUI has no CSS custom
+/// properties, so the chat lens names them once here instead of repeating raw
+/// px literals across its rows and panels.
+const SPACE_1: f32 = 4.0;
+const SPACE_2: f32 = 8.0;
+const SPACE_3: f32 = 12.0;
+/// `--touch-target` (DESIGN.md §4): the minimum hit height for a finger.
+const TOUCH_TARGET: f32 = 44.0;
+/// Tight gap between the runs of one row (caret, verb, object, status).
+const ROW_GAP: f32 = 6.0;
+
 /// What the chat asks the shell for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatEvent {
@@ -693,17 +707,23 @@ fn render_markdown_line(
         }
         let span_style = span_style(&base, &span, theme, size * CHAT_INLINE_CODE_RATIO);
         *row_seq += 1;
-        let mut element = div().id(*row_seq).child(
-            StyledText::new(slice.to_string()).with_default_highlights(&span_style, Vec::new()),
-        );
+        let styled =
+            StyledText::new(slice.to_string()).with_default_highlights(&span_style, Vec::new());
+        let mut element = div().id(*row_seq);
         // A web link opens in the browser; anything else stays in the app.
-        if let Some(target) = span.target.as_deref() {
-            if opens_in_browser(target) {
-                let target = target.to_string();
-                element = element
-                    .debug_selector(|| "chat-link".to_string())
-                    .on_click(move |_, _window, app| app.open_url(&target));
-            }
+        if let Some(target) = span
+            .target
+            .as_deref()
+            .filter(|target| opens_in_browser(target))
+        {
+            let target = target.to_string();
+            element = element.debug_selector(|| "chat-link".to_string()).child(
+                Link::new(*row_seq)
+                    .child(styled)
+                    .on_click(move |_, _window, app| app.open_url(&target)),
+            );
+        } else {
+            element = element.child(styled);
         }
         row = row.child(element);
     }
@@ -830,11 +850,17 @@ impl Render for ChatView {
             scroll_body = scroll_body.child(cards);
         }
 
+        // One scroll owner: this panel shrinks inside the chat column
+        // (`min_h(0)` beats the flex item's auto minimum) and is the only
+        // element with `overflow_y_scroll` + `track_scroll`. `scroll_body`
+        // and the turn column are plain flex columns, never scrollers, so
+        // there is no nested same-direction scroll to fight the handle.
         let list = div()
             .id("chat-scroll")
             .flex()
             .flex_col()
             .flex_1()
+            .min_h(px(0.0))
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
             .child(scroll_body);
@@ -911,7 +937,7 @@ impl ChatView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(SPACE_2))
             .h(px(28.0))
             .px_3()
             .border_t_1()
@@ -931,10 +957,10 @@ impl ChatView {
             .debug_selector(|| "chat-loading".to_string())
             .flex()
             .flex_col()
-            .gap(px(12.0))
+            .gap(px(SPACE_3))
             .p_3();
         for width in [220.0, 320.0, 180.0] {
-            column = column.child(Skeleton::new().h(px(12.0)).w(px(width)));
+            column = column.child(Skeleton::new().h(px(SPACE_3)).w(px(width)));
         }
         column.into_any_element()
     }
@@ -967,7 +993,7 @@ impl ChatView {
             .flex_row()
             .items_center()
             .justify_between()
-            .gap(px(12.0))
+            .gap(px(SPACE_3))
             .px_3()
             .py_2()
             .bg(theme.danger_tint)
@@ -981,7 +1007,7 @@ impl ChatView {
                         Button::new("chat-retry")
                             .label("Try again")
                             .primary()
-                            .h(px(44.0))
+                            .h(px(TOUCH_TARGET))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.retry(cx);
                                 cx.notify();
@@ -991,9 +1017,21 @@ impl ChatView {
     }
 
     fn render_turns(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let turns = cap_turns(self.model.turns().to_vec(), MAX_RECENT_TURNS);
+        // `recent_turns` borrows only the visible slice instead of cloning the
+        // whole transcript. The <=200 selected turns are cloned because
+        // `render_turn` needs `&mut self` (row ids, open-row state) while a
+        // borrowed turn would keep `self.model` immutably borrowed for the loop.
+        let turns: Vec<ChatTurn> = recent_turns(self.model.turns(), MAX_RECENT_TURNS)
+            .into_iter()
+            .cloned()
+            .collect();
         let total = self.model.turns().len();
-        let mut column = div().id("chat-turns").flex().flex_col().gap(px(12.0)).p_3();
+        let mut column = div()
+            .id("chat-turns")
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_3))
+            .p_3();
         for (offset, turn) in turns.iter().enumerate() {
             let index = total - turns.len() + offset;
             column = column.child(self.render_turn(index, turn, cx));
@@ -1014,7 +1052,7 @@ impl ChatView {
             .debug_selector(|| "chat-turn".to_string())
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .gap(px(ROW_GAP))
             .p_3()
             .rounded_md()
             .bg(if is_user {
@@ -1038,7 +1076,7 @@ impl ChatView {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(8.0))
+                .gap(px(SPACE_2))
                 .text_size(px(11.0 * theme.density_scale()))
                 .text_color(theme.text_dim)
                 .child(role_label)
@@ -1078,7 +1116,7 @@ impl ChatView {
                     .id(self.next_row_id())
                     .flex()
                     .flex_col()
-                    .gap(px(4.0))
+                    .gap(px(SPACE_1))
                     .rounded_md()
                     .bg(theme.surface_raised);
                 folded = folded.child(
@@ -1090,7 +1128,7 @@ impl ChatView {
                             "Thinking (expand)"
                         })
                         .text()
-                        .h(px(44.0))
+                        .h(px(TOUCH_TARGET))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.model.toggle_thinking(turn_index, part_index);
                             cx.notify();
@@ -1205,7 +1243,7 @@ impl ChatView {
             .debug_selector(|| "chat-tool".to_string())
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .gap(px(SPACE_1))
             .rounded_md()
             .bg(theme.surface_raised)
             .p_2();
@@ -1213,58 +1251,65 @@ impl ChatView {
         // The header: caret, verb, object (DESIGN.md §5).
         let verb = tool_verb(&card.name);
         let object = tool_object(&card.summary, &card.name);
+        let tool_header_name = format!("Toggle tool {}", card.name);
         row = row.child(
-            div()
-                .id(self.next_row_id())
+            Button::new(self.next_row_id())
                 .debug_selector(|| "chat-tool-header".to_string())
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .min_h(px(44.0))
-                .cursor_pointer()
+                .text()
+                .w_full()
+                .p_0()
+                .h_auto()
+                .min_h(px(TOUCH_TARGET))
+                .accessibility_label(tool_header_name)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.model.toggle_tool(turn_index, part_index);
                     cx.notify();
                 }))
-                .child(div().text_color(theme.text_dim).child(if open {
-                    "\u{25be}"
-                } else {
-                    "\u{25b8}"
-                }))
                 .child(
                     div()
-                        .text_size(px(13.0 * theme.density_scale()))
-                        .text_color(if failed {
-                            theme.status_blocked
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(ROW_GAP))
+                        .child(div().text_color(theme.text_dim).child(if open {
+                            "\u{25be}"
                         } else {
-                            theme.text_dim
-                        })
-                        .child(match verb {
-                            Some(verb) => verb.to_string(),
-                            None => card.name.clone(),
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0 * theme.density_scale()))
-                        .font_family("JetBrains Mono")
-                        .text_color(if failed {
-                            theme.status_blocked
-                        } else {
-                            theme.text
-                        })
-                        .child(object),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0 * theme.density_scale()))
-                        .text_color(if failed {
-                            theme.status_blocked
-                        } else {
-                            theme.text_dim
-                        })
-                        .child(card.status.as_word()),
+                            "\u{25b8}"
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(13.0 * theme.density_scale()))
+                                .text_color(if failed {
+                                    theme.status_blocked
+                                } else {
+                                    theme.text_dim
+                                })
+                                .child(match verb {
+                                    Some(verb) => verb.to_string(),
+                                    None => card.name.clone(),
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0 * theme.density_scale()))
+                                .font_family("JetBrains Mono")
+                                .text_color(if failed {
+                                    theme.status_blocked
+                                } else {
+                                    theme.text
+                                })
+                                .child(object),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0 * theme.density_scale()))
+                                .text_color(if failed {
+                                    theme.status_blocked
+                                } else {
+                                    theme.text_dim
+                                })
+                                .child(card.status.as_word()),
+                        ),
                 ),
         );
 
@@ -1435,7 +1480,7 @@ impl ChatView {
                     .id(self.next_row_id())
                     .flex()
                     .flex_row()
-                    .gap(px(6.0))
+                    .gap(px(ROW_GAP))
                     .child(
                         StyledText::new(line.sign().to_string())
                             .with_default_highlights(&text_style, Vec::new()),
@@ -1456,7 +1501,7 @@ impl ChatView {
             .debug_selector(|| "chat-terminal-path".to_string())
             .label("View full in Terminal")
             .text()
-            .h(px(44.0))
+            .h(px(TOUCH_TARGET))
             .on_click(cx.listener(|_this, _, _, cx| {
                 cx.emit(ChatEvent::ShowTerminal);
                 cx.notify();
@@ -1484,7 +1529,7 @@ impl ChatView {
             .debug_selector(|| "chat-terminals".to_string())
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .gap(px(SPACE_1))
             .px_3()
             .pb_3()
             .child(
@@ -1501,6 +1546,7 @@ impl ChatView {
                 .clone()
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| row.id.clone());
+            let accessible_name = format!("Open terminal {}", label);
             let token = status_token(row.status.as_deref());
             // The card is a tool row in another guise: the same panel, the
             // same padding, the same 44px header row (DESIGN.md §5).
@@ -1508,8 +1554,8 @@ impl ChatView {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(6.0))
-                .min_h(px(44.0))
+                .gap(px(ROW_GAP))
+                .min_h(px(TOUCH_TARGET))
                 .child(
                     div()
                         .flex_1()
@@ -1539,23 +1585,31 @@ impl ChatView {
                             .bg(color),
                     );
             }
+            let button_id = format!("chat-terminal-card-button-{selector_id}");
             let card = div()
                 .id(self.next_row_id())
                 .debug_selector(move || format!("chat-terminal-card-{selector_id}"))
                 .flex()
                 .flex_col()
-                .gap(px(4.0))
+                .gap(px(SPACE_1))
                 .rounded_md()
                 .bg(theme.surface_raised)
                 .border_1()
                 .border_color(theme.border_soft)
                 .p_2()
-                .cursor_pointer()
-                .child(header)
-                .on_click(cx.listener(move |_this, _, _, cx| {
-                    cx.emit(ChatEvent::FocusTerminal { id: id.clone() });
-                    cx.notify();
-                }));
+                .child(
+                    Button::new(button_id)
+                        .ghost()
+                        .w_full()
+                        .p_0()
+                        .h_auto()
+                        .accessibility_label(accessible_name)
+                        .child(header)
+                        .on_click(cx.listener(move |_this, _, _, cx| {
+                            cx.emit(ChatEvent::FocusTerminal { id: id.clone() });
+                            cx.notify();
+                        })),
+                );
             section = section.child(card);
         }
         Some(section.into_any_element())
