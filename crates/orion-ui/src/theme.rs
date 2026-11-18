@@ -227,6 +227,46 @@ pub struct Theme {
     pub badge_bg: Rgba,
     /// Code comment `--code-comment`: comments and doc lines in highlighted code.
     pub code_comment: Rgba,
+
+    // Phase 1 restyle palette (approved tokens). Additive: every palette above
+    // keeps its value, so existing views and `sync_gpui_kit` are untouched.
+    // These fields back the token accessors below; raw hex lives only here.
+    /// `--window-bg`: the application window's ground.
+    pub restyle_window_bg: Rgba,
+    /// `--panel-bg`: a panel's ground.
+    pub restyle_panel_bg: Rgba,
+    /// `--hover-bg`: a hovered row's ground.
+    pub restyle_hover_bg: Rgba,
+    /// `--selected-bg`: a selected row's ground.
+    pub restyle_selected_bg: Rgba,
+    /// `--block-prompt-bg`: a prompt block's ground.
+    pub restyle_block_prompt_bg: Rgba,
+    /// `--block-output-bg`: an output block's ground.
+    pub restyle_block_output_bg: Rgba,
+    /// `--border-subtle`: the quietest divider edge.
+    pub restyle_border_subtle: Rgba,
+    /// `--text-primary`: primary body text.
+    pub restyle_text_primary: Rgba,
+    /// `--text-muted`: secondary text.
+    pub restyle_text_muted: Rgba,
+    /// `--text-dim`: tertiary text.
+    pub restyle_text_dim: Rgba,
+    /// `--accent`: green, for active-tab underlines and small highlights only.
+    pub restyle_accent: Rgba,
+    /// `--code-accent`: rose, for file paths and inline code.
+    pub restyle_code_accent: Rgba,
+    /// `--state-attention`: amber attention state.
+    pub restyle_state_attention: Rgba,
+    /// `--diff-add-text`: added code text.
+    pub restyle_diff_add_text: Rgba,
+    /// `--diff-remove-text`: removed code text.
+    pub restyle_diff_remove_text: Rgba,
+    /// `--diff-add-bg`: added-line background wash.
+    pub restyle_diff_add_bg: Rgba,
+    /// `--diff-remove-bg`: removed-line background wash.
+    pub restyle_diff_remove_bg: Rgba,
+    /// `--diff-hunk-bg`: the `@@` hunk-header strip.
+    pub restyle_diff_hunk_bg: Rgba,
 }
 
 fn tint(hex: u32, alpha_pct: u8) -> Rgba {
@@ -328,6 +368,24 @@ impl Theme {
                 badge_border: rgb(0x5c4a1f),
                 badge_bg: rgb(0x2a2313),
                 code_comment: rgb(0x6a7385),
+                restyle_window_bg: rgb(0x171a21),
+                restyle_panel_bg: rgb(0x1c2029),
+                restyle_hover_bg: rgb(0x222733),
+                restyle_selected_bg: rgb(0x262b37),
+                restyle_block_prompt_bg: rgb(0x212a3b),
+                restyle_block_output_bg: rgb(0x252b38),
+                restyle_border_subtle: rgb(0x2a2f3b),
+                restyle_text_primary: rgb(0xe4e7ee),
+                restyle_text_muted: rgb(0x8b92a3),
+                restyle_text_dim: rgb(0x5d6475),
+                restyle_accent: rgb(0x8fd14f),
+                restyle_code_accent: rgb(0xe0707f),
+                restyle_state_attention: rgb(0xe5b84b),
+                restyle_diff_add_text: rgb(0x4ccf7a),
+                restyle_diff_remove_text: rgb(0xf0626b),
+                restyle_diff_add_bg: rgb(0x1d3a2c),
+                restyle_diff_remove_bg: rgb(0x3a2129),
+                restyle_diff_hunk_bg: rgb(0x232a38),
             },
             ThemeMode::Light => Theme {
                 mode,
@@ -409,6 +467,24 @@ impl Theme {
                 badge_border: rgb(0xd4a72c),
                 badge_bg: rgb(0xfff8c5),
                 code_comment: rgb(0x6e7781),
+                restyle_window_bg: rgb(0xf4f5f7),
+                restyle_panel_bg: rgb(0xffffff),
+                restyle_hover_bg: rgb(0xe9ebf0),
+                restyle_selected_bg: rgb(0xdfe3ea),
+                restyle_block_prompt_bg: rgb(0xe8eef8),
+                restyle_block_output_bg: rgb(0xeef0f4),
+                restyle_border_subtle: rgb(0xd5d9e2),
+                restyle_text_primary: rgb(0x1f2430),
+                restyle_text_muted: rgb(0x5c6474),
+                restyle_text_dim: rgb(0x6b7280),
+                restyle_accent: rgb(0x3f7d1f),
+                restyle_code_accent: rgb(0xb03a52),
+                restyle_state_attention: rgb(0x9a6a00),
+                restyle_diff_add_text: rgb(0x1a7f37),
+                restyle_diff_remove_text: rgb(0xb62324),
+                restyle_diff_add_bg: rgb(0xe6f4ea),
+                restyle_diff_remove_bg: rgb(0xfce8e8),
+                restyle_diff_hunk_bg: rgb(0xeef2f8),
             },
         }
     }
@@ -504,6 +580,177 @@ impl Theme {
             Density::Comfortable => 32.0,
             Density::Compact => 28.0,
         }
+    }
+
+    /// `window_bg` — the application window's ground.
+    pub fn window_bg(&self) -> Rgba {
+        self.restyle_window_bg
+    }
+
+    /// `panel_bg` — a panel's ground.
+    pub fn panel_bg(&self) -> Rgba {
+        self.restyle_panel_bg
+    }
+
+    /// `hover_bg` — a hovered row's ground.
+    pub fn hover_bg(&self) -> Rgba {
+        self.restyle_hover_bg
+    }
+
+    /// `selected_bg` — a selected row's ground.
+    pub fn selected_bg(&self) -> Rgba {
+        self.restyle_selected_bg
+    }
+
+    /// `block_prompt_bg` — a prompt block's ground.
+    pub fn block_prompt_bg(&self) -> Rgba {
+        self.restyle_block_prompt_bg
+    }
+
+    /// `block_output_bg` — an output block's ground.
+    pub fn block_output_bg(&self) -> Rgba {
+        self.restyle_block_output_bg
+    }
+
+    /// `border_subtle` — the quietest divider edge.
+    pub fn border_subtle(&self) -> Rgba {
+        self.restyle_border_subtle
+    }
+
+    /// `text_primary` — primary body text.
+    pub fn text_primary(&self) -> Rgba {
+        self.restyle_text_primary
+    }
+
+    /// `text_muted` — secondary text. Prefixed because the legacy field of the
+    /// same name holds the original Quiet Slate value.
+    pub fn token_text_muted(&self) -> Rgba {
+        self.restyle_text_muted
+    }
+
+    /// `text_dim` — tertiary text.
+    pub fn token_text_dim(&self) -> Rgba {
+        self.restyle_text_dim
+    }
+
+    /// `accent` — green, for active-tab underlines and small highlights only.
+    pub fn token_accent(&self) -> Rgba {
+        self.restyle_accent
+    }
+
+    /// `code_accent` — rose, for file paths and inline code.
+    pub fn code_accent(&self) -> Rgba {
+        self.restyle_code_accent
+    }
+
+    /// `state_attention` — amber attention state.
+    pub fn state_attention(&self) -> Rgba {
+        self.restyle_state_attention
+    }
+
+    /// `diff_add_text` — added code text.
+    pub fn token_diff_add_text(&self) -> Rgba {
+        self.restyle_diff_add_text
+    }
+
+    /// `diff_remove_text` — removed code text.
+    pub fn diff_remove_text(&self) -> Rgba {
+        self.restyle_diff_remove_text
+    }
+
+    /// `diff_add_bg` — added-line background wash.
+    pub fn diff_add_bg(&self) -> Rgba {
+        self.restyle_diff_add_bg
+    }
+
+    /// `diff_remove_bg` — removed-line background wash.
+    pub fn diff_remove_bg(&self) -> Rgba {
+        self.restyle_diff_remove_bg
+    }
+
+    /// `diff_hunk_bg` — the `@@` hunk-header strip.
+    pub fn token_diff_hunk_bg(&self) -> Rgba {
+        self.restyle_diff_hunk_bg
+    }
+
+    /// `radius_panel` — panel corner radius, scaled by density.
+    pub fn radius_panel(&self) -> f32 {
+        12.0 * self.density_scale()
+    }
+
+    /// `radius_card` — card corner radius, scaled by density.
+    pub fn radius_card(&self) -> f32 {
+        10.0 * self.density_scale()
+    }
+
+    /// `radius_control` — control corner radius, scaled by density.
+    pub fn radius_control(&self) -> f32 {
+        8.0 * self.density_scale()
+    }
+
+    /// `space_1` — the tightest spacing step, scaled by density.
+    pub fn space_1(&self) -> f32 {
+        4.0 * self.density_scale()
+    }
+
+    /// `space_2` — the second spacing step, scaled by density.
+    pub fn space_2(&self) -> f32 {
+        8.0 * self.density_scale()
+    }
+
+    /// `space_3` — the third spacing step, scaled by density.
+    pub fn space_3(&self) -> f32 {
+        12.0 * self.density_scale()
+    }
+
+    /// `space_4` — the fourth spacing step, scaled by density.
+    pub fn space_4(&self) -> f32 {
+        16.0 * self.density_scale()
+    }
+
+    /// `space_5` — the widest spacing step, scaled by density.
+    pub fn space_5(&self) -> f32 {
+        24.0 * self.density_scale()
+    }
+
+    /// `panel_gap` — the gap between panels, scaled by density.
+    pub fn panel_gap(&self) -> f32 {
+        8.0 * self.density_scale()
+    }
+
+    /// `panel_padding` — the inset inside a panel, scaled by density.
+    pub fn panel_padding(&self) -> f32 {
+        16.0 * self.density_scale()
+    }
+
+    /// `font_ui_body` — body UI font size, scaled by density.
+    pub fn font_ui_body(&self) -> f32 {
+        13.0 * self.density_scale()
+    }
+
+    /// `font_ui_secondary` — secondary UI font size, scaled by density.
+    pub fn font_ui_secondary(&self) -> f32 {
+        12.0 * self.density_scale()
+    }
+
+    /// `font_title` — title font size, scaled by density.
+    pub fn font_title(&self) -> f32 {
+        14.0 * self.density_scale()
+    }
+
+    /// `font_title_lg` — large title font size, scaled by density.
+    pub fn font_title_lg(&self) -> f32 {
+        15.0 * self.density_scale()
+    }
+
+    /// `font_mono` — monospace font size, scaled by density.
+    pub fn font_mono(&self) -> f32 {
+        12.5 * self.density_scale()
+    }
+
+    /// `mono_line_height` — monospace line-height ratio, scaled by density.
+    pub fn mono_line_height(&self) -> f32 {
+        1.5 * self.density_scale()
     }
 
     /// Silence for `.bg(..)`: a fully transparent color from this palette.
@@ -892,5 +1139,53 @@ mod tests {
         assert_eq!(theme.badge_border, rgb(0xd4a72c));
         assert_eq!(theme.badge_bg, rgb(0xfff8c5));
         assert_eq!(theme.code_comment, rgb(0x6e7781));
+    }
+
+    #[::core::prelude::v1::test]
+    fn phase1_restyle_tokens_match_spec() {
+        let dark = Theme::dark();
+        assert_eq!(dark.window_bg(), rgb(0x171a21));
+        assert_eq!(dark.panel_bg(), rgb(0x1c2029));
+        assert_eq!(dark.hover_bg(), rgb(0x222733));
+        assert_eq!(dark.selected_bg(), rgb(0x262b37));
+        assert_eq!(dark.block_prompt_bg(), rgb(0x212a3b));
+        assert_eq!(dark.block_output_bg(), rgb(0x252b38));
+        assert_eq!(dark.border_subtle(), rgb(0x2a2f3b));
+        assert_eq!(dark.text_primary(), rgb(0xe4e7ee));
+        assert_eq!(dark.token_text_muted(), rgb(0x8b92a3));
+        assert_eq!(dark.token_text_dim(), rgb(0x5d6475));
+        assert_eq!(dark.token_accent(), rgb(0x8fd14f));
+        assert_eq!(dark.code_accent(), rgb(0xe0707f));
+        assert_eq!(dark.state_attention(), rgb(0xe5b84b));
+        assert_eq!(dark.token_diff_add_text(), rgb(0x4ccf7a));
+        assert_eq!(dark.diff_remove_text(), rgb(0xf0626b));
+        assert_eq!(dark.diff_add_bg(), rgb(0x1d3a2c));
+        assert_eq!(dark.diff_remove_bg(), rgb(0x3a2129));
+        assert_eq!(dark.token_diff_hunk_bg(), rgb(0x232a38));
+
+        assert_eq!(dark.radius_panel(), 12.0);
+        assert_eq!(dark.radius_card(), 10.0);
+        assert_eq!(dark.radius_control(), 8.0);
+        assert_eq!(dark.space_1(), 4.0);
+        assert_eq!(dark.space_2(), 8.0);
+        assert_eq!(dark.space_3(), 12.0);
+        assert_eq!(dark.space_4(), 16.0);
+        assert_eq!(dark.space_5(), 24.0);
+        assert_eq!(dark.panel_gap(), 8.0);
+        assert_eq!(dark.panel_padding(), 16.0);
+        assert_eq!(dark.font_ui_body(), 13.0);
+        assert_eq!(dark.font_ui_secondary(), 12.0);
+        assert_eq!(dark.font_title(), 14.0);
+        assert_eq!(dark.font_title_lg(), 15.0);
+        assert_eq!(dark.font_mono(), 12.5);
+        assert_eq!(dark.mono_line_height(), 1.5);
+
+        let compact = Theme::for_mode(ThemeMode::Dark, Density::Compact);
+        let scale = compact.density_scale();
+        assert_eq!(compact.radius_panel(), 12.0 * scale);
+        assert_eq!(compact.space_5(), 24.0 * scale);
+        assert_eq!(compact.font_mono(), 12.5 * scale);
+        assert_eq!(compact.mono_line_height(), 1.5 * scale);
+        assert_eq!(compact.window_bg(), dark.window_bg());
     }
 }
