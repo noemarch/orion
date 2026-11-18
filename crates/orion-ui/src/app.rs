@@ -25,7 +25,7 @@ use crate::review_pane::ReviewPane;
 use crate::settings::{KeyBarExtras, Preferences, SettingsModal};
 use crate::shell_model::{
     reference_layout, review_column_visible, sidebar_visible, HeaderModel, LensBook, ShellLayout,
-    FILES_SURFACE_WIDTH_WIDE, HEADER_HEIGHT_WIDE_PX,
+    FILES_SURFACE_WIDTH_WIDE,
 };
 use crate::sidebar::{SidebarEvent, TabEntry, WorkspaceEntry};
 use crate::terminal::TerminalPane;
@@ -885,7 +885,65 @@ impl OrionApp {
         });
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_window_controls(window: &Window, theme: &Theme) -> impl IntoElement {
+        let muted = theme.token_text_muted();
+        let hover_bg = theme.hover_bg();
+        let hover_fg = theme.text_primary();
+        let close_hover_bg = theme.close_hover_bg();
+        let close_hover_fg = theme.close_hover_fg();
+        let maximize_icon = if window.is_maximized() {
+            IconName::WindowRestore
+        } else {
+            IconName::WindowMaximize
+        };
+
+        div()
+            .flex()
+            .flex_row()
+            .h_full()
+            .flex_shrink_0()
+            .child(
+                div()
+                    .w(px(46.0))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .window_control_area(WindowControlArea::Min)
+                    .text_color(muted)
+                    .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+                    .child(Icon::new(IconName::WindowMinimize).small()),
+            )
+            .child(
+                div()
+                    .w(px(46.0))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .window_control_area(WindowControlArea::Max)
+                    .text_color(muted)
+                    .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+                    .child(Icon::new(maximize_icon).small()),
+            )
+            .child(
+                div()
+                    .w(px(46.0))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .window_control_area(WindowControlArea::Close)
+                    .text_color(muted)
+                    .hover(move |s| s.bg(close_hover_bg).text_color(close_hover_fg))
+                    .child(Icon::new(IconName::WindowClose).small()),
+            )
+    }
+
+    fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         let workspaces = &self.cached_workspaces;
         let focused = workspaces
@@ -915,29 +973,43 @@ impl OrionApp {
         // the flexible spacer pushes the connection and the settings control
         // to the trailing edge.
         Toolbar::new("app-header")
-            .h(px(HEADER_HEIGHT_WIDE_PX))
+            .h(px(40.0))
+            .w_full()
             .px(px(theme.space_3()))
             .gap(px(theme.space_3()))
-            .bg(theme.panel_bg())
+            .bg(theme.window_bg())
             .content(
                 div()
+                    .id("header-drag-title")
+                    .window_control_area(WindowControlArea::Drag)
                     .text_size(px(theme.font_title()))
                     .text_color(theme.text_primary())
                     .child(header.title),
             )
             .content(
                 div()
+                    .id("header-drag-workspace")
+                    .window_control_area(WindowControlArea::Drag)
+                    .min_w(px(0.0))
                     .text_size(px(theme.font_ui_secondary()))
                     .text_color(theme.token_text_dim())
+                    .truncate()
                     .child(header.workspace),
             )
             .content(
-                div().flex_1().flex().flex_row().justify_end().child(
-                    div()
-                        .text_size(px(theme.font_ui_secondary()))
-                        .text_color(theme.token_text_dim())
-                        .child(header.connection),
-                ),
+                div()
+                    .id("header-drag-connection")
+                    .window_control_area(WindowControlArea::Drag)
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .child(
+                        div()
+                            .text_size(px(theme.font_ui_secondary()))
+                            .text_color(theme.token_text_dim())
+                            .child(header.connection),
+                    ),
             )
             .content(
                 Button::new("header-sidebar-toggle")
@@ -990,6 +1062,7 @@ impl OrionApp {
                         cx.notify();
                     })),
             )
+            .content(Self::render_window_controls(window, &theme))
     }
 
     /// The compact Chat|Terminal switch of the three-panel layout. The review
@@ -1768,24 +1841,20 @@ impl Render for OrionApp {
         };
         let notice = self.notice.clone();
         let theme = Theme::current();
-        let mut root = div()
-            .id("app")
+        let mut panels = div()
+            .id("app-panels")
             .flex()
             .flex_row()
-            .size_full()
-            .bg(theme.window_bg())
+            .flex_1()
+            .min_h(px(0.0))
             .p(px(theme.space_2()))
-            .gap(px(theme.panel_gap()))
-            .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
-                this.handle_editing_key(ev, cx)
-            }));
+            .gap(px(theme.panel_gap()));
 
         if review_visible {
             // Three persistent columns: sessions, conversation, review. The
             // middle column keeps the same header and the same live lens views;
             // only the switcher and the status bar are new.
-            root = root
+            panels = panels
                 .children(sidebar_visible(self.sidebar_open).then(|| {
                     div()
                         .id("sidebar")
@@ -1809,7 +1878,6 @@ impl Render for OrionApp {
                         .min_w(px(0.0))
                         .bg(theme.panel_bg())
                         .rounded(px(theme.radius_panel()))
-                        .child(self.render_header(cx))
                         .child(self.render_middle_switcher(cx))
                         .children(notice.map(|message| {
                             div()
@@ -1839,7 +1907,7 @@ impl Render for OrionApp {
         } else {
             // The classic two-column shell, unchanged: narrow windows and
             // split panes keep the full three-lens canvas.
-            root = root
+            panels = panels
                 .children(sidebar_visible(self.sidebar_open).then(|| {
                     div()
                         .id("sidebar")
@@ -1861,7 +1929,6 @@ impl Render for OrionApp {
                         .min_w(px(0.0))
                         .bg(theme.panel_bg())
                         .rounded(px(theme.radius_panel()))
-                        .child(self.render_header(cx))
                         // The tab strip and lens switcher act on a selected pane;
                         // with no workspace they would be dead chrome.
                         .children(
@@ -1887,26 +1954,50 @@ impl Render for OrionApp {
                 );
         }
 
-        root.child(if self.settings.update(cx, |view, _cx| view.is_open()) {
-            div()
-                .id("modal-host")
-                .absolute()
-                .inset_0()
-                .child(self.settings.clone())
-        } else {
-            div().id("no-modal")
-        })
-        .child(
-            if self.new_workspace.update(cx, |view, _cx| view.is_open()) {
+        let root = div()
+            .id("app")
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(theme.window_bg())
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
+                this.handle_editing_key(ev, cx)
+            }))
+            .child(
                 div()
-                    .id("new-workspace-host")
+                    .id("app-titlebar")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .w_full()
+                    .h(px(40.0))
+                    .flex_shrink_0()
+                    .bg(theme.window_bg())
+                    .child(self.render_header(window, cx)),
+            )
+            .child(panels)
+            .child(if self.settings.update(cx, |view, _cx| view.is_open()) {
+                div()
+                    .id("modal-host")
                     .absolute()
                     .inset_0()
-                    .child(self.new_workspace.clone())
+                    .child(self.settings.clone())
             } else {
-                div().id("no-new-workspace-modal")
-            },
-        )
+                div().id("no-modal")
+            })
+            .child(
+                if self.new_workspace.update(cx, |view, _cx| view.is_open()) {
+                    div()
+                        .id("new-workspace-host")
+                        .absolute()
+                        .inset_0()
+                        .child(self.new_workspace.clone())
+                } else {
+                    div().id("no-new-workspace-modal")
+                },
+            );
+        root
     }
 }
 
@@ -1917,6 +2008,11 @@ pub fn run() {
             gpui_kit::init(cx);
             gpui_kit::open_window(
                 WindowOptions {
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Orion".into()),
+                        appears_transparent: true,
+                        ..Default::default()
+                    }),
                     window_bounds: Some(WindowBounds::centered(
                         Size::new(px(1600.0), px(900.0)),
                         cx,
