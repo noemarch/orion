@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Herd - UI reference</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #10151d;
+    --panel-2: #151b24;
+    --panel-3: #1b2431;
+    --panel-4: #202a38;
+    --border: #222b38;
+    --border-soft: #1a222d;
+    --text: #c9d1d9;
+    --strong: #e6edf3;
+    --muted: #8b949e;
+    --faint: #5e6671;
+    --accent: #f778ba;
+    --blue: #6cb6ff;
+    --green: #56d364;
+    --red: #f85149;
+    --amber: #d29922;
+    --purple: #bc8cff;
+    --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--ui-font);
+    font-size: 13px;
+    line-height: 1.45;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: default; padding: 0; }
+  .icon { width: 15px; height: 15px; display: block; flex: none; }
+  .icon.sm { width: 13px; height: 13px; }
+  .icon.lg { width: 17px; height: 17px; }
+  .mono { font-family: var(--mono); }
+
+  .app { display: flex; height: 100dvh; width: 100%; }
+
+  /* ---------------- left sidebar ---------------- */
+  .sidebar {
+    flex: 0 0 300px;
+    min-inline-size: 300px;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .titlebar {
+    height: 48px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 9px;
+  }
+  .lights { display: flex; gap: 8px; align-items: center; margin-right: 8px; }
+  .light { width: 12px; height: 12px; border-radius: 50%; }
+  .light.r { background: #ff5f57; }
+  .light.y { background: #febc2e; }
+  .light.g { background: #28c840; }
+  .light.x { background: #5a6069; }
+  .brand { font-size: 14px; font-weight: 600; color: var(--strong); letter-spacing: .1px; }
+  .brand-mark { width: 18px; height: 18px; border-radius: 5px; background: linear-gradient(150deg,#f9a8d4,#a78bfa); display:grid; place-items:center; }
+  .brand-mark span { width: 4px; height: 4px; border-radius:50%; background:#1b1030; box-shadow: -4px 0 0 #1b1030, 4px 0 0 #1b1030; margin-top:-2px; }
+  .titlebar-actions { margin-left: auto; display: flex; gap: 14px; color: var(--muted); }
+
+  .searchbar {
+    height: 44px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 16px;
+    color: var(--muted);
+  }
+  .searchbar .placeholder { flex: 1; }
+  .searchbar .tools { display: flex; gap: 14px; align-items:center; }
+
+  .sessions { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 8px; }
+  .session {
+    padding: 13px 16px 14px;
+    border-left: 2px solid transparent;
+    display: block;
+  }
+  .session.selected { background: #1b2431; border-left-color: var(--accent); }
+  .session-top { display: flex; align-items: center; gap: 8px; }
+  .session-top .name { color: var(--strong); font-size: 13px; font-weight: 500; }
+  .session-top .time { margin-left: auto; color: var(--faint); font-size: 11px; }
+  .session-sub { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--muted); font-size: 12px; }
+  .session-sub .branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-sub .badge { margin-left: auto; }
+  .session-title { color: var(--text); font-size: 13px; margin-top: 3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mini-badge { width: 15px; height: 15px; border-radius: 3px; display:grid; place-items:center; font-size: 9px; font-weight: 700; color:#10131a; }
+  .mini-badge.rose { background: var(--accent); }
+  .mini-badge.blue { background: #6cb6ff; }
+  .mini-badge.orange { background: #e3a008; }
+  .mini-badge.purple { background: #a371f7; }
+  .warn { color: var(--amber); display:flex; align-items:center; gap:4px; }
+  .warn-text { color: var(--amber); font-size: 11px; margin-left: auto; }
+
+  .side-section { margin-top: auto; }
+  .side-row {
+    height: 45px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 16px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .side-row .count { margin-left: auto; color: var(--faint); }
+  .side-row .clear { margin-left: auto; color: var(--faint); display:flex; align-items:center; gap:4px; }
+  .side-item {
+    height: 45px;
+    display: flex;
+    align-items: center;
+    padding: 0 16px 0 28px;
+    color: var(--text);
+    font-size: 12px;
+  }
+  .side-item .time { margin-left: auto; color: var(--faint); font-size: 11px; }
+  .side-item .lead { width: 12px; }
+  .bottom-bar {
+    height: 40px;
+    flex: none;
+    border-top: 1px solid var(--border-soft);
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 0 16px;
+    color: var(--muted);
+  }
+
+  /* ---------------- middle conversation ---------------- */
+  .conversation {
+    flex: 0 0 670px;
+    min-inline-size: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .conv-tabs { height: 48px; flex: none; display:flex; align-items:flex-end; padding: 0 12px; }
+  .conv-tab {
+    height: 34px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 14px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-bottom-color: var(--panel-2);
+    border-radius: 7px 7px 0 0;
+    color: var(--text);
+    font-size: 12px;
+    max-width: 320px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .conv-body { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 30px 28px 10px; }
+  .conv-body::-webkit-scrollbar, .sessions::-webkit-scrollbar, .review-scroll::-webkit-scrollbar { width: 9px; }
+  .conv-body::-webkit-scrollbar-thumb, .sessions::-webkit-scrollbar-thumb, .review-scroll::-webkit-scrollbar-thumb { background: #2a3441; border-radius: 5px; }
+
+  .task-head { display:flex; align-items:center; gap:9px; font-family: var(--mono); font-size: 13px; }
+  .task-head .path { margin-left:auto; color: var(--faint); font-size: 12px; }
+  .tag { color: var(--muted); }
+  .task-meta { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 7px; }
+  .ext-head { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 20px; }
+  .ext-name { font-family: var(--mono); font-size: 12px; color: var(--blue); margin-top: 2px; }
+
+  .prompt-block {
+    margin-top: 24px;
+    background: var(--panel-3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.8;
+    color: #d6e2f0;
+  }
+  .cmd-block {
+    margin-top: 20px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.75;
+    color: var(--text);
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .cmd-block .cmd { color: var(--strong); }
+  .cmd-block .hint { color: var(--faint); }
+  .cmd-block .file { color: #a5c9ff; }
+  .cmd-block .ins { color: var(--green); }
+  .cmd-block .del { color: #f97066; }
+  .cmd-block .num { color: var(--muted); }
+  .cmd-block .took { color: var(--faint); margin-top: 9px; }
+
+  .thinking { font-family: var(--mono); font-size: 12.5px; font-style: italic; color: var(--faint); margin-top: 38px; }
+  .answer { font-family: var(--mono); font-size: 12.5px; line-height: 1.8; color: var(--text); margin-top: 24px; }
+  .answer .code { background: #263044; border-radius: 3px; padding: 1px 3px; color: #ffb4d8; }
+  .answer .pathcode { background: #263044; border-radius: 3px; padding: 1px 3px; color: #a5d6ff; }
+  .readfirst { font-family: var(--mono); font-size: 12.5px; line-height: 1.8; color: var(--text); margin-top: 44px; }
+  .readfirst .label { color: var(--strong); }
+  .readfirst .fp { color: #a5c9ff; }
+  .readfirst .add { color: var(--green); }
+
+  .composer-wrap { flex: none; padding: 10px 20px 36px; }
+  .composer {
+    height: 50px;
+    border: 1px solid #39434f;
+    border-radius: 8px;
+    background: #0e131a;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+  .caret { width: 1px; height: 17px; background: var(--text); animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .statusbar {
+    height: 28px;
+    flex: none;
+    border-top: 1px solid var(--border-soft);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 14px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--faint);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .statusbar .loc { color: #7d9fc4; }
+  .statusbar .metrics { margin-left: auto; }
+
+  /* ---------------- right review ---------------- */
+  .review { flex: 1 1 0; min-inline-size: 0; display:flex; flex-direction:column; background: var(--bg); overflow:hidden; }
+  .review-head {
+    height: 55px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--border-soft);
+    color: var(--text);
+    font-size: 13px;
+  }
+  .review-head .icon { color: var(--faint); }
+  .review-toolbar {
+    height: 55px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 20px;
+    font-size: 12px;
+  }
+  .nav-chev { color: var(--muted); display:flex; }
+  .all-changes {
+    display: flex; align-items: center; gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 9px;
+    color: var(--text);
+  }
+  .diff-total { display:flex; gap:8px; align-items:center; margin-left: 6px; }
+  .plus { color: var(--green); }
+  .minus { color: var(--red); }
+  .progress { color: var(--muted); display:flex; gap:6px; align-items:center; }
+  .ring { width: 11px; height: 11px; border: 1px solid var(--faint); border-radius: 50%; display:inline-block; }
+  .toolbar-right { margin-left:auto; display:flex; align-items:center; gap: 12px; }
+  .reanalyze {
+    display:flex; align-items:center; gap:7px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 11px;
+    color: var(--text);
+  }
+  .stack-chev { display:flex; flex-direction:column; color: var(--muted); gap:1px; }
+  .stack-chev svg { width: 12px; height: 8px; }
+
+  .review-tabs { height: 78px; flex: none; display:flex; align-items:stretch; border-bottom: 1px solid var(--border); overflow:hidden; }
+  .rtab {
+    flex: 0 0 auto;
+    min-width: 216px;
+    padding: 9px 16px 7px;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    color: var(--muted);
+    position: relative;
+  }
+  .rtab .rt-title { display:flex; align-items:center; gap:8px; font-size: 12.5px; white-space:nowrap; }
+  .rtab .rt-stats { font-family: var(--mono); font-size: 11px; color: var(--faint); display:flex; gap:7px; }
+  .rtab.active { background: #111720; }
+  .rtab.active::after { content:""; position:absolute; left:0; right:0; bottom:0; height:2px; background:#a6d189; }
+  .rtab.active .rt-title { color: var(--strong); }
+  .rtab .amber { color: var(--amber); }
+
+  .review-scroll { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 28px 22px 60px; }
+  .review-title { font-size: 17px; font-weight: 600; color: var(--strong); }
+  .review-desc { margin-top: 12px; color: var(--muted); font-size: 14px; line-height: 1.7; max-width: 880px; }
+
+  .diff-file { margin-top: 20px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .diff-file-head {
+    height: 36px;
+    background: var(--panel-2);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 12px;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .checkbox { width: 13px; height: 13px; border: 1px solid #6b7480; border-radius: 3px; background: var(--panel-3); }
+  .diff-file-head .fname { color: var(--strong); }
+  .diff-file-head .stats { margin-left:auto; display:flex; gap:8px; align-items:center; }
+  .m-badge { color: var(--amber); border: 1px solid #5c4a1f; background:#2a2313; border-radius:4px; padding:0 5px; font-size:10px; line-height:16px; }
+  .hunk {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: #8ea7c9;
+    background: #182031;
+    padding: 5px 12px;
+    border-top: 1px solid var(--border-soft);
+    border-bottom: 1px solid var(--border-soft);
+    white-space: pre;
+  }
+  .code-grid { display: grid; grid-template-columns: 34px minmax(0,1fr) 34px minmax(0,1fr); font-family: var(--mono); font-size: 11.5px; line-height: 19px; }
+  .ln { color: var(--faint); text-align: right; padding-right: 9px; user-select:none; background: #10151d; }
+  .ln.new { border-left: 1px solid var(--border); }
+  .code-cell { padding: 0 8px; white-space: pre; overflow: hidden; text-overflow: clip; color: #c0caf5; }
+  .code-cell.new { border-left: 1px solid var(--border); }
+  .row { display: contents; }
+  .row.add .code-cell.new, .row.add .ln.new { background: rgba(84, 160, 74, .16); }
+  .row.add .code-cell.new::before { content:"+ "; color: var(--green); }
+  .row.del .code-cell, .row.del .ln { background: rgba(248, 81, 73, .13); }
+  .row.del .code-cell::before { content:"- "; color: var(--red); }
+  .row.add .code-cell.new { color: #c6f0c8; }
+  .row.del .code-cell { color: #ffd0cf; }
+  .empty-cell { background: #0f141b; }
+
+  .kw { color: #bb9af7; }
+  .st { color: #9ece6a; }
+  .fn { color: #7dcfff; }
+  .va { color: #c0caf5; }
+  .pu { color: #8b949e; }
+  .cm { color: #6a7385; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-list" viewBox="0 0 16 16"><path d="M2 3.5h12M2 8h12M2 12.5h12" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/></symbol>
+    <symbol id="i-split" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="11" rx="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M8 2.5v11" stroke="currentColor" stroke-width="1.2"/></symbol>
+    <symbol id="i-search" viewBox="0 0 16 16"><circle cx="6.8" cy="6.8" r="4.3" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M10.2 10.2l3.3 3.3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+    <symbol id="i-filter" viewBox="0 0 16 16"><path d="M2 3.5h12l-4.6 5.2v3.3l-2.8 1.5V8.7L2 3.5z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/></symbol>
+    <symbol id="i-squareplus" viewBox="0 0 16 16"><rect x="2.2" y="2.2" width="11.6" height="11.6" rx="2" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M8 5.2v5.6M5.2 8h5.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></symbol>
+    <symbol id="i-compose" viewBox="0 0 16 16"><path d="M11.2 2.4l2.4 2.4-8 8-3.1.7.7-3.1 8-8z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/></symbol>
+    <symbol id="i-branch" viewBox="0 0 16 16"><circle cx="4.2" cy="3.6" r="1.7" stroke="currentColor" stroke-width="1.2" fill="none"/><circle cx="4.2" cy="12.4" r="1.7" stroke="currentColor" stroke-width="1.2" fill="none"/><circle cx="11.8" cy="5" r="1.7" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M4.2 5.3v5.4M5.9 4.6c2.5.2 4.3.4 4.3 0" stroke="currentColor" stroke-width="1.2" fill="none"/></symbol>
+    <symbol id="i-pr" viewBox="0 0 16 16"><circle cx="4" cy="3.6" r="1.7" stroke="currentColor" stroke-width="1.2" fill="none"/><circle cx="4" cy="12.4" r="1.7" stroke="currentColor" stroke-width="1.2" fill="none"/><circle cx="12" cy="12.4" r="1.7" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M4 5.3v5.4M12 10.7V7.5l-2.5-2M4 5.3c0 2 1.5 2.4 3 2.4h2.5" stroke="currentColor" stroke-width="1.2" fill="none"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2.2l6 10.6H2L8 2.2z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/><path d="M8 6.4v3.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="11.3" r=".8" fill="currentColor"/></symbol>
+    <symbol id="i-chev-right" viewBox="0 0 16 16"><path d="M6 3.5l5 4.5-5 4.5" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-chev-left" viewBox="0 0 16 16"><path d="M10 3.5L5 8l5 4.5" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-chev-down" viewBox="0 0 16 16"><path d="M3.5 6L8 10.5 12.5 6" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-chev-up" viewBox="0 0 16 16"><path d="M3.5 10L8 5.5 12.5 10" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 16 16"><path d="M8 1.6l1.3 4 4 1.3-4 1.3-1.3 4-1.3-4-4-1.3 4-1.3L8 1.6zM13 10.5l.6 1.9 1.9.6-1.9.6L13 15.5l-.6-1.9-1.9-.6 1.9-.6.6-1.9z" fill="currentColor"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.3" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></symbol>
+    <symbol id="i-code" viewBox="0 0 16 16"><path d="M5.5 4L1.8 8l3.7 4M10.5 4l3.7 4-3.7 4" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="8" height="8" rx="1.4" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2" stroke="currentColor" stroke-width="1.2" fill="none"/></symbol>
+    <symbol id="i-kbd" viewBox="0 0 16 16"><rect x="1.5" y="4" width="13" height="8" rx="1.6" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M4 6.5h.01M6.5 6.5h.01M9 6.5h.01M11.5 6.5h.01M4.5 9h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.1" fill="none"/><rect x="9" y="2" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.1" fill="none"/><rect x="2" y="9" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.1" fill="none"/><rect x="9" y="9" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.1" fill="none"/></symbol>
+  </defs>
+</svg>
+
+<div class="app">
+
+  <!-- ============ LEFT SIDEBAR ============ -->
+  <aside class="sidebar">
+    <div class="titlebar">
+      <div class="lights"><i class="light r"></i><i class="light y"></i><i class="light g"></i><i class="light x"></i></div>
+      <div class="brand-mark"><span></span></div>
+      <div class="brand">Herd</div>
+      <div class="titlebar-actions">
+        <svg class="icon"><use href="#i-list"/></svg>
+        <svg class="icon"><use href="#i-split"/></svg>
+      </div>
+    </div>
+
+    <div class="searchbar">
+      <svg class="icon"><use href="#i-search"/></svg>
+      <span class="placeholder">Search</span>
+      <span class="tools">
+        <svg class="icon"><use href="#i-filter"/></svg>
+        <svg class="icon"><use href="#i-squareplus"/></svg>
+        <svg class="icon"><use href="#i-compose"/></svg>
+      </span>
+    </div>
+
+    <div class="sessions">
+      <div class="session">
+        <div class="session-top"><span class="name">pulls.review</span><span class="time">just now</span></div>
+        <div class="session-sub">
+          <svg class="icon sm"><use href="#i-branch"/></svg>
+          <span class="branch">feat/analyze-in-daemon vs o...</span>
+          <svg class="icon sm badge"><use href="#i-pr"/></svg>
+        </div>
+      </div>
+
+      <div class="session selected">
+        <div class="session-top">
+          <span class="mini-badge rose">P</span>
+          <span class="name">pulls.review</span>
+          <span class="time">just now</span>
+        </div>
+        <div class="session-title">Review the daemon analysis PR</div>
+        <div class="session-sub">
+          <svg class="icon sm"><use href="#i-branch"/></svg>
+          <span class="branch">main/analyze-in-daemon</span>
+          <span class="mini-badge rose badge">R</span>
+        </div>
+      </div>
+
+      <div class="session">
+        <div class="session-top">
+          <span class="mini-badge rose">P</span>
+          <span class="name">pi-stuff</span>
+          <span class="warn"><svg class="icon sm"><use href="#i-warn"/></svg><span class="warn-text">Needs you</span></span>
+        </div>
+        <div class="session-title">Reproduce the Linux install bug</div>
+        <div class="session-sub"><span class="branch">main</span><span class="mini-badge blue badge">·</span></div>
+      </div>
+
+      <div class="session">
+        <div class="session-top"><span class="name">herdr-t3-inbox</span><span class="time">just now</span></div>
+        <div class="session-title">Review #12: the Working pill pas...</div>
+        <div class="session-sub"><span class="branch">main</span><span class="mini-badge orange badge">·</span></div>
+      </div>
+    </div>
+
+    <div class="side-section">
+      <div class="side-row"><span>Working</span><span class="count">14</span><svg class="icon sm"><use href="#i-chev-right"/></svg></div>
+      <div class="side-row"><span>Settled</span><span class="count">3</span><span class="clear">Clear <svg class="icon sm"><use href="#i-chev-down"/></svg></span></div>
+      <div class="side-item"><span class="lead"></span><span>Trim the skill catalog</span><span class="time">4m</span></div>
+      <div class="side-item"><span class="lead"></span><span>Fix the empty diff view</span><span class="time">25m</span></div>
+      <div class="side-item"><span class="lead"><span class="mini-badge purple">H</span></span><span>Release notes for 0.4</span><span class="time">2h</span></div>
+    </div>
+    <div class="bottom-bar">
+      <svg class="icon"><use href="#i-kbd"/></svg>
+      <svg class="icon"><use href="#i-grid"/></svg>
+    </div>
+  </aside>
+
+  <!-- ============ MIDDLE CONVERSATION ============ -->
+  <main class="conversation">
+    <div class="conv-tabs">
+      <div class="conv-tab"><span class="mini-badge rose">R</span><span>Review the daemon analysis PR</span></div>
+    </div>
+
+    <div class="conv-body">
+      <div class="task-head">
+        <span class="mini-badge rose">R</span>
+        <span class="tag">tid</span>
+        <span>Review the daemon analysis PR</span>
+        <span class="path">~/code/pulls.review</span>
+      </div>
+      <div class="task-meta">retro, writing-for-agents</div>
+      <div class="ext-head">[Extensions]</div>
+      <div class="ext-name">pi-herdr-theme</div>
+
+      <div class="prompt-block">This branch is a pull request against origin/multi-repo. From
+git log --stat origin/multi-repo..HEAD only, say in a few short
+lines what it changes and which files a reviewer should read
+first. Print only that. Don't edit anything.</div>
+
+      <div class="cmd-block"><span class="cmd">$ git log --stat origin/multi-repo..HEAD (timeout 60s)</span>
+
+  <span class="hint">… (155 earlier lines, ctrl+o to expand)</span>
+  <span class="file">packages/app/src/stores/types.ts</span>              <span class="num">|</span>  4 <span class="del">+--</span>
+  <span class="file">packages/cli/src/index.ts</span>                    <span class="num">|</span>  8 <span class="ins">+++</span><span class="del">---</span>
+  <span class="file">packages/cli/src/page.test.ts</span>                <span class="num">|</span> 10 <span class="ins">++++++</span>
+  <span class="file">packages/cli/src/page.ts</span>                     <span class="num">|</span>  5 <span class="ins">++++</span>
+  8 files changed, <span class="ins">85 insertions(+)</span>, <span class="del">12 deletions(-)</span>
+
+<span class="took">Took 0.0s</span></div>
+
+      <div class="thinking">Thinking...</div>
+
+      <div class="answer">This PR grows the fork's Herdr/daemon layer: <span class="code">--analyze</span> is
+threaded from the CLI through <span class="code">-d</span> into the web page and into
+daemon-started runs, shared settings move into the daemon
+(<span class="pathcode">~/.pulls.review/shared-settings.json</span>), the review RPC is keyed
+on progress/result/failure, and a new review pane server
+highlights diffs in the caller's colors; agent model lists for
+Pi/Codex and two fork plan docs are added.</div>
+
+      <div class="readfirst"><span class="label">Read first:</span> <span class="fp">packages/cli/src/daemon/review.ts</span> <span class="add">(+</span>
+<span class="fp">review.test.ts)</span>, <span class="fp">packages/cli/src/daemon/settings.ts</span>,
+<span class="fp">packages/cli/src/daemon/server.ts</span>,
+<span class="fp">packages/cli/src/daemon/analysis.ts</span>, then
+<span class="fp">packages/fork/03-daemon-settings.md</span> and
+<span class="fp">plans/fork/04-herdr-review-pane.md</span>.</div>
+    </div>
+
+    <div class="composer-wrap"><div class="composer"><span class="caret"></span></div></div>
+    <div class="statusbar">
+      <span class="loc">~/code/pulls.review (feat/analyze-in-daemon)</span>
+      <span class="metrics">↑108 ↓268 R6.8k CH97.9% $0.000 0.5%/1.0M (auto) deepseek-v4.1-fla...</span>
+    </div>
+  </main>
+
+  <!-- ============ RIGHT REVIEW ============ -->
+  <section class="review">
+    <div class="review-head">
+      <svg class="icon"><use href="#i-code"/></svg>
+      <span>feat/analyze-in-daemon vs origin/multi-repo</span>
+    </div>
+
+    <div class="review-toolbar">
+      <span class="nav-chev"><svg class="icon sm"><use href="#i-chev-left"/></svg></span>
+      <span class="all-changes">All changes <svg class="icon sm"><use href="#i-chev-down"/></svg></span>
+      <span class="nav-chev"><svg class="icon sm"><use href="#i-chev-right"/></svg></span>
+      <span class="diff-total"><span class="plus">+1320</span><span class="minus">-51</span><span class="progress"><i class="ring"></i> 0/43</span></span>
+      <span class="toolbar-right">
+        <span class="reanalyze"><svg class="icon sm"><use href="#i-spark"/></svg> Re-analyze</span>
+        <span class="stack-chev"><svg viewBox="0 0 16 8"><use href="#i-chev-up"/></svg><svg viewBox="0 0 16 8"><use href="#i-chev-down"/></svg></span>
+        <svg class="icon"><use href="#i-gear"/></svg>
+      </span>
+    </div>
+
+    <div class="review-tabs">
+      <div class="rtab active">
+        <span class="rt-title"><svg class="icon sm"><use href="#i-code"/></svg> The --analyze flag</span>
+        <span class="rt-stats"><span class="plus">+107</span><span class="minus">-18</span>· 12 files</span>
+      </div>
+      <div class="rtab">
+        <span class="rt-title"><svg class="icon sm"><use href="#i-list"/></svg> Settings owned by the daemon</span>
+        <span class="rt-stats"><span class="plus">+105</span><span class="minus">-1</span>· 5 files</span>
+      </div>
+      <div class="rtab">
+        <span class="rt-title"><svg class="icon sm"><use href="#i-code"/></svg> Analysis started by the daemon <svg class="icon sm amber"><use href="#i-warn"/></svg></span>
+        <span class="rt-stats"><span class="plus">+221</span><span class="minus">-7</span>· 6 files</span>
+      </div>
+      <div class="rtab" style="min-width:120px">
+        <span class="rt-title"><svg class="icon sm"><use href="#i-code"/></svg> ...</span>
+        <span class="rt-stats"><span class="plus">+76</span><span class="minus">-...</span></span>
+      </div>
+    </div>
+
+    <div class="review-scroll">
+      <div class="review-title">The --analyze flag</div>
+      <div class="review-desc">--analyze becomes a page query (?analyze) for both the foreground CLI and -d, and the app reads it once on load: it
+silently refreshes a state cache instead of parking behind the banner, then follows a run already going, keeps a result made for
+the current head, or starts one. The shell strips the parameter from the URLs it saves, so restoring a tab never starts another
+(paid) run.</div>
+
+      <div class="diff-file">
+        <div class="diff-file-head">
+          <i class="checkbox"></i>
+          <span class="fname">packages/cli/src/index.ts</span>
+          <span class="stats"><span class="plus">+6</span><span class="minus">-2</span><span class="m-badge">M</span><svg class="icon sm"><use href="#i-copy"/></svg><svg class="icon sm"><use href="#i-chev-down"/></svg></span>
+        </div>
+
+        <div class="hunk">@@ -2,7 +2,7 @@ import process from 'node:process'</div>
+        <div class="code-grid">
+          <div class="row"><span class="ln">2</span><span class="code-cell"><span class="kw">import</span> { parseArgs } <span class="kw">from</span> <span class="st">'node:util'</span></span><span class="ln new">2</span><span class="code-cell new"><span class="kw">import</span> { parseArgs } <span class="kw">from</span> <span class="st">'node:util'</span></span></div>
+          <div class="row"><span class="ln">3</span><span class="code-cell"><span class="kw">import</span> { createDevServer } <span class="kw">from</span> <span class="st">'devframe/ad...</span></span><span class="ln new">3</span><span class="code-cell new"><span class="kw">import</span> { createDevServer } <span class="kw">from</span> <span class="st">'devframe/ad...</span></span></div>
+          <div class="row"><span class="ln">4</span><span class="code-cell"><span class="kw">import</span> devframe <span class="kw">from</span> <span class="st">'./devframe'</span></span><span class="ln new">4</span><span class="code-cell new"><span class="kw">import</span> devframe <span class="kw">from</span> <span class="st">'./devframe'</span></span></div>
+          <div class="row del"><span class="ln">5</span><span class="code-cell"><span class="kw">import</span> { browserPath, pageFor, sharedAnalysi...</span><span class="ln new empty-cell"></span><span class="code-cell new empty-cell"></span></div>
+          <div class="row add"><span class="ln empty-cell"></span><span class="code-cell empty-cell"></span><span class="ln new">5</span><span class="code-cell new"><span class="kw">import</span> { browserPath, pageFor, sharedAnalysi...</span></div>
+          <div class="row"><span class="ln">6</span><span class="code-cell"><span class="kw">import</span> { createAppWithRefRoutes } <span class="kw">from</span> <span class="st">'./sp...</span></span><span class="ln new">6</span><span class="code-cell new"><span class="kw">import</span> { createAppWithRefRoutes } <span class="kw">from</span> <span class="st">'./sp...</span></span></div>
+          <div class="row"><span class="ln">7</span><span class="code-cell"></span><span class="ln new">7</span><span class="code-cell new"></span></div>
+          <div class="row"><span class="ln">8</span><span class="code-cell"><span class="kw">const</span> HELP = <span class="st">`Usage: jin.review [target] [op...</span></span><span class="ln new">8</span><span class="code-cell new"><span class="kw">const</span> HELP = <span class="st">`Usage: jin.review [target] [op...</span></span></div>
+        </div>
+
+        <div class="hunk">@@ -33,6 +33,9 @@ 0 Options:</div>
+        <div class="code-grid">
+          <div class="row"><span class="ln">33</span><span class="code-cell"><span class="va">--worktree</span>   <span class="cm">open the uncommitted chang...</span></span><span class="ln new">33</span><span class="code-cell new"><span class="va">--worktree</span>   <span class="cm">open the uncommitted chang...</span></span></div>
+          <div class="row"><span class="ln">34</span><span class="code-cell"><span class="va">--from &lt;login&gt;</span> <span class="kw">with</span> a GitHub pull request</span><span class="ln new">34</span><span class="code-cell new"><span class="va">--from &lt;login&gt;</span> <span class="kw">with</span> a GitHub pull request</span></div>
+          <div class="row"><span class="ln">35</span><span class="code-cell"><span class="va">--from &lt;login&gt;</span> <span class="kw">on</span> it (the site's ?from=&lt;l...</span><span class="ln new">35</span><span class="code-cell new"><span class="va">--from &lt;login&gt;</span> <span class="kw">on</span> it (the site's ?from=&lt;l...</span></div>
+          <div class="row add"><span class="ln empty-cell"></span><span class="code-cell empty-cell"></span><span class="ln new">36</span><span class="code-cell new"><span class="va">--analyze</span>   <span class="cm">start the AI analysis once</span></span></div>
+          <div class="row add"><span class="ln empty-cell"></span><span class="code-cell empty-cell"></span><span class="ln new">37</span><span class="code-cell new">+</span></div>
+          <div class="row add"><span class="ln empty-cell"></span><span class="code-cell empty-cell"></span><span class="ln new">38</span><span class="code-cell new">         <span class="cm">already running, or keep all</span></span></div>
+          <div class="row add"><span class="ln empty-cell"></span><span class="code-cell empty-cell"></span><span class="ln new">39</span><span class="code-cell new">         <span class="cm">chosen in Settings</span></span></div>
+          <div class="row"><span class="ln">36</span><span class="code-cell"><span class="va">--port &lt;port&gt;</span>  <span class="cm">port to listen on</span></span><span class="ln new">40</span><span class="code-cell new"><span class="va">--port &lt;port&gt;</span>  <span class="cm">port to listen on</span></span></div>
+          <div class="row"><span class="ln">37</span><span class="code-cell"><span class="va">--no-open</span>    <span class="cm">do not open the browser</span></span><span class="ln new">41</span><span class="code-cell new"><span class="va">--no-open</span>    <span class="cm">do not open the browser</span></span></div>
+          <div class="row"><span class="ln">38</span><span class="code-cell"><span class="va">-h, --help</span></span><span class="ln new">42</span><span class="code-cell new"><span class="va">-h, --help</span></span></div>
+        </div>
+
+        <div class="hunk">@@ -48,6 +51,7 @@ async function main() {</div>
+        <div class="code-grid">
+          <div class="row"><span class="ln">48</span><span class="code-cell">    <span class="st">'stop'</span>: { type: <span class="st">'boolean'</span> },</span><span class="ln new">51</span><span class="code-cell new">    <span class="st">'stop'</span>: { type: <span class="st">'boolean'</span> },</span></div>
+          <div class="row"><span class="ln">49</span><span class="code-cell">    <span class="st">'worktree'</span>: { type: <span class="st">'boolean'</span> },</span><span class="ln new">52</span><span class="code-cell new">    <span class="st">'worktree'</span>: { type: <span class="st">'boolean'</span> },</span></div>
+          <div class="row"><span class="ln">50</span><span class="code-cell">    <span class="st">'from'</span>: { type: <span class="st">'string'</span> },</span><span class="ln new">53</span><span class="code-cell new">    <span class="st">'from'</span>: { type: <span class="st">'string'</span> },</span></div>
+          <div class="row add"><span class="ln empty-cell"></span><span class="code-cell empty-cell"></span><span class="ln new">54</span><span class="code-cell new">    <span class="st">'analyze'</span>: { type: <span class="st">'boolean'</span> },</span></div>
+          <div class="row"><span class="ln">51</span><span class="code-cell">    <span class="st">'port'</span>: { type: <span class="st">'string'</span> },</span><span class="ln new">55</span><span class="code-cell new">    <span class="st">'port'</span>: { type: <span class="st">'string'</span> },</span></div>
+          <div class="row"><span class="ln">52</span><span class="code-cell">    <span class="st">'no-open'</span>: { type: <span class="st">'boolean'</span> },</span><span class="ln new">56</span><span class="code-cell new">    <span class="st">'no-open'</span>: { type: <span class="st">'boolean'</span> },</span></div>
+          <div class="row"><span class="ln">53</span><span class="code-cell">    <span class="st">'help'</span>: { type: <span class="st">'boolean'</span>, short: <span class="st">'h'</span> },</span><span class="ln new">57</span><span class="code-cell new">    <span class="st">'help'</span>: { type: <span class="st">'boolean'</span>, short: <span class="st">'h'</span> },</span></div>
+        </div>
+
+        <div class="hunk">@@ -63,7 +67,7 @@ async function main() {</div>
+        <div class="code-grid">
+          <div class="row"><span class="ln">63</span><span class="code-cell">  <span class="kw">await</span> <span class="fn">routeDaemon</span>(flags, positionals)</span><span class="ln new">67</span><span class="code-cell new">  <span class="kw">await</span> <span class="fn">routeDaemon</span>(flags, positionals)</span></div>
+          <div class="row"><span class="ln">64</span><span class="code-cell">  <span class="kw">return</span></span><span class="ln new">68</span><span class="code-cell new">  <span class="kw">return</span></span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+</body>
+</html>
