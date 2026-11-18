@@ -21,12 +21,12 @@ use crate::files_view::FileTree;
 use crate::new_workspace::{recent_directory, NewWorkspaceEvent, NewWorkspaceModal};
 use crate::pane_seam::seam_of;
 use crate::review_pane::ReviewPane;
-use crate::settings::{KeyBarExtras, SettingsModal};
+use crate::settings::{KeyBarExtras, Preferences, SettingsModal};
 use crate::shell_model::{
-    reference_layout, HeaderModel, LensBook, ShellLayout, FILES_SURFACE_WIDTH_WIDE,
-    HEADER_HEIGHT_WIDE_PX,
+    reference_layout, review_column_visible, sidebar_visible, HeaderModel, LensBook, ShellLayout,
+    FILES_SURFACE_WIDTH_WIDE, HEADER_HEIGHT_WIDE_PX,
 };
-use crate::sidebar::SidebarEvent;
+use crate::sidebar::{SidebarEvent, TabEntry, WorkspaceEntry};
 use crate::terminal::TerminalPane;
 use crate::theme::Theme;
 use crate::workspace::WorkspaceSidebar;
@@ -60,6 +60,10 @@ pub struct OrionApp {
     /// Whether the review column is wanted; it still collapses when the window
     /// is too narrow or a split pane is up.
     review_open: bool,
+    /// Whether the left sidebar is mounted. When false the sidebar div is not
+    /// mounted at all (zero width); the entity stays alive so selection and
+    /// scroll survive a hide/show cycle. Distinct from the narrow-width rail.
+    sidebar_open: bool,
     settings: Entity<SettingsModal>,
     new_workspace: Entity<NewWorkspaceModal>,
     /// The runtime the shell talks to: the engine in this process, or one in
@@ -86,6 +90,17 @@ pub struct OrionApp {
     focus_handle: gpui_kit::FocusHandle,
     /// The last lifecycle command that failed, shown as one plain sentence.
     notice: Option<String>,
+    /// Shell state derived from the sidebar snapshot. Refreshed on session
+    /// events (and once at startup), never in `render`, so the frame path
+    /// reads cached values instead of cloning the whole session JSON.
+    last_render_prefs: Option<Preferences>,
+    cached_live_panes: Vec<String>,
+    cached_agent_label: String,
+    cached_has_workspaces: bool,
+    cached_split_panes: Vec<String>,
+    cached_workspaces: Vec<WorkspaceEntry>,
+    cached_tabs: Vec<TabEntry>,
+    cached_tabs_workspace_id: Option<String>,
 }
 
 /// The runtime session this shell belongs to.
@@ -421,6 +436,7 @@ impl OrionApp {
             changes_view,
             review_pane,
             review_open: true,
+            sidebar_open: true,
             settings,
             new_workspace,
             engine,
@@ -438,6 +454,14 @@ impl OrionApp {
             subscriptions: Vec::new(),
             focus_handle: cx.focus_handle(),
             notice,
+            last_render_prefs: None,
+            cached_live_panes: Vec::new(),
+            cached_agent_label: "the agent".to_string(),
+            cached_has_workspaces: false,
+            cached_split_panes: Vec::new(),
+            cached_workspaces: Vec::new(),
+            cached_tabs: Vec::new(),
+            cached_tabs_workspace_id: None,
         };
 
         // Lifecycle clicks are events, so the shell re-renders at once instead
@@ -460,6 +484,7 @@ impl OrionApp {
                     this.attach_pane(cx, pane_id);
                 }
             }
+            this.refresh_shell_cache(cx);
             cx.notify();
         });
         let modal_sub = cx.subscribe(&modal_events, |this, _, event: &NewWorkspaceEvent, cx| {
@@ -468,6 +493,7 @@ impl OrionApp {
                 .update(cx, |view, _cx| view.refresh());
             this.focused_pane = Some(pane_id.clone());
             this.attach_pane(cx, pane_id);
+            this.refresh_shell_cache(cx);
             cx.notify();
         });
         // The chat asks the shell for the Terminal Lens or for a file: the
@@ -482,7 +508,17 @@ impl OrionApp {
             this.handle_chat_event(event, ChatPane::Split, cx);
             cx.notify();
         });
-        app.subscriptions = vec![sidebar_sub, modal_sub, chat_sub, split_chat_sub];
+        let sidebar_observe = cx.observe(&app.workspace_sidebar, |this, _view, cx| {
+            this.refresh_shell_cache(cx);
+            cx.notify();
+        });
+        app.subscriptions = vec![
+            sidebar_sub,
+            modal_sub,
+            chat_sub,
+            split_chat_sub,
+            sidebar_observe,
+        ];
 
         app.start_session(cx);
         app
@@ -503,6 +539,7 @@ impl OrionApp {
         engine.restore();
         self.workspace_sidebar
             .update(cx, |view, _cx| view.refresh());
+        self.refresh_shell_cache(cx);
 
         let snapshot = engine.snapshot_value();
         let first_pane = snapshot
@@ -849,23 +886,30 @@ impl OrionApp {
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
-        let sidebar = self.workspace_sidebar.clone();
-        let header = sidebar.update(cx, |view, _cx| {
-            let workspaces = view.workspaces();
-            let focused = workspaces
-                .iter()
-                .find(|w| w.focused)
-                .or_else(|| workspaces.first());
-            if let Some(ws) = focused {
-                HeaderModel {
-                    title: "Orion".to_string(),
-                    workspace: ws.label.clone(),
-                    connection: "Live".to_string(),
-                }
-            } else {
-                HeaderModel::empty()
+        let workspaces = &self.cached_workspaces;
+        let focused = workspaces
+            .iter()
+            .find(|w| w.focused)
+            .or_else(|| workspaces.first());
+        let header = if let Some(ws) = focused {
+            HeaderModel {
+                title: "Orion".to_string(),
+                workspace: ws.label.clone(),
+                connection: "Live".to_string(),
             }
-        });
+        } else {
+            HeaderModel::empty()
+        };
+        let sidebar_label = if self.sidebar_open {
+            "Hide sidebar"
+        } else {
+            "Show sidebar"
+        };
+        let review_label = if self.review_open {
+            "Hide review"
+        } else {
+            "Show review"
+        };
         // The kit's toolbar: the title and workspace are plain content, and
         // the flexible spacer pushes the connection and the settings control
         // to the trailing edge.
@@ -894,6 +938,30 @@ impl OrionApp {
                         .child(header.connection),
                 ),
             )
+            .content(
+                Button::new("header-sidebar-toggle")
+                    .label(sidebar_label)
+                    .secondary()
+                    .small()
+                    .h(px(44.0))
+                    .min_w(px(44.0))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sidebar_open = !this.sidebar_open;
+                        cx.notify();
+                    })),
+            )
+            .content(
+                Button::new("header-review-toggle")
+                    .label(review_label)
+                    .secondary()
+                    .small()
+                    .h(px(44.0))
+                    .min_w(px(44.0))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.review_open = !this.review_open;
+                        cx.notify();
+                    })),
+            )
             // content, not child: the toolbar's child() turns a button into a
             // quiet ghost command, and this one keeps its labeled action look.
             .content(
@@ -901,6 +969,8 @@ impl OrionApp {
                     .label("Settings")
                     .secondary()
                     .small()
+                    .h(px(44.0))
+                    .min_w(px(44.0))
                     .on_click(cx.listener(|this, _, _, cx| {
                         let settings = this.settings.clone();
                         settings.update(cx, |view, cx| {
@@ -923,14 +993,7 @@ impl OrionApp {
             Lens::Terminal => 1,
             Lens::Chat | Lens::Changes => 0,
         };
-        let focused_pane_id = self.workspace_sidebar.update(cx, |view, _cx| {
-            view.snapshot().and_then(|snapshot| {
-                snapshot
-                    .get("focused_pane_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-        });
+        let focused_pane_id = self.focused_pane.clone();
         let focused_pane_id_zoom = focused_pane_id.clone();
         div()
             .id("middle-switcher")
@@ -1000,29 +1063,20 @@ impl OrionApp {
     /// The thin bar under the middle column. Every field comes from the live
     /// sidebar snapshot: the focused workspace's path, label, agent and status,
     /// plus the focused pane id. No token counts or other invented metrics.
-    fn render_conversation_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_conversation_status(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
-        let (label, cwd, agent, status, pane_id) =
-            self.workspace_sidebar.update(cx, |view, _cx| {
-                let workspaces = view.workspaces();
-                let focused = workspaces
-                    .iter()
-                    .find(|workspace| workspace.focused)
-                    .or_else(|| workspaces.first());
-                let label = focused.map(|ws| ws.label.clone()).unwrap_or_default();
-                let cwd = focused.and_then(|ws| ws.cwd.clone()).unwrap_or_default();
-                let agent = focused.map(|ws| ws.agent.clone()).unwrap_or_default();
-                let status = focused
-                    .map(|ws| ws.status.as_wire().to_string())
-                    .unwrap_or_default();
-                let pane_id = view.snapshot().and_then(|snapshot| {
-                    snapshot
-                        .get("focused_pane_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                });
-                (label, cwd, agent, status, pane_id)
-            });
+        let workspaces = &self.cached_workspaces;
+        let focused = workspaces
+            .iter()
+            .find(|workspace| workspace.focused)
+            .or_else(|| workspaces.first());
+        let label = focused.map(|ws| ws.label.clone()).unwrap_or_default();
+        let cwd = focused.and_then(|ws| ws.cwd.clone()).unwrap_or_default();
+        let agent = focused.map(|ws| ws.agent.clone()).unwrap_or_default();
+        let status = focused
+            .map(|ws| ws.status.as_wire().to_string())
+            .unwrap_or_default();
+        let pane_id = self.focused_pane.clone();
         let location = if cwd.is_empty() { label } else { cwd };
         let mut row = div()
             .id("conversation-status")
@@ -1079,13 +1133,7 @@ impl OrionApp {
             Lens::Terminal => 1,
             Lens::Changes => 2,
         };
-        let focused_pane_id = self.workspace_sidebar.update(cx, |view, _cx| {
-            view.snapshot().and_then(|s| {
-                s.get("focused_pane_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-        });
+        let focused_pane_id = self.focused_pane.clone();
         let focused_pane_id_zoom = focused_pane_id.clone();
         div()
             .id("lens-toggle")
@@ -1167,17 +1215,25 @@ impl OrionApp {
     /// behavior): clicking a tab focuses its first pane.
     fn render_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
-        let sidebar = self.workspace_sidebar.clone();
-        let (tabs, ws_id, ws_agent) = sidebar.update(cx, |view, _cx| {
-            let workspaces = view.workspaces();
+        let (tabs, ws_id, ws_agent) = {
+            let workspaces = &self.cached_workspaces;
             let focused = workspaces
                 .iter()
                 .find(|w| w.focused)
                 .or_else(|| workspaces.first());
-            focused
-                .map(|ws| (view.tabs(&ws.id), ws.id.clone(), ws.agent.clone()))
-                .unwrap_or_default()
-        });
+            match focused {
+                Some(ws) => {
+                    let tabs = if self.cached_tabs_workspace_id.as_deref() == Some(ws.id.as_str()) {
+                        self.cached_tabs.clone()
+                    } else {
+                        self.workspace_sidebar
+                            .update(cx, |view, _cx| view.tabs(&ws.id))
+                    };
+                    (tabs, ws.id.clone(), ws.agent.clone())
+                }
+                None => (Vec::new(), String::new(), String::new()),
+            }
+        };
         let scale = theme.density_scale();
         let ws_id_for_new = ws_id.clone();
         let ws_agent_for_new = ws_agent.clone();
@@ -1312,6 +1368,93 @@ impl OrionApp {
                     })),
             )
     }
+
+    /// Recompute the cached shell state from the sidebar snapshot. Called on
+    /// session events and at startup, never from `render`, so the frame path
+    /// never clones the whole session JSON or rebuilds these collections.
+    fn refresh_shell_cache(&mut self, cx: &mut App) {
+        let (focused, live, agent_label, has_workspaces, split_panes, workspaces, tabs, tabs_ws_id) =
+            self.workspace_sidebar.update(cx, |view, _cx| {
+                let snapshot = view.snapshot();
+                let focused = snapshot.as_ref().and_then(|snapshot| {
+                    snapshot
+                        .get("focused_pane_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+                let live = snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.get("panes"))
+                    .and_then(Value::as_array)
+                    .map(|panes| {
+                        panes
+                            .iter()
+                            .filter_map(|pane| {
+                                pane.get("pane_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let agent_label = focused
+                    .as_deref()
+                    .and_then(|pane_id| {
+                        snapshot.as_ref().and_then(|snapshot| {
+                            snapshot
+                                .get("panes")
+                                .and_then(Value::as_array)
+                                .and_then(|panes| {
+                                    panes.iter().find(|pane| {
+                                        pane.get("pane_id").and_then(Value::as_str) == Some(pane_id)
+                                    })
+                                })
+                                .and_then(|pane| pane.get("display_agent").and_then(Value::as_str))
+                                .map(str::to_string)
+                        })
+                    })
+                    .unwrap_or_else(|| "the agent".to_string());
+                let workspaces = view.workspaces();
+                let has_workspaces = !workspaces.is_empty();
+                let focused_ws = workspaces
+                    .iter()
+                    .find(|w| w.focused)
+                    .or_else(|| workspaces.first())
+                    .cloned();
+                let (split_panes, tabs, tabs_ws_id) = match focused_ws {
+                    Some(ws) => {
+                        let tabs = view.tabs(&ws.id);
+                        let focused_tab = tabs.iter().find(|t| t.focused).or_else(|| tabs.first());
+                        let split_panes = match focused_tab {
+                            Some(tab) if tab.layout != "single" && tab.pane_ids.len() >= 2 => {
+                                tab.pane_ids.clone()
+                            }
+                            _ => Vec::new(),
+                        };
+                        (split_panes, tabs, Some(ws.id))
+                    }
+                    None => (Vec::new(), Vec::new(), None),
+                };
+                (
+                    focused,
+                    live,
+                    agent_label,
+                    has_workspaces,
+                    split_panes,
+                    workspaces,
+                    tabs,
+                    tabs_ws_id,
+                )
+            });
+        self.focused_pane = focused;
+        self.cached_live_panes = live;
+        self.cached_agent_label = agent_label;
+        self.cached_has_workspaces = has_workspaces;
+        self.cached_split_panes = split_panes;
+        self.cached_workspaces = workspaces;
+        self.cached_tabs = tabs;
+        self.cached_tabs_workspace_id = tabs_ws_id;
+    }
 }
 
 impl Render for OrionApp {
@@ -1322,56 +1465,15 @@ impl Render for OrionApp {
         self.workspace_sidebar
             .update(cx, |view, _cx| view.set_rail(layout.rail));
 
-        // Follow the pane the session now focuses (workspace/tab switch,
-        // create, close). Lifecycle clicks arrive as events above.
-        let (focused_pane, live_panes) = self.workspace_sidebar.update(cx, |view, _cx| {
-            let snapshot = view.snapshot();
-            let focused = snapshot.as_ref().and_then(|snapshot| {
-                snapshot
-                    .get("focused_pane_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            });
-            let live = snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.get("panes"))
-                .and_then(Value::as_array)
-                .map(|panes| {
-                    panes
-                        .iter()
-                        .filter_map(|pane| {
-                            pane.get("pane_id")
-                                .and_then(Value::as_str)
-                                .map(str::to_string)
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            (focused, live)
-        });
-        // Panes that left the Session do not keep a lens choice alive.
-        self.lens_book.retain_panes(&live_panes);
-        self.focused_pane = focused_pane;
+        // Shell state is cached from session events (see `refresh_shell_cache`);
+        // the frame path only reads it. Panes that left the Session do not keep
+        // a lens choice alive.
+        self.lens_book.retain_panes(&self.cached_live_panes);
         if let Some(pane_id) = self.focused_pane.clone() {
             self.attach_pane(cx, &pane_id);
             // The terminal's placeholder names the agent: "Starting Claude
             // Code… (2.4s)" says far more than a blank grid.
-            let agent_label = self.workspace_sidebar.update(cx, |view, _cx| {
-                view.snapshot()
-                    .and_then(|snapshot| {
-                        snapshot
-                            .get("panes")
-                            .and_then(Value::as_array)
-                            .and_then(|panes| {
-                                panes.iter().find(|pane| {
-                                    pane.get("pane_id").and_then(Value::as_str) == Some(&pane_id)
-                                })
-                            })
-                            .and_then(|pane| pane.get("display_agent").and_then(Value::as_str))
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_else(|| "the agent".to_string())
-            });
+            let agent_label = self.cached_agent_label.clone();
             self.terminal_pane
                 .update(cx, |view, _cx| view.set_agent_label(&agent_label));
         }
@@ -1379,8 +1481,11 @@ impl Render for OrionApp {
         // The Changes lens' 2s polls run only while it is active; views are
         // preserved between lens switches (entities stay mounted above).
         let prefs = self.settings.update(cx, |view, _cx| view.prefs().clone());
-        Theme::set_current(Theme::for_mode(prefs.theme, prefs.density));
-        crate::theme::sync_gpui_kit(cx);
+        if self.last_render_prefs.as_ref() != Some(&prefs) {
+            Theme::set_current(Theme::for_mode(prefs.theme, prefs.density));
+            crate::theme::sync_gpui_kit(cx);
+            self.last_render_prefs = Some(prefs.clone());
+        }
         let extras = KeyBarExtras::from_preferences(&prefs);
         self.terminal_pane
             .update(cx, |view, _cx| view.set_key_bar_extras(extras));
@@ -1392,27 +1497,8 @@ impl Render for OrionApp {
             view.set_font_family(&terminal_font);
             view.set_font_size(terminal_font_size);
         });
-        let has_workspaces = self
-            .workspace_sidebar
-            .update(cx, |view, _cx| !view.workspaces().is_empty());
-        let split_panes = self.workspace_sidebar.update(cx, |view, _cx| {
-            let workspaces = view.workspaces();
-            let focused = workspaces
-                .iter()
-                .find(|w| w.focused)
-                .or_else(|| workspaces.first());
-            let Some(ws) = focused else {
-                return Vec::new();
-            };
-            let tabs = view.tabs(&ws.id);
-            let focused_tab = tabs.iter().find(|t| t.focused).or_else(|| tabs.first());
-            match focused_tab {
-                Some(tab) if tab.layout != "single" && tab.pane_ids.len() >= 2 => {
-                    tab.pane_ids.clone()
-                }
-                _ => Vec::new(),
-            }
-        });
+        let has_workspaces = self.cached_has_workspaces;
+        let split_panes = &self.cached_split_panes;
         // The split canvas always shows the pane the main canvas is not:
         // otherwise focusing the second pane paints it twice.
         let split_second = if split_panes.len() >= 2 {
@@ -1446,10 +1532,12 @@ impl Render for OrionApp {
         // resolved. The review column reads the same Changes view as the
         // classic lens, so that view polls in either mode.
         let reference = reference_layout(window_w);
-        let review_visible = !reference.collapse_review
-            && has_workspaces
-            && split_second.is_none()
-            && self.review_open;
+        let review_visible = review_column_visible(
+            self.review_open,
+            reference.collapse_review,
+            has_workspaces,
+            split_second.is_some(),
+        );
         let changes_active = self.current_lens() == Lens::Changes;
         self.file_tree
             .update(cx, |view, cx| view.set_visible(cx, changes_active));
@@ -1558,6 +1646,7 @@ impl Render for OrionApp {
                         .id("changes-left")
                         .flex()
                         .flex_col()
+                        .min_w(px(0.0))
                         .child(self.file_tree.clone());
                     let changes_surface = div()
                         .id("changes-right")
@@ -1577,6 +1666,7 @@ impl Render for OrionApp {
                             .child(
                                 files_surface
                                     .w(px(FILES_SURFACE_WIDTH_WIDE))
+                                    .min_w(px(0.0))
                                     .flex_shrink_0(),
                             )
                             .child(changes_surface.flex_1())
@@ -1622,6 +1712,7 @@ impl Render for OrionApp {
                             .id("split-changes-left")
                             .flex()
                             .flex_col()
+                            .min_w(px(0.0))
                             .child(self.split_file_tree.clone());
                         let changes_surface = div()
                             .id("split-changes-right")
@@ -1641,6 +1732,7 @@ impl Render for OrionApp {
                                 .child(
                                     files_surface
                                         .w(px(FILES_SURFACE_WIDTH_WIDE))
+                                        .min_w(px(0.0))
                                         .flex_shrink_0(),
                                 )
                                 .child(changes_surface.flex_1())
@@ -1674,15 +1766,17 @@ impl Render for OrionApp {
             // middle column keeps the same header and the same live lens views;
             // only the switcher and the status bar are new.
             root = root
-                .child(
+                .children(sidebar_visible(self.sidebar_open).then(|| {
                     div()
                         .id("sidebar")
                         .flex()
                         .flex_col()
                         .w(px(reference.sidebar_w))
+                        .min_w(px(0.0))
                         .flex_shrink_0()
-                        .child(self.workspace_sidebar.clone()),
-                )
+                        .child(self.workspace_sidebar.clone())
+                        .into_any_element()
+                }))
                 .child(
                     div()
                         .id("conversation-column")
@@ -1721,14 +1815,16 @@ impl Render for OrionApp {
             // The classic two-column shell, unchanged: narrow windows and
             // split panes keep the full three-lens canvas.
             root = root
-                .child(
+                .children(sidebar_visible(self.sidebar_open).then(|| {
                     div()
                         .id("sidebar")
                         .flex()
                         .flex_col()
                         .w(px(sidebar_w))
-                        .child(self.workspace_sidebar.clone()),
-                )
+                        .min_w(px(0.0))
+                        .child(self.workspace_sidebar.clone())
+                        .into_any_element()
+                }))
                 .child(
                     div()
                         .id("main-column")
