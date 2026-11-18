@@ -254,15 +254,15 @@ impl ReviewPane {
             .gap(px(9.0 * scale))
             .h(px(HEADER_HEIGHT * scale))
             .flex_shrink_0()
-            .px(px(20.0 * scale))
+            .px(px(theme.space_5()))
             .border_b_1()
-            .border_color(theme.border_soft)
-            .text_size(px(13.0 * scale))
-            .text_color(theme.text)
+            .border_color(theme.border_subtle())
+            .text_size(px(theme.font_ui_body()))
+            .text_color(theme.text_primary())
             .child(
                 Icon::new(IconName::FileText)
                     .small()
-                    .text_color(theme.text_faint),
+                    .text_color(theme.token_text_dim()),
             )
             .child(label)
     }
@@ -284,9 +284,9 @@ impl ReviewPane {
             .gap(px(10.0 * scale))
             .h(px(TOOLBAR_HEIGHT * scale))
             .flex_shrink_0()
-            .px(px(20.0 * scale))
-            .text_size(px(12.0 * scale))
-            .text_color(theme.text)
+            .px(px(theme.space_5()))
+            .text_size(px(theme.font_ui_secondary()))
+            .text_color(theme.text_primary())
             .child(
                 Button::new("review-scope")
                     .secondary()
@@ -301,11 +301,15 @@ impl ReviewPane {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(8.0 * scale))
-                .child(div().text_color(theme.diff_add).child(format!("+{added}")))
+                .gap(px(theme.space_2()))
                 .child(
                     div()
-                        .text_color(theme.diff_del)
+                        .text_color(theme.token_diff_add_text())
+                        .child(format!("+{added}")),
+                )
+                .child(
+                    div()
+                        .text_color(theme.diff_remove_text())
                         .child(format!("-{deleted}")),
                 );
             if let Some(total) = list.map(|list| list.total.unwrap_or(list.files.len() as u64)) {
@@ -316,14 +320,14 @@ impl ReviewPane {
                         .flex_row()
                         .items_center()
                         .gap(px(SPACE_2 * scale))
-                        .text_color(theme.text_muted)
+                        .text_color(theme.token_text_muted())
                         .child(
                             div()
                                 .w(px(11.0 * scale))
                                 .h(px(11.0 * scale))
                                 .rounded_full()
                                 .border_1()
-                                .border_color(theme.text_faint),
+                                .border_color(theme.token_text_dim()),
                         )
                         .child(format!("0/{total}")),
                 );
@@ -366,14 +370,14 @@ impl ReviewPane {
             .flex_shrink_0()
             .overflow_hidden()
             .border_b_1()
-            .border_color(theme.border);
+            .border_color(theme.border_subtle());
 
         for (index, file) in files.iter().enumerate() {
             let is_active = active == Some(index);
             let title_color = if is_active {
-                theme.text
+                theme.text_primary()
             } else {
-                theme.text_muted
+                theme.token_text_muted()
             };
 
             let mut content = div()
@@ -393,7 +397,7 @@ impl ReviewPane {
                         .child(
                             Icon::new(IconName::FileText)
                                 .small()
-                                .text_color(theme.text_faint),
+                                .text_color(theme.token_text_dim()),
                         )
                         .child(
                             div()
@@ -412,15 +416,19 @@ impl ReviewPane {
                 .items_center()
                 .gap(px(SPACE_2 * scale))
                 .font_family(MONO)
-                .text_size(px(11.0 * scale))
-                .text_color(theme.text_faint);
+                .text_size(px(theme.font_mono()))
+                .text_color(theme.token_text_dim());
             match (file.additions, file.deletions) {
                 (Some(added), Some(deleted)) => {
                     stats = stats
-                        .child(div().text_color(theme.diff_add).child(format!("+{added}")))
                         .child(
                             div()
-                                .text_color(theme.diff_del)
+                                .text_color(theme.token_diff_add_text())
+                                .child(format!("+{added}")),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme.diff_remove_text())
                                 .child(format!("-{deleted}")),
                         );
                 }
@@ -443,7 +451,7 @@ impl ReviewPane {
                         .right_0()
                         .bottom_0()
                         .h(px(2.0 * scale))
-                        .bg(theme.tab_active_marker),
+                        .bg(theme.token_accent()),
                 );
             }
 
@@ -457,11 +465,12 @@ impl ReviewPane {
                 .px(px(SPACE_4 * scale))
                 .pt(px(SPACE_2 * scale))
                 .pb(px(SPACE_2 * scale))
-                .border_r_1()
-                .border_color(theme.border)
+                .rounded(px(theme.radius_card()))
+                .border_1()
+                .border_color(theme.border_subtle())
                 .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)));
             if is_active {
-                tab = tab.bg(theme.tab_active_bg);
+                tab = tab.bg(theme.selected_bg());
             }
             strip = strip.child(tab.child(content));
         }
@@ -494,15 +503,15 @@ impl ReviewPane {
             RowKind::Hunk => div()
                 .id(id)
                 .w_full()
-                .px(px(12.0 * scale))
+                .px(px(theme.space_3()))
                 .py(px(5.0 * scale))
-                .bg(theme.diff_hunk_bg)
+                .bg(theme.token_diff_hunk_bg())
                 .border_t_1()
                 .border_b_1()
-                .border_color(theme.border_soft)
+                .border_color(theme.border_subtle())
                 .font_family(MONO)
-                .text_size(px(11.5 * scale))
-                .text_color(theme.diff_hunk_text)
+                .text_size(px(theme.font_mono()))
+                .text_color(theme.token_text_muted())
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .child(row.old_text.clone()),
@@ -510,46 +519,42 @@ impl ReviewPane {
                 let added = kind == RowKind::Add;
                 let deleted = kind == RowKind::Delete;
                 let old_gutter_fill = if deleted {
-                    theme.diff_del_fill
-                } else if added {
-                    theme.surface_subtle
+                    theme.diff_remove_bg()
                 } else {
-                    theme.diff_gutter
+                    theme.panel_bg()
                 };
                 let new_gutter_fill = if added {
-                    theme.diff_add_fill
-                } else if deleted {
-                    theme.surface_subtle
+                    theme.diff_add_bg()
                 } else {
-                    theme.diff_gutter
+                    theme.panel_bg()
                 };
                 let old_fill = if deleted {
-                    Some(theme.diff_del_fill)
+                    Some(theme.diff_remove_bg())
                 } else if added {
-                    Some(theme.surface_subtle)
+                    Some(theme.panel_bg())
                 } else {
                     None
                 };
                 let new_fill = if added {
-                    Some(theme.diff_add_fill)
+                    Some(theme.diff_add_bg())
                 } else if deleted {
-                    Some(theme.surface_subtle)
+                    Some(theme.panel_bg())
                 } else {
                     None
                 };
                 let old_color = if deleted {
-                    theme.diff_del_text
+                    theme.diff_remove_text()
                 } else if added {
-                    theme.text_faint
+                    theme.token_text_dim()
                 } else {
-                    theme.diff_code
+                    theme.text_primary()
                 };
                 let new_color = if added {
-                    theme.diff_add_text
+                    theme.token_diff_add_text()
                 } else if deleted {
-                    theme.text_faint
+                    theme.token_text_dim()
                 } else {
-                    theme.diff_code
+                    theme.text_primary()
                 };
                 let old_text = if deleted {
                     format!("- {}", row.old_text)
@@ -597,8 +602,8 @@ impl ReviewPane {
             .flex()
             .flex_col()
             .px(px(22.0 * scale))
-            .pt(px(28.0 * scale))
-            .pb(px(60.0 * scale));
+            .pt(px(theme.space_5() + theme.space_1()))
+            .pb(px(theme.space_5() + theme.space_5() + theme.space_3()));
 
         let title = patch.map(|patch| patch.file.path.clone()).or_else(|| {
             active
@@ -612,8 +617,8 @@ impl ReviewPane {
                     div()
                         .id("review-title")
                         .debug_selector(|| "review-title".to_string())
-                        .text_size(px(17.0 * scale))
-                        .text_color(theme.text)
+                        .text_size(px(theme.font_title_lg()))
+                        .text_color(theme.text_primary())
                         .child(path.clone()),
                 );
             }
@@ -622,8 +627,8 @@ impl ReviewPane {
                     div()
                         .id("review-empty")
                         .debug_selector(|| "review-empty".to_string())
-                        .text_size(px(13.0 * scale))
-                        .text_color(theme.text_muted)
+                        .text_size(px(theme.font_ui_body()))
+                        .text_color(theme.token_text_muted())
                         .child("Nothing changed — the working tree is clean."),
                 );
                 return content;
@@ -633,8 +638,8 @@ impl ReviewPane {
                     div()
                         .id("review-empty")
                         .debug_selector(|| "review-empty".to_string())
-                        .text_size(px(13.0 * scale))
-                        .text_color(theme.text_muted)
+                        .text_size(px(theme.font_ui_body()))
+                        .text_color(theme.token_text_muted())
                         .child("No changed files yet."),
                 );
                 return content;
@@ -646,9 +651,9 @@ impl ReviewPane {
                 div()
                     .id("review-no-patch")
                     .debug_selector(|| "review-no-patch".to_string())
-                    .mt(px(20.0 * scale))
-                    .text_size(px(12.0 * scale))
-                    .text_color(theme.text_muted)
+                    .mt(px(theme.space_5()))
+                    .text_size(px(theme.font_ui_secondary()))
+                    .text_color(theme.token_text_muted())
                     .child("No patch loaded for this file yet."),
             );
             return content;
@@ -663,32 +668,36 @@ impl ReviewPane {
             .items_center()
             .gap(px(10.0 * scale))
             .h(px(36.0 * scale))
-            .px(px(12.0 * scale))
-            .bg(theme.surface_raised_2)
+            .px(px(theme.space_3()))
+            .bg(theme.selected_bg())
             .font_family(MONO)
-            .text_size(px(12.0 * scale))
+            .text_size(px(theme.font_ui_secondary()))
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_color(theme.text)
+                    .text_color(theme.text_primary())
                     .child(file.path.clone()),
             );
         let mut stats = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.0 * scale))
+            .gap(px(theme.space_2()))
             .flex_shrink_0();
         match (file.additions, file.deletions) {
             (Some(added), Some(deleted)) => {
                 stats = stats
-                    .child(div().text_color(theme.diff_add).child(format!("+{added}")))
                     .child(
                         div()
-                            .text_color(theme.diff_del)
+                            .text_color(theme.token_diff_add_text())
+                            .child(format!("+{added}")),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.diff_remove_text())
                             .child(format!("-{deleted}")),
                     );
             }
@@ -700,12 +709,12 @@ impl ReviewPane {
         }
         head = head.child(stats).child(
             div()
-                .text_size(px(10.0 * scale))
+                .text_size(px(theme.font_ui_secondary()))
                 .px(px(5.0 * scale))
-                .rounded(px(4.0 * scale))
+                .rounded(px(theme.radius_control()))
                 .border_1()
-                .border_color(theme.badge_border)
-                .bg(theme.badge_bg)
+                .border_color(theme.border_subtle())
+                .bg(theme.hover_bg())
                 .text_color(status_color(file.status, theme))
                 .child(file.status.mark().to_string()),
         );
@@ -714,10 +723,10 @@ impl ReviewPane {
             .id(ElementId::Name(format!("review-card:{}", file.path).into()))
             .flex()
             .flex_col()
-            .mt(px(20.0 * scale))
+            .mt(px(theme.space_5()))
             .border_1()
-            .border_color(theme.border)
-            .rounded(px(8.0 * scale))
+            .border_color(theme.border_subtle())
+            .rounded(px(theme.radius_card()))
             .overflow_hidden()
             .child(head);
 
@@ -735,10 +744,10 @@ impl ReviewPane {
                 .unwrap_or_else(|| "no patch".to_string());
             card = card.child(
                 div()
-                    .px(px(12.0 * scale))
+                    .px(px(theme.space_3()))
                     .py(px(10.0 * scale))
-                    .text_size(px(12.0 * scale))
-                    .text_color(theme.text_muted)
+                    .text_size(px(theme.font_ui_secondary()))
+                    .text_color(theme.token_text_muted())
                     .child(format!("No patch ({reason}).")),
             );
         }
@@ -766,10 +775,10 @@ fn gutter_cell(
         .pr(px(9.0 * scale))
         .bg(fill)
         .font_family(MONO)
-        .text_size(px(11.5 * scale))
-        .text_color(theme.text_faint);
+        .text_size(px(theme.font_mono()))
+        .text_color(theme.token_text_dim());
     if edge {
-        cell = cell.border_l_1().border_color(theme.border);
+        cell = cell.border_l_1().border_color(theme.border_subtle());
     }
     cell.child(number.map(|number| number.to_string()).unwrap_or_default())
 }
@@ -790,17 +799,17 @@ fn code_cell(
         .flex()
         .flex_row()
         .items_center()
-        .px(px(8.0 * scale))
+        .px(px(theme.space_2()))
         .overflow_hidden()
         .font_family(MONO)
-        .text_size(px(11.5 * scale))
+        .text_size(px(theme.font_mono()))
         .text_color(color)
         .whitespace_nowrap();
     if let Some(fill) = fill {
         cell = cell.bg(fill);
     }
     if edge {
-        cell = cell.border_l_1().border_color(theme.border);
+        cell = cell.border_l_1().border_color(theme.border_subtle());
     }
     cell.child(text)
 }
@@ -833,7 +842,8 @@ impl Render for ReviewPane {
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme.surface_canvas)
+            .bg(theme.panel_bg())
+            .rounded(px(theme.radius_panel()))
             .text_color(theme.text)
             .child(self.render_header(label, &theme))
             .child(self.render_toolbar(list.as_ref(), &files, &theme, cx))
