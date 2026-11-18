@@ -12,6 +12,7 @@ use crate::pane_seam::{PaneSeam, AGENT_GONE};
 use crate::theme::Theme;
 use gpui_kit::base::component_traits::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{Icon, IconName, Sizable};
 use gpui_kit::*;
 use gpui_kit::{
     div, px, App, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Render, Window,
@@ -19,8 +20,6 @@ use gpui_kit::{
 use std::sync::Arc;
 
 // Spacing tokens (DESIGN.md §4), as in chat.rs and sidebar.rs.
-const SPACE_1: f32 = 4.0; // --space-1: tight control gaps
-const SPACE_2: f32 = 8.0; // --space-2: row and action gaps
 const SPACE_3: f32 = 12.0; // --space-3: control padding
 const TOUCH_TARGET: f32 = 44.0; // --touch-target: coarse-pointer minimum
 const CONTENT_W: f32 = 820.0; // --content-w: composer column width
@@ -609,21 +608,17 @@ impl Render for Composer {
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
-            .gap(px(SPACE_1))
+            .gap(px(theme.space_1()))
             .w_full()
             .min_h(px(50.0))
-            .px_3()
-            .py_2()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.composer_border)
-            .bg(theme.composer_bg)
+            .px(px(theme.space_3()))
+            .py(px(theme.space_2()))
             .font_family("JetBrains Mono")
-            .text_size(px(13.0 * theme.density_scale()))
-            .text_color(if self.blocked {
-                theme.text_faint
+            .text_size(px(theme.font_ui_body()))
+            .text_color(if self.blocked || draft.is_empty() {
+                theme.token_text_dim()
             } else {
-                theme.text
+                theme.text_primary()
             })
             .on_key_down(cx.listener(|this, ev, _, cx| {
                 this.on_key(ev, cx);
@@ -647,63 +642,80 @@ impl Render for Composer {
         let can_send = self.model.can_send() && !self.blocked;
         let can_stop = self.running && self.model.can_stop() && !self.blocked;
 
-        // The kit's primary button carries the send action; a disabled
-        // button states the same thing the old colour swap did, and the
-        // wrapper keeps the selector the tests look the control up by.
-        let send = div()
+        // The wrapper stays sized so the click tests can always find it; only
+        // the icon button inside comes and goes with the state it belongs to.
+        let mut send = div()
             .id("composer-send")
             .debug_selector(|| "composer-send".to_string())
             .flex()
-            .child(
+            .items_center()
+            .justify_center()
+            .w(px(TOUCH_TARGET))
+            .h(px(TOUCH_TARGET));
+        if can_send {
+            send = send.child(
                 Button::new("composer-send")
-                    .label("Send")
+                    .icon(Icon::new(IconName::ArrowUp))
+                    .small()
                     .primary()
+                    .h(px(TOUCH_TARGET))
                     .min_h(px(TOUCH_TARGET))
                     .min_w(px(TOUCH_TARGET))
+                    .accessibility_label("Send")
+                    .tooltip("Send")
                     .disabled(!can_send)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.send(cx);
                         cx.notify();
                     })),
             );
+        }
 
-        let stop = div()
+        let mut stop = div()
             .id("composer-stop")
             .debug_selector(|| "composer-stop".to_string())
             .flex()
-            .child(
+            .items_center()
+            .justify_center()
+            .w(px(TOUCH_TARGET))
+            .h(px(TOUCH_TARGET));
+        if can_stop {
+            stop = stop.child(
                 Button::new("composer-stop")
-                    .label("Stop")
+                    .icon(Icon::new(IconName::Square))
+                    .small()
                     .secondary()
+                    .h(px(TOUCH_TARGET))
                     .min_h(px(TOUCH_TARGET))
                     .min_w(px(TOUCH_TARGET))
+                    .accessibility_label("Stop")
+                    .tooltip("Stop")
                     .disabled(!can_stop)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.stop(cx);
                         cx.notify();
                     })),
             );
+        }
 
         let mut column = div()
             .id("chat-composer")
             .debug_selector(|| "chat-composer".to_string())
             .flex()
             .flex_col()
-            .gap(px(SPACE_2))
+            .gap(px(theme.space_2()))
             .w_full()
             .max_w(px(CONTENT_W))
-            .p_3()
-            .mb_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border_soft)
-            .bg(theme.surface_canvas);
+            .px(px(theme.space_3()))
+            .pb(px(theme.space_2()))
+            .mb_3();
 
+        column = column.child(div().w_full().h(px(1.0)).bg(theme.border_subtle()));
         column = column.child(input);
         if let Some(note) = self.render_note(cx) {
             column = column.child(note);
         }
-        column.child(
+        column = column.child(
             div()
                 .id("composer-actions")
                 .debug_selector(|| "composer-actions".to_string())
@@ -711,10 +723,11 @@ impl Render for Composer {
                 .flex_row()
                 .items_center()
                 .justify_end()
-                .gap(px(SPACE_2))
+                .gap(px(theme.space_2()))
                 .child(stop)
                 .child(send),
-        )
+        );
+        column.child(div().w_full().h(px(1.0)).bg(theme.border_subtle()))
     }
 }
 
