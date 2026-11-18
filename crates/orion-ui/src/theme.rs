@@ -15,6 +15,7 @@
 //! multiplies spacing tokens; text sizes use [`Theme::text_size`].
 
 use gpui_kit::{px, rgb, rgba, App, Hsla, Rgba};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{LazyLock, Mutex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeMode {
@@ -414,18 +415,39 @@ impl Theme {
 
     /// The live theme. Falls back to Quiet Slate dark with comfortable
     /// density before the app installs saved preferences.
+    ///
+    /// A read is one relaxed atomic load, not a `Mutex` lock: the palette is a
+    /// pure function of (mode, density), and every `set_current` caller passes
+    /// a `for_mode` value (or its `dark()`/`light()` wrappers), so the two
+    /// packed bits reconstruct the exact Theme (see `CURRENT_KEY`).
     pub fn current() -> Theme {
-        CURRENT
-            .lock()
-            .map(|guard| *guard)
-            .unwrap_or_else(|_| Theme::dark())
+        let key = CURRENT_KEY.load(Ordering::Relaxed);
+        let mode = if key & MODE_BIT != 0 {
+            ThemeMode::Light
+        } else {
+            ThemeMode::Dark
+        };
+        let density = if key & DENSITY_BIT != 0 {
+            Density::Compact
+        } else {
+            Density::Comfortable
+        };
+        Theme::for_mode(mode, density)
     }
 
     /// Install the theme every view reads via [`Theme::current()`].
+    ///
+    /// Only the (mode, density) key is stored; see [`Theme::current`] for the
+    /// caller invariant that makes this lossless.
     pub fn set_current(theme: Theme) {
-        if let Ok(mut guard) = CURRENT.lock() {
-            *guard = theme;
+        let mut key = 0u8;
+        if theme.mode == ThemeMode::Light {
+            key |= MODE_BIT;
         }
+        if theme.density == Density::Compact {
+            key |= DENSITY_BIT;
+        }
+        CURRENT_KEY.store(key, Ordering::Relaxed);
     }
 
     /// Spacing/text scale for the density (DESIGN.md §1: scales without
@@ -495,7 +517,13 @@ pub const CHAT_LINE_HEIGHT: f32 = 1.65;
 /// Inline code is `0.87em` of its line (DESIGN.md §Faces).
 pub const CHAT_INLINE_CODE_RATIO: f32 = 0.87;
 
-static CURRENT: LazyLock<Mutex<Theme>> = LazyLock::new(|| Mutex::new(Theme::dark()));
+// Packed key for the live theme: bit 0 = Light, bit 1 = Compact. Every
+// `set_current` caller passes `Theme::for_mode(mode, density)` (settings.rs,
+// app.rs) or its `dark()`/`light()` wrappers, so the full palette is a pure
+// function of these two bits and the key reconstructs it losslessly.
+const MODE_BIT: u8 = 1;
+const DENSITY_BIT: u8 = 2;
+static CURRENT_KEY: AtomicU8 = AtomicU8::new(0);
 
 /// Convert a theme color to the `Hsla` `TextStyle` expects.
 pub fn hsla(color: Rgba) -> Hsla {
