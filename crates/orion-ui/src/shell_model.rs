@@ -196,6 +196,26 @@ pub fn reference_layout(width: f32) -> ReferenceLayout {
     }
 }
 
+/// Whether the left sidebar div is mounted. A hidden sidebar is not mounted at
+/// all (zero width), which is distinct from the narrow-width rail decided by
+/// [`ShellLayout::for_width`]. The sidebar entity stays alive; only its mount
+/// is conditional, so session selection and scroll survive a hide/show cycle.
+pub fn sidebar_visible(sidebar_open: bool) -> bool {
+    sidebar_open
+}
+
+/// Whether the right-hand review column is shown. It needs the user's opt-in,
+/// enough window width, at least one workspace, and no split second pane.
+/// `split_second` is true when a split second pane is present.
+pub fn review_column_visible(
+    review_open: bool,
+    collapse_review: bool,
+    has_workspaces: bool,
+    split_second: bool,
+) -> bool {
+    review_open && !collapse_review && has_workspaces && !split_second
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +399,36 @@ mod tests {
     #[::core::prelude::v1::test]
     fn reference_layout_keeps_the_classic_wide_sidebar_width() {
         assert_eq!(SIDEBAR_WIDTH_WIDE_PX, 264.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn sidebar_visible_tracks_the_toggle() {
+        assert!(sidebar_visible(true));
+        assert!(!sidebar_visible(false));
+    }
+
+    #[::core::prelude::v1::test]
+    fn review_column_visible_covers_every_boolean_combination() {
+        for review_open in [false, true] {
+            for collapse_review in [false, true] {
+                for has_workspaces in [false, true] {
+                    for split_second in [false, true] {
+                        let expected =
+                            review_open && !collapse_review && has_workspaces && !split_second;
+                        assert_eq!(
+                            review_column_visible(
+                                review_open,
+                                collapse_review,
+                                has_workspaces,
+                                split_second
+                            ),
+                            expected,
+                            "review_open={review_open} collapse_review={collapse_review} \
+                             has_workspaces={has_workspaces} split_second={split_second}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
