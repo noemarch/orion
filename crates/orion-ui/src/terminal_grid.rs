@@ -29,6 +29,7 @@ use gpui_kit::{
     TextRun, UnderlineStyle, Window,
 };
 use orion_core::terminal_engine::TermCell;
+use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -164,6 +165,10 @@ pub struct GridRow {
     /// The row's text: one character per grid column, except the empty second
     /// half of a wide character, which contributes nothing.
     pub text: SharedString,
+    /// Owned handle to the same text, reserved for painting. `shape_line`
+    /// consumes a `SharedString`, so paint takes this handle and returns it
+    /// after shaping instead of cloning `text` on every frame.
+    paint_text: RefCell<Option<SharedString>>,
     /// The styled spans, as byte ranges into `text`, in order, covering it.
     pub runs: Vec<(Range<usize>, CellStyle)>,
     /// The row's non-default background cells, merged into the fewest column
@@ -327,7 +332,7 @@ pub fn build_row(
         }
     }
 
-    let text = std::mem::take(&mut scratch.text);
+    let text = SharedString::new(std::mem::take(&mut scratch.text));
     let runs = std::mem::take(&mut scratch.runs);
     let bgs = std::mem::take(&mut scratch.bgs);
     scratch.text = String::with_capacity(cells.len());
@@ -335,7 +340,8 @@ pub fn build_row(
     scratch.bgs = Vec::with_capacity(2);
     GridRow {
         key,
-        text: SharedString::new(text),
+        paint_text: RefCell::new(Some(text.clone())),
+        text,
         runs,
         bgs,
     }
@@ -379,6 +385,9 @@ pub struct GridSnapshot {
 pub struct TerminalGrid {
     snapshot: GridSnapshot,
     style: StyleRefinement,
+    /// Scratch run buffer reused across every visible row of a paint, so one
+    /// `Vec<TextRun>` serves the whole grid instead of one per row.
+    run_scratch: Vec<TextRun>,
 }
 
 impl TerminalGrid {
@@ -386,6 +395,7 @@ impl TerminalGrid {
         Self {
             snapshot,
             style: StyleRefinement::default(),
+            run_scratch: Vec::new(),
         }
     }
 
@@ -444,32 +454,46 @@ impl TerminalGrid {
         }
     }
 
-    fn paint_text(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        if self.snapshot.rows.is_empty() {
+    fn paint_text(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        let Self {
+            snapshot,
+            run_scratch,
+            ..
+        } = self;
+        if snapshot.rows.is_empty() {
             return;
         }
-        let cell = self.snapshot.cell;
-        let font_size = px(self.snapshot.font_size);
+        let cell = snapshot.cell;
+        let font_size = px(snapshot.font_size);
         let base_font = Font {
-            family: SharedString::new(self.snapshot.font_family.clone()),
+            family: SharedString::new(snapshot.font_family.clone()),
             features: FontFeatures::default(),
             fallbacks: None,
             weight: FontWeight::NORMAL,
             style: FontStyle::Normal,
         };
         // Shaping goes through the window's line-layout cache: a row whose text
-        // and runs did not change is not re-shaped.
+        // and runs did not change is not re-shaped. The run buffer is cleared
+        // and refilled per row, so one allocation serves the whole grid. The
+        // text handle is taken from the row and returned after shaping, so no
+        // `SharedString` is cloned per row per paint.
         let text_system = window.text_system().clone();
-        for (row_index, row) in self.snapshot.rows.iter().enumerate() {
+        for (row_index, row) in snapshot.rows.iter().enumerate() {
             if row.runs.is_empty() {
                 continue;
             }
-            let runs: Vec<TextRun> = row
-                .runs
-                .iter()
-                .map(|(span, style)| style.to_run(span.len(), &base_font))
-                .collect();
-            let line = text_system.shape_line(row.text.clone(), font_size, &runs, None);
+            run_scratch.clear();
+            run_scratch.extend(
+                row.runs
+                    .iter()
+                    .map(|(span, style)| style.to_run(span.len(), &base_font)),
+            );
+            let mut text_slot = row.paint_text.borrow_mut();
+            let text = text_slot
+                .take()
+                .expect("row paint text handle is restored after every shape");
+            let mut line = text_system.shape_line(text, font_size, run_scratch.as_slice(), None);
+            *text_slot = Some(std::mem::take(&mut line.text));
             let origin = Point {
                 x: bounds.origin.x,
                 y: bounds.origin.y + px(row_index as f32 * cell.height),
@@ -677,6 +701,7 @@ mod tests {
                 theme_accent: color,
             },
             text: SharedString::new(""),
+            paint_text: RefCell::new(Some(SharedString::new_static(""))),
             runs: Vec::new(),
             bgs: vec![BgSpan {
                 first_col,
