@@ -4,6 +4,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::toolbar::Toolbar;
 use gpui_kit::component::Sizable;
+use gpui_kit::component::{Icon, IconName};
 use gpui_kit::*;
 use gpui_kit::{
     div, px, App, Context, Entity, Render, Size, Subscription, Window, WindowBounds, WindowOptions,
@@ -915,36 +916,39 @@ impl OrionApp {
         // to the trailing edge.
         Toolbar::new("app-header")
             .h(px(HEADER_HEIGHT_WIDE_PX))
-            .px_3()
-            .gap(px(12.0))
-            .bg(theme.surface_panel)
+            .px(px(theme.space_3()))
+            .gap(px(theme.space_3()))
+            .bg(theme.panel_bg())
             .content(
                 div()
-                    .text_size(px(14.0))
-                    .text_color(theme.text_strong)
+                    .text_size(px(theme.font_title()))
+                    .text_color(theme.text_primary())
                     .child(header.title),
             )
             .content(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(theme.text_dim)
+                    .text_size(px(theme.font_ui_secondary()))
+                    .text_color(theme.token_text_dim())
                     .child(header.workspace),
             )
             .content(
                 div().flex_1().flex().flex_row().justify_end().child(
                     div()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_dim)
+                        .text_size(px(theme.font_ui_secondary()))
+                        .text_color(theme.token_text_dim())
                         .child(header.connection),
                 ),
             )
             .content(
                 Button::new("header-sidebar-toggle")
-                    .label(sidebar_label)
-                    .secondary()
+                    .icon(Icon::new(IconName::PanelLeft))
+                    .ghost()
                     .small()
                     .h(px(44.0))
+                    .min_h(px(44.0))
                     .min_w(px(44.0))
+                    .tooltip(sidebar_label)
+                    .accessibility_label(sidebar_label)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.sidebar_open = !this.sidebar_open;
                         cx.notify();
@@ -952,11 +956,14 @@ impl OrionApp {
             )
             .content(
                 Button::new("header-review-toggle")
-                    .label(review_label)
-                    .secondary()
+                    .icon(Icon::new(IconName::PanelRight))
+                    .ghost()
                     .small()
                     .h(px(44.0))
+                    .min_h(px(44.0))
                     .min_w(px(44.0))
+                    .tooltip(review_label)
+                    .accessibility_label(review_label)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.review_open = !this.review_open;
                         cx.notify();
@@ -966,11 +973,14 @@ impl OrionApp {
             // quiet ghost command, and this one keeps its labeled action look.
             .content(
                 Button::new("header-settings")
-                    .label("Settings")
-                    .secondary()
+                    .icon(Icon::new(IconName::Settings))
+                    .ghost()
                     .small()
                     .h(px(44.0))
+                    .min_h(px(44.0))
                     .min_w(px(44.0))
+                    .tooltip("Settings")
+                    .accessibility_label("Settings")
                     .on_click(cx.listener(|this, _, _, cx| {
                         let settings = this.settings.clone();
                         settings.update(cx, |view, cx| {
@@ -1004,7 +1014,7 @@ impl OrionApp {
             .h(px(40.0))
             .px_3()
             .w_full()
-            .bg(theme.surface_panel)
+            .bg(theme.panel_bg())
             .child(
                 TabBar::new("middle-switch")
                     .segmented()
@@ -1078,21 +1088,44 @@ impl OrionApp {
             .unwrap_or_default();
         let pane_id = self.focused_pane.clone();
         let location = if cwd.is_empty() { label } else { cwd };
-        let mut row = div()
+        let mut right_fields: Vec<String> = Vec::new();
+        if !agent.is_empty() {
+            right_fields.push(agent);
+        }
+        if !status.is_empty() {
+            right_fields.push(status);
+        }
+        if let Some(pane_id) = pane_id {
+            right_fields.push(pane_id);
+        }
+        let mut right = div()
+            .flex_1()
+            .min_w(px(0.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .overflow_hidden()
+            .whitespace_nowrap();
+        for (index, field) in right_fields.into_iter().enumerate() {
+            if index > 0 {
+                right = right.child(" · ");
+            }
+            right = right.child(field);
+        }
+        div()
             .id("conversation-status")
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(14.0))
-            .h(px(28.0))
+            .gap(px(theme.space_2()))
             .flex_shrink_0()
-            .px_3()
+            .px(px(theme.space_3()))
+            .py(px(theme.space_1()))
             .border_t_1()
-            .border_color(theme.border_soft)
-            .bg(theme.surface_canvas)
-            .font_family("JetBrains Mono")
-            .text_size(px(11.0))
-            .text_color(theme.text_faint)
+            .border_color(theme.border_subtle())
+            .text_size(px(theme.font_ui_secondary()))
+            .text_color(theme.token_text_dim())
             .whitespace_nowrap()
             .overflow_hidden()
             .child(
@@ -1101,27 +1134,10 @@ impl OrionApp {
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_color(theme.status_link)
+                    .text_color(theme.token_text_muted())
                     .child(location),
-            );
-        if !agent.is_empty() {
-            row = row.child(div().text_color(theme.text_muted).child(agent));
-        }
-        if !status.is_empty() {
-            row = row.child(div().text_color(theme.text_muted).child(status));
-        }
-        if let Some(pane_id) = pane_id {
-            row = row.child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .text_color(theme.text_muted)
-                    .child(pane_id),
-            );
-        }
-        row
+            )
+            .child(right)
     }
 
     fn render_lens_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1751,11 +1767,15 @@ impl Render for OrionApp {
             }
         };
         let notice = self.notice.clone();
+        let theme = Theme::current();
         let mut root = div()
             .id("app")
             .flex()
             .flex_row()
             .size_full()
+            .bg(theme.window_bg())
+            .p(px(theme.space_2()))
+            .gap(px(theme.panel_gap()))
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
                 this.handle_editing_key(ev, cx)
@@ -1774,6 +1794,8 @@ impl Render for OrionApp {
                         .w(px(reference.sidebar_w))
                         .min_w(px(0.0))
                         .flex_shrink_0()
+                        .bg(theme.panel_bg())
+                        .rounded(px(theme.radius_panel()))
                         .child(self.workspace_sidebar.clone())
                         .into_any_element()
                 }))
@@ -1785,6 +1807,8 @@ impl Render for OrionApp {
                         .w(px(reference.conversation_w))
                         .flex_shrink_0()
                         .min_w(px(0.0))
+                        .bg(theme.panel_bg())
+                        .rounded(px(theme.radius_panel()))
                         .child(self.render_header(cx))
                         .child(self.render_middle_switcher(cx))
                         .children(notice.map(|message| {
@@ -1808,7 +1832,8 @@ impl Render for OrionApp {
                         .flex_col()
                         .flex_1()
                         .min_w(px(0.0))
-                        .bg(Theme::current().surface_canvas)
+                        .bg(theme.panel_bg())
+                        .rounded(px(theme.radius_panel()))
                         .child(self.review_pane.clone()),
                 );
         } else {
@@ -1822,6 +1847,8 @@ impl Render for OrionApp {
                         .flex_col()
                         .w(px(sidebar_w))
                         .min_w(px(0.0))
+                        .bg(theme.panel_bg())
+                        .rounded(px(theme.radius_panel()))
                         .child(self.workspace_sidebar.clone())
                         .into_any_element()
                 }))
@@ -1832,6 +1859,8 @@ impl Render for OrionApp {
                         .flex_col()
                         .flex_1()
                         .min_w(px(0.0))
+                        .bg(theme.panel_bg())
+                        .rounded(px(theme.radius_panel()))
                         .child(self.render_header(cx))
                         // The tab strip and lens switcher act on a selected pane;
                         // with no workspace they would be dead chrome.
