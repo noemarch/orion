@@ -34,6 +34,17 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
+// Spacing scale from DESIGN.md §4 (4px base). The Rust theme exposes density
+// scaling but no spacing tokens, so keep the scale named and local instead of
+// repeating bare literals across the view. Radii are the §4 chip/control tokens.
+const SPACE_1: f32 = 4.0; // --space-1: tight icon and control gaps
+const SPACE_2: f32 = 8.0; // --space-2: row and menu gaps
+const SPACE_3: f32 = 12.0; // --space-3: control padding
+const SPACE_4: f32 = 16.0; // --space-4: section padding
+const RADIUS_SM: f32 = 6.0; // --radius-sm: chips and inner controls
+const TOUCH_TARGET: f32 = 44.0; // --touch-target: coarse-pointer minimum
+const ROW_SUB_INDENT: f32 = 28.0; // avatar (20) + row gap (8)
+
 /// One workspace row of the sidebar: mark + title + status on a single row.
 #[derive(Debug, Clone)]
 pub struct WorkspaceEntry {
@@ -423,24 +434,24 @@ impl WorkspaceSidebar {
     }
 
     /// The 48px titlebar: four window lights, the brand mark, the "Orion"
-    /// wordmark and the two leading view icons.
+    /// wordmark and two trailing decorative glyphs.
     fn render_titlebar(&self, theme: &Theme, scale: f32) -> impl IntoElement {
         div()
             .id("sidebar-titlebar")
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(9.0 * scale))
+            .gap(px(SPACE_2 * scale))
             .h(px(48.0))
             .flex_shrink_0()
-            .px(px(16.0 * scale))
+            .px(px(SPACE_4 * scale))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(8.0 * scale))
-                    .mr(px(8.0 * scale))
+                    .gap(px(SPACE_2 * scale))
+                    .mr(px(SPACE_2 * scale))
                     .child(Self::window_light(theme.indicator_blocked))
                     .child(Self::window_light(theme.warning_amber))
                     .child(Self::window_light(theme.status_done))
@@ -449,7 +460,7 @@ impl WorkspaceSidebar {
             .child(
                 div()
                     .size(px(18.0 * scale))
-                    .rounded(px(5.0 * scale))
+                    .rounded(px(RADIUS_SM * scale))
                     .bg(theme.accent_emphasis)
                     .flex()
                     .items_center()
@@ -473,6 +484,9 @@ impl WorkspaceSidebar {
                     }),
             )
             .child(div().flex_1())
+            // Decorative only: the real sidebar toggle is `header-sidebar-toggle`
+            // in app.rs. These mirror the reference titlebar glyphs and carry no
+            // click handler or visibility state of their own.
             .child(
                 Icon::new(IconName::Menu)
                     .size(px(15.0 * scale))
@@ -499,10 +513,10 @@ impl WorkspaceSidebar {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(10.0 * scale))
-            .h(px(44.0))
+            .gap(px(SPACE_2 * scale))
+            .h(px(TOUCH_TARGET))
             .flex_shrink_0()
-            .px(px(16.0 * scale))
+            .px(px(SPACE_4 * scale))
             .border_b_1()
             .border_color(theme.border_soft)
             .child(
@@ -528,7 +542,7 @@ impl WorkspaceSidebar {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(4.0 * scale))
+                    .gap(px(SPACE_1 * scale))
                     .child(
                         Icon::new(IconName::Settings2)
                             .size(px(15.0 * scale))
@@ -538,8 +552,8 @@ impl WorkspaceSidebar {
                         Button::new("new-workspace-button")
                             .ghost()
                             .icon(IconName::Plus)
-                            .min_h(px(44.0))
-                            .min_w(px(44.0))
+                            .min_h(px(TOUCH_TARGET))
+                            .min_w(px(TOUCH_TARGET))
                             .on_click(cx.listener(|_this, _, _, cx| {
                                 cx.emit(SidebarEvent::NewWorkspace);
                                 cx.notify();
@@ -560,18 +574,18 @@ impl WorkspaceSidebar {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0 * scale))
+            .gap(px(SPACE_2 * scale))
             .h(px(30.0 * scale))
-            .px(px(16.0 * scale))
+            .px(px(SPACE_4 * scale))
             .text_size(px(11.0 * scale))
             .text_color(theme.text_muted)
             .child(label.to_string())
             .child(div().flex_1())
             .child(
                 div()
-                    .px(px(6.0 * scale))
+                    .px(px(SPACE_2 * scale))
                     .py(px(1.0 * scale))
-                    .rounded(px(4.0 * scale))
+                    .rounded(px(RADIUS_SM * scale))
                     .bg(theme.badge_bg)
                     .border_1()
                     .border_color(theme.badge_border)
@@ -605,14 +619,12 @@ impl WorkspaceSidebar {
         } else {
             ws.cwd.clone().unwrap_or_else(|| ws.agent.clone())
         };
-        let mut row = div()
-            .id(self.next_row_id())
-            .flex()
-            .flex_col()
-            .gap(px(4.0 * scale))
-            .min_h(px(44.0))
+        let mut row = Button::new(self.next_row_id())
+            .text()
+            .w_full()
+            .min_h(px(TOUCH_TARGET))
             .px(px(14.0 * scale))
-            .py(px(9.0 * scale))
+            .py(px(SPACE_2 * scale))
             .border_l_2()
             .border_color(if is_chosen {
                 theme.accent_emphasis
@@ -626,63 +638,70 @@ impl WorkspaceSidebar {
             })
             .child(
                 div()
+                    .w_full()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0 * scale))
-                    .child(Avatar::new().name(mark).with_size(px(20.0 * scale)))
+                    .flex_col()
+                    .gap(px(SPACE_1 * scale))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .truncate()
-                            .text_size(px(13.0 * scale))
-                            .text_color(if is_chosen {
-                                theme.text_strong
-                            } else {
-                                theme.text
-                            })
-                            .child(if self.rail {
-                                String::new()
-                            } else {
-                                ws.label.clone()
-                            }),
-                    )
-                    .child(if self.rail {
-                        div().id(self.next_row_id()).into_any_element()
-                    } else {
-                        Button::new(self.next_row_id())
-                            .text()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(SPACE_2 * scale))
+                            .child(Avatar::new().name(mark).with_size(px(20.0 * scale)))
                             .child(
                                 div()
-                                    .text_size(px(11.0 * scale))
-                                    .text_color(theme.text_faint)
-                                    .child("×"),
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .text_size(px(13.0 * scale))
+                                    .text_color(if is_chosen {
+                                        theme.text_strong
+                                    } else {
+                                        theme.text
+                                    })
+                                    .child(if self.rail {
+                                        String::new()
+                                    } else {
+                                        ws.label.clone()
+                                    }),
                             )
-                            .min_h(px(44.0))
-                            .min_w(px(44.0))
-                            .on_click(cx.listener(move |_this, _, _, cx| {
-                                cx.stop_propagation();
-                                cx.emit(SidebarEvent::CloseWorkspace(ws_id.clone()));
-                                cx.notify();
-                            }))
-                            .into_any_element()
-                    })
+                            .child(if self.rail {
+                                div().id(self.next_row_id()).into_any_element()
+                            } else {
+                                Button::new(self.next_row_id())
+                                    .text()
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0 * scale))
+                                            .text_color(theme.text_faint)
+                                            .child("×"),
+                                    )
+                                    .min_h(px(TOUCH_TARGET))
+                                    .min_w(px(TOUCH_TARGET))
+                                    .on_click(cx.listener(move |_this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(SidebarEvent::CloseWorkspace(ws_id.clone()));
+                                        cx.notify();
+                                    }))
+                                    .into_any_element()
+                            })
+                            .child(
+                                div()
+                                    .size(px(8.0))
+                                    .rounded_full()
+                                    .bg(Self::status_color(ws.status, theme, self.pulse_phase))
+                                    .id(self.next_row_id()),
+                            ),
+                    )
                     .child(
                         div()
-                            .size(px(8.0))
-                            .rounded_full()
-                            .bg(Self::status_color(ws.status, theme, self.pulse_phase))
-                            .id(self.next_row_id()),
+                            .pl(px(ROW_SUB_INDENT * scale))
+                            .truncate()
+                            .text_size(px(11.0 * scale))
+                            .text_color(theme.text_muted)
+                            .child(sub),
                     ),
-            )
-            .child(
-                div()
-                    .pl(px(28.0 * scale))
-                    .truncate()
-                    .text_size(px(11.0 * scale))
-                    .text_color(theme.text_muted)
-                    .child(sub),
             );
 
         if let Some(pane_id) = pane_id {
@@ -712,14 +731,12 @@ impl WorkspaceSidebar {
             .unwrap_or('?')
             .to_ascii_uppercase()
             .to_string();
-        div()
-            .id(self.next_row_id())
-            .flex()
-            .flex_col()
-            .gap(px(4.0 * scale))
-            .min_h(px(44.0))
+        Button::new(self.next_row_id())
+            .text()
+            .w_full()
+            .min_h(px(TOUCH_TARGET))
             .px(px(14.0 * scale))
-            .py(px(9.0 * scale))
+            .py(px(SPACE_2 * scale))
             .border_l_2()
             .border_color(if agent.selected {
                 theme.accent_emphasis
@@ -733,58 +750,65 @@ impl WorkspaceSidebar {
             })
             .child(
                 div()
+                    .w_full()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0 * scale))
-                    .child(Avatar::new().name(mark).with_size(px(20.0 * scale)))
+                    .flex_col()
+                    .gap(px(SPACE_1 * scale))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .truncate()
-                            .text_size(px(13.0 * scale))
-                            .text_color(if agent.selected {
-                                theme.text_strong
-                            } else {
-                                theme.text
-                            })
-                            .child(if self.rail {
-                                String::new()
-                            } else {
-                                agent.title.clone()
-                            }),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(SPACE_2 * scale))
+                            .child(Avatar::new().name(mark).with_size(px(20.0 * scale)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .text_size(px(13.0 * scale))
+                                    .text_color(if agent.selected {
+                                        theme.text_strong
+                                    } else {
+                                        theme.text
+                                    })
+                                    .child(if self.rail {
+                                        String::new()
+                                    } else {
+                                        agent.title.clone()
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(10.0 * scale))
+                                    .text_color(theme.text_muted)
+                                    .child(if self.rail {
+                                        String::new()
+                                    } else {
+                                        agent.status_word().to_string()
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .size(px(8.0))
+                                    .rounded_full()
+                                    .bg(Self::status_color(agent.status, theme, self.pulse_phase))
+                                    .id(self.next_row_id()),
+                            ),
                     )
                     .child(
                         div()
-                            .flex_none()
-                            .text_size(px(10.0 * scale))
+                            .pl(px(ROW_SUB_INDENT * scale))
+                            .truncate()
+                            .text_size(px(11.0 * scale))
                             .text_color(theme.text_muted)
                             .child(if self.rail {
                                 String::new()
                             } else {
-                                agent.status_word().to_string()
+                                agent.context.clone()
                             }),
-                    )
-                    .child(
-                        div()
-                            .size(px(8.0))
-                            .rounded_full()
-                            .bg(Self::status_color(agent.status, theme, self.pulse_phase))
-                            .id(self.next_row_id()),
                     ),
-            )
-            .child(
-                div()
-                    .pl(px(28.0 * scale))
-                    .truncate()
-                    .text_size(px(11.0 * scale))
-                    .text_color(theme.text_muted)
-                    .child(if self.rail {
-                        String::new()
-                    } else {
-                        agent.context.clone()
-                    }),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.focus_pane(&pane_id);
@@ -808,9 +832,9 @@ impl WorkspaceSidebar {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.0 * scale))
-            .min_h(px(44.0))
-            .pl(px((14.0 + row.depth as f32 * 12.0) * scale))
+            .gap(px(SPACE_2 * scale))
+            .min_h(px(TOUCH_TARGET))
+            .pl(px((14.0 + row.depth as f32 * SPACE_3) * scale))
             .pr(px(14.0 * scale))
             .child(
                 div()
@@ -851,9 +875,9 @@ impl WorkspaceSidebar {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(8.0 * scale))
-                    .h(px(45.0))
-                    .px(px(16.0 * scale))
+                    .gap(px(SPACE_2 * scale))
+                    .h(px(TOUCH_TARGET))
+                    .px(px(SPACE_4 * scale))
                     .text_size(px(12.0 * scale))
                     .text_color(theme.text_muted)
                     .child(if self.rail {
@@ -864,8 +888,8 @@ impl WorkspaceSidebar {
                     .child(div().flex_1())
                     .child(
                         div()
-                            .px(px(6.0 * scale))
-                            .rounded(px(4.0 * scale))
+                            .px(px(SPACE_2 * scale))
+                            .rounded(px(RADIUS_SM * scale))
                             .bg(theme.badge_bg)
                             .border_1()
                             .border_color(theme.badge_border)
@@ -883,9 +907,9 @@ impl WorkspaceSidebar {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(8.0 * scale))
-                    .h(px(45.0))
-                    .px(px(16.0 * scale))
+                    .gap(px(SPACE_2 * scale))
+                    .h(px(TOUCH_TARGET))
+                    .px(px(SPACE_4 * scale))
                     .text_size(px(12.0 * scale))
                     .text_color(theme.text_muted)
                     .child(if self.rail {
@@ -896,8 +920,8 @@ impl WorkspaceSidebar {
                     .child(div().flex_1())
                     .child(
                         div()
-                            .px(px(6.0 * scale))
-                            .rounded(px(4.0 * scale))
+                            .px(px(SPACE_2 * scale))
+                            .rounded(px(RADIUS_SM * scale))
                             .bg(theme.badge_bg)
                             .border_1()
                             .border_color(theme.badge_border)
@@ -912,10 +936,10 @@ impl WorkspaceSidebar {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(8.0 * scale))
-                    .h(px(45.0))
-                    .pl(px(28.0 * scale))
-                    .pr(px(16.0 * scale))
+                    .gap(px(SPACE_2 * scale))
+                    .h(px(TOUCH_TARGET))
+                    .pl(px(ROW_SUB_INDENT * scale))
+                    .pr(px(SPACE_4 * scale))
                     .text_size(px(12.0 * scale))
                     .text_color(theme.text)
                     .child(
@@ -952,10 +976,10 @@ impl WorkspaceSidebar {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(18.0 * scale))
+            .gap(px(SPACE_4 * scale))
             .h(px(40.0))
             .flex_shrink_0()
-            .px(px(16.0 * scale))
+            .px(px(SPACE_4 * scale))
             .border_t_1()
             .border_color(theme.border_soft)
             .child(
@@ -1044,7 +1068,7 @@ impl Render for WorkspaceSidebar {
             .flex_1()
             .min_h(px(0.0))
             .overflow_y_scroll()
-            .pb(px(8.0 * scale))
+            .pb(px(SPACE_2 * scale))
             .child(Self::section_header(
                 if self.rail { "" } else { "WORKSPACES" },
                 workspaces.len(),
@@ -1087,8 +1111,8 @@ impl Render for WorkspaceSidebar {
         if workspaces.is_empty() {
             sessions = sessions.child(
                 div()
-                    .px(px(16.0 * scale))
-                    .py(px(10.0 * scale))
+                    .px(px(SPACE_4 * scale))
+                    .py(px(SPACE_2 * scale))
                     .text_size(px(12.0 * scale))
                     .text_color(theme.text_faint)
                     .child(if self.rail {
