@@ -62,23 +62,67 @@ fn repository_root(cwd: &Path) -> PathBuf {
         .unwrap_or_else(|_| cwd.to_path_buf())
 }
 
-pub fn repository(cwd: &Path) -> Value {
-    let root = repository_root(cwd);
-    let branch = git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .map(|text| text.trim().to_string())
-        .ok()
-        .filter(|branch| !branch.is_empty() && branch != "HEAD");
-    let head = git(cwd, &["rev-parse", "HEAD"])
-        .map(|text| text.trim().to_string())
-        .ok();
-    let unborn = head.is_none();
+/// Parse `git rev-parse --show-toplevel HEAD --abbrev-ref HEAD` into the same
+/// value the four separate metadata queries produced. One subprocess replaces
+/// `repository_root`, the branch query, the HEAD query, and `symbolic-ref`;
+/// `--abbrev-ref HEAD` reports `HEAD` on a detached checkout, which was exactly
+/// the case `symbolic-ref -q HEAD` used to detect. Output order is root, SHA,
+/// branch because `HEAD` precedes `--abbrev-ref` in the command.
+fn repository_from_rev_parse(cwd: &Path, output: &str) -> Value {
+    let mut lines = output.lines().map(str::trim);
+    let root = lines
+        .next()
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.to_path_buf());
+    let head = lines.next().filter(|line| !line.is_empty());
+    let branch = lines.next().unwrap_or("");
+    let detached = branch == "HEAD";
     json!({
         "root": root.to_string_lossy(),
-        "branch": branch,
+        "branch": if detached || branch.is_empty() { Value::Null } else { json!(branch) },
         "head": head,
-        "detached": git(cwd, &["symbolic-ref", "-q", "HEAD"]).is_err(),
-        "unborn": unborn,
+        "detached": detached,
+        "unborn": head.is_none(),
     })
+}
+
+pub fn repository(cwd: &Path) -> Value {
+    match git(
+        cwd,
+        // HEAD must precede --abbrev-ref: git applies --abbrev-ref to every
+        // revision that follows it, so a later HEAD would print the branch
+        // name again instead of the commit SHA.
+        &[
+            "rev-parse",
+            "--show-toplevel",
+            "HEAD",
+            "--abbrev-ref",
+            "HEAD",
+        ],
+    ) {
+        Ok(output) => repository_from_rev_parse(cwd, &output),
+        // Outside a repository (or an unborn HEAD that cannot resolve all
+        // three fields at once) keep the old, forgiving individual fallbacks.
+        Err(_) => {
+            let root = repository_root(cwd);
+            let branch = git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .map(|text| text.trim().to_string())
+                .ok()
+                .filter(|branch| !branch.is_empty() && branch != "HEAD");
+            let head = git(cwd, &["rev-parse", "HEAD"])
+                .map(|text| text.trim().to_string())
+                .ok();
+            let unborn = head.is_none();
+            json!({
+                "root": root.to_string_lossy(),
+                "branch": branch,
+                "head": head,
+                "detached": git(cwd, &["symbolic-ref", "-q", "HEAD"]).is_err(),
+                "unborn": unborn,
+            })
+        }
+    }
 }
 
 fn numstat(
@@ -456,6 +500,32 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn repository_metadata_is_read_from_one_rev_parse() {
+        let repo = TempRepo::new();
+        let metadata = repository(&repo.path);
+        let root = metadata["root"].as_str().expect("root");
+        assert_eq!(Path::new(root), repo.path);
+        let branch = metadata["branch"].as_str().expect("branch");
+        let head = metadata["head"].as_str().expect("head");
+        assert!(!branch.is_empty(), "the branch is named");
+        assert_eq!(head, repo.head(), "head is the commit SHA, not the branch");
+        assert_ne!(head, branch, "the two metadata fields are distinct");
+        assert_eq!(head.len(), 40, "a full SHA is 40 hex characters");
+        assert_eq!(metadata["detached"], json!(false));
+        assert_eq!(metadata["unborn"], json!(false));
+    }
+
+    #[test]
+    fn combined_rev_parse_output_is_parsed_in_order() {
+        let detached = repository_from_rev_parse(Path::new("/workspace"), "/repo\nabc123\nHEAD\n");
+        assert_eq!(detached["root"], json!("/repo"));
+        assert_eq!(detached["branch"], Value::Null);
+        assert_eq!(detached["head"], json!("abc123"));
+        assert_eq!(detached["detached"], json!(true));
+        assert_eq!(detached["unborn"], json!(false));
     }
 
     /// The paths a file list holds, for a readable assertion.
