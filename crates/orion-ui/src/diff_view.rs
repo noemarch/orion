@@ -16,9 +16,9 @@
 //! route answers with an empty list for unknown refs).
 //!
 //! Layout: the file list and the diff form a resizable split
-//! ([`clamp_list_width`]) so the diff keeps at least [`DIFF_WIDTH_MIN`] px
-//! at any window width; `app.rs` pushes the width the view actually
-//! receives in via [`ChangesView::set_available_width`].
+//! ([`clamp_tree_width`]) so the diff keeps its reader minimum at any window
+//! width; `app.rs` pushes the width the view actually receives in via
+//! [`ChangesView::set_available_width`].
 //!
 //! Polling: 2s timer like `ChatView` (the engine already owns `notify`
 //! watchers; GPUI views poll rather than adding a second watcher to
@@ -27,7 +27,7 @@
 use crate::files_entities::{
     url_encode, RepoDiffFile, RepoDiffFileList, RepoDiffFilePatch, RepoDiffScope, RepoDiffStatus,
 };
-use crate::shell_model::SPLITTER_WIDTH_PX;
+use crate::shell_model::{clamp_tree_width, SPLITTER_WIDTH_PX, TREE_WIDTH_DEFAULT};
 use crate::theme::Theme;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -212,21 +212,6 @@ pub fn diff_line_numbers(patch: &str) -> Vec<DiffLine> {
         }
     }
     lines
-}
-
-/// Narrowest the file list may get (px).
-pub const LIST_WIDTH_MIN: f32 = 160.0;
-/// Narrowest the diff column may get (px) — below this the patch is unreadable.
-pub const DIFF_WIDTH_MIN: f32 = 280.0;
-/// File-list width before the reader drags the splitter (px).
-pub const LIST_WIDTH_DEFAULT: f32 = 320.0;
-
-/// Clamp a requested list width so the diff column keeps
-/// [`DIFF_WIDTH_MIN`] px of whatever room the view actually received. The
-/// splitter's own column is part of that room.
-pub fn clamp_list_width(requested: f32, available: f32) -> f32 {
-    let max = (available - DIFF_WIDTH_MIN - SPLITTER_WIDTH_PX).max(LIST_WIDTH_MIN);
-    requested.clamp(LIST_WIDTH_MIN, max)
 }
 
 /// Plain-language copy for a failed list fetch. The raw status or error body
@@ -459,8 +444,8 @@ impl ChangesView {
     /// The list width on screen: the reader's drag, or the default, always
     /// clamped so the diff keeps its minimum.
     fn effective_list_width(&self) -> f32 {
-        clamp_list_width(
-            self.list_width.unwrap_or(LIST_WIDTH_DEFAULT),
+        clamp_tree_width(
+            self.list_width.unwrap_or(TREE_WIDTH_DEFAULT),
             self.available_width,
         )
     }
@@ -478,7 +463,7 @@ impl ChangesView {
         if !self.resizing {
             return;
         }
-        self.list_width = Some(clamp_list_width(
+        self.list_width = Some(clamp_tree_width(
             self.resize_start_width + (x - self.resize_start_x),
             self.available_width,
         ));
@@ -645,7 +630,7 @@ impl ChangesView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(4.0))
+            .gap_1()
             .px_3()
             .py_1()
             .child(bar);
@@ -670,8 +655,9 @@ impl ChangesView {
         } else {
             format!("{label}: {value}")
         };
-        div()
-            .id(self.next_row_id())
+        Button::new(self.next_row_id())
+            .debug_selector(|| "changes-field".to_string())
+            .text()
             .px_2()
             .py_1()
             .rounded_md()
@@ -680,10 +666,16 @@ impl ChangesView {
             } else {
                 Theme::current().surface_input
             })
-            .text_size(px(11.0 * Theme::current().density_scale()))
-            .text_color(Theme::current().text)
-            .child(shown)
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .child(
+                div()
+                    .text_size(px(11.0 * Theme::current().density_scale()))
+                    .text_color(Theme::current().text)
+                    .child(shown),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // A kit Button suppresses focus-on-mouse-down, so re-focus the
+                // view explicitly to keep typing in the field working.
+                this.focus_handle.focus(window, cx);
                 this.editing = if this.editing == target {
                     EditTarget::None
                 } else {
@@ -778,7 +770,7 @@ impl Render for ChangesView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(12.0))
+                    .gap_3()
                     .px_3()
                     .py_2()
                     .child(div().flex_1().child(Alert::error("changes-alert", message)))
@@ -803,8 +795,7 @@ impl Render for ChangesView {
             .min_h(px(0.0));
 
         // File list (left): the reader's width, clamped so the diff keeps its
-        // minimum. The splitter overlays the list's right edge so it costs the
-        // diff no layout space.
+        // minimum. The splitter is its own column between the two panes.
         let list_width = self.effective_list_width();
         let mut list_column = div()
             .id(self.next_row_id())
@@ -900,7 +891,7 @@ impl Render for ChangesView {
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap(px(8.0))
+                                .gap_2()
                                 .w_full()
                                 .text_size(px(12.0 * Theme::current().density_scale()))
                                 .child(
@@ -946,6 +937,7 @@ impl Render for ChangesView {
                 .id("changes-file-list")
                 .debug_selector(|| "changes-file-list".to_string())
                 .flex_1()
+                .min_h(px(0.0))
                 .overflow_y_scroll()
                 .track_scroll(&self.list_scroll)
                 .child(file_rows),
@@ -1053,6 +1045,7 @@ impl Render for ChangesView {
                         div()
                             .id("changes-patch-scroll")
                             .flex_1()
+                            .min_h(px(0.0))
                             .overflow_y_scroll()
                             .track_scroll(&self.patch_scroll)
                             .child(patch_lines),
@@ -1122,6 +1115,7 @@ impl Render for ChangesView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell_model::{READER_WIDTH_MIN, TREE_WIDTH_MIN};
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{point, size, Entity};
     use serde_json::json;
@@ -1269,25 +1263,32 @@ mod tests {
         assert_eq!(lines[4].new_no, None);
     }
 
-    #[::core::prelude::v1::test]
-    fn clamp_list_width_keeps_the_diff_usable() {
-        // Plenty of room: the default passes through (1280px window, sidebar
-        // 280, tree and reader 360 → 640px for this view).
-        assert_eq!(clamp_list_width(LIST_WIDTH_DEFAULT, 640.0), 320.0);
-        // Tight room: the list yields before the diff drops under its minimum
-        // (800px window, rail 64, tree 140 → 596px for this view).
-        assert_eq!(clamp_list_width(LIST_WIDTH_DEFAULT, 596.0), 308.0);
-        // Too small a request: the list keeps its own minimum.
-        assert_eq!(clamp_list_width(100.0, 640.0), LIST_WIDTH_MIN);
-        // Too large a request: capped at what the diff can spare, with the
-        // splitter's own column taken off the top.
-        assert_eq!(
-            clamp_list_width(2000.0, 640.0),
-            640.0 - DIFF_WIDTH_MIN - SPLITTER_WIDTH_PX
-        );
-        // No room measured yet: the minimum, never a negative cap.
-        assert_eq!(clamp_list_width(LIST_WIDTH_DEFAULT, 0.0), LIST_WIDTH_MIN);
-    }
+    crate::orion_test!(
+        fn effective_list_width_uses_the_shared_clamp(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.update(|_window, app| {
+                view.update(app, |v, _cx| {
+                    // Plenty of room: the default passes through.
+                    v.set_available_width(640.0);
+                    assert_eq!(v.effective_list_width(), TREE_WIDTH_DEFAULT);
+                    // Too small a request: the list keeps its own minimum.
+                    v.list_width = Some(10.0);
+                    assert_eq!(v.effective_list_width(), TREE_WIDTH_MIN);
+                    // Too large a request: capped at what the diff can spare,
+                    // with the splitter's own column taken off the top.
+                    v.list_width = Some(10_000.0);
+                    assert_eq!(
+                        v.effective_list_width(),
+                        640.0 - READER_WIDTH_MIN - SPLITTER_WIDTH_PX
+                    );
+                    // No room measured yet: the minimum, never a negative cap.
+                    v.set_available_width(0.0);
+                    assert_eq!(v.effective_list_width(), TREE_WIDTH_MIN);
+                });
+            });
+        }
+    );
 
     struct ChangesRoot {
         view: Entity<ChangesView>,
@@ -1423,15 +1424,19 @@ mod tests {
             let list = cx
                 .debug_bounds("changes-file-list")
                 .expect("the file list at 1280");
-            assert_eq!(list.size.width, px(320.0), "the default list width holds");
+            assert_eq!(
+                list.size.width,
+                px(TREE_WIDTH_DEFAULT),
+                "the default list width holds"
+            );
             let diff = cx.debug_bounds("changes-diff").expect("the diff at 1280");
             assert_eq!(
                 diff.size.width,
-                px(312.0),
+                px(640.0 - TREE_WIDTH_DEFAULT - SPLITTER_WIDTH_PX),
                 "the diff takes the room the list does not need"
             );
             assert!(
-                diff.size.width >= px(DIFF_WIDTH_MIN),
+                diff.size.width >= px(READER_WIDTH_MIN),
                 "the diff keeps its minimum at 1280 (got {})",
                 diff.size.width
             );
@@ -1449,12 +1454,12 @@ mod tests {
                 .expect("the file list at 800");
             assert_eq!(
                 list.size.width,
-                px(308.0),
-                "the list yields before the diff does"
+                px(TREE_WIDTH_DEFAULT),
+                "the default list width holds at the narrow breakpoint"
             );
             let diff = cx.debug_bounds("changes-diff").expect("the diff at 800");
             assert!(
-                diff.size.width >= px(DIFF_WIDTH_MIN),
+                diff.size.width >= px(READER_WIDTH_MIN),
                 "the diff keeps its minimum at the narrow breakpoint (got {})",
                 diff.size.width
             );
@@ -1484,7 +1489,7 @@ mod tests {
             let before = cx.debug_bounds("changes-file-list").expect("the file list");
             assert_eq!(
                 before.size.width,
-                px(320.0),
+                px(TREE_WIDTH_DEFAULT),
                 "the list starts at its default"
             );
 
@@ -1526,11 +1531,15 @@ mod tests {
             let after = cx.debug_bounds("changes-file-list").expect("the file list");
             assert_eq!(
                 after.size.width,
-                px(260.0),
+                px(TREE_WIDTH_DEFAULT - 60.0),
                 "the drag made the list 60px narrower"
             );
             let diff = cx.debug_bounds("changes-diff").expect("the diff");
-            assert_eq!(diff.size.width, px(372.0), "the diff took the room");
+            assert_eq!(
+                diff.size.width,
+                px(640.0 - (TREE_WIDTH_DEFAULT - 60.0) - SPLITTER_WIDTH_PX),
+                "the diff took the room"
+            );
         }
     );
 
