@@ -267,6 +267,10 @@ pub struct Theme {
     pub restyle_diff_remove_bg: Rgba,
     /// `--diff-hunk-bg`: the `@@` hunk-header strip.
     pub restyle_diff_hunk_bg: Rgba,
+    /// `--close-hover-bg`: the red fill of the close control on hover.
+    pub restyle_close_hover_bg: Rgba,
+    /// `--close-hover-fg`: the icon color on the close control's red hover.
+    pub restyle_close_hover_fg: Rgba,
 }
 
 fn tint(hex: u32, alpha_pct: u8) -> Rgba {
@@ -386,6 +390,8 @@ impl Theme {
                 restyle_diff_add_bg: rgb(0x1d3a2c),
                 restyle_diff_remove_bg: rgb(0x3a2129),
                 restyle_diff_hunk_bg: rgb(0x232a38),
+                restyle_close_hover_bg: rgb(0xd73a49),
+                restyle_close_hover_fg: rgb(0xffffff),
             },
             ThemeMode::Light => Theme {
                 mode,
@@ -485,6 +491,8 @@ impl Theme {
                 restyle_diff_add_bg: rgb(0xe6f4ea),
                 restyle_diff_remove_bg: rgb(0xfce8e8),
                 restyle_diff_hunk_bg: rgb(0xeef2f8),
+                restyle_close_hover_bg: rgb(0xb42331),
+                restyle_close_hover_fg: rgb(0xffffff),
             },
         }
     }
@@ -671,6 +679,16 @@ impl Theme {
     /// `diff_hunk_bg` — the `@@` hunk-header strip.
     pub fn token_diff_hunk_bg(&self) -> Rgba {
         self.restyle_diff_hunk_bg
+    }
+
+    /// `close_hover_bg` — the red fill of the close control on hover.
+    pub fn close_hover_bg(&self) -> Rgba {
+        self.restyle_close_hover_bg
+    }
+
+    /// `close_hover_fg` — the icon color on the close control's red hover.
+    pub fn close_hover_fg(&self) -> Rgba {
+        self.restyle_close_hover_fg
     }
 
     /// `radius_panel` — panel corner radius, scaled by density.
