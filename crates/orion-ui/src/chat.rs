@@ -597,7 +597,7 @@ fn span_style(base: &TextStyle, span: &TextSpan, theme: Theme, inline_code_size:
         // Inline code is `0.87em` of its line (DESIGN.md §Faces).
         style.font_size = px(inline_code_size).into();
         style.background_color = Some(theme.inline_code_bg.into());
-        style.color = theme.inline_code_text.into();
+        style.color = theme.code_accent().into();
     }
     if span.link && span.target.as_deref().is_some_and(opens_in_browser) {
         style.color = theme.link_blue.into();
@@ -815,7 +815,9 @@ impl Render for ChatView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme.surface_canvas)
+            .bg(theme.panel_bg())
+            .rounded(px(theme.radius_panel()))
+            .font_family("JetBrains Mono")
             .text_color(theme.text)
             .on_scroll(cx.listener(|this, ev: &ScrollEvent, window, cx| {
                 let delta = f32::from(ev.delta.pixel_delta(window.line_height()).y);
@@ -881,6 +883,7 @@ impl Render for ChatView {
                     .debug_selector(|| "chat-prompt-slot".to_string())
                     .flex()
                     .flex_col()
+                    .font_family("JetBrains Mono")
                     .px_3()
                     .pb_2()
                     .child(card.clone()),
@@ -937,15 +940,13 @@ impl ChatView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(SPACE_2))
+            .gap(px(theme.space_2()))
             .h(px(28.0))
             .px_3()
-            .border_t_1()
-            .border_color(theme.border_soft)
             .font_family("JetBrains Mono")
-            .text_size(px(11.0 * theme.density_scale()))
-            .text_color(theme.text_faint)
-            .child(div().text_color(theme.status_link).child(source))
+            .text_size(px(theme.font_ui_secondary()))
+            .text_color(theme.token_text_dim())
+            .child(source)
             .child(format!(" · {count} turns · {status}"))
     }
 
@@ -1047,21 +1048,23 @@ impl ChatView {
     ) -> impl IntoElement {
         let theme = Theme::current();
         let is_user = turn.role == ChatRole::User;
+        // The reader's prompts are tinted rounded blocks; the agent's prose
+        // sits straight on the panel with no card of its own.
         let mut card = div()
             .id(self.next_row_id())
             .debug_selector(|| "chat-turn".to_string())
             .flex()
             .flex_col()
             .gap(px(ROW_GAP))
-            .p_3()
-            .rounded_md()
-            .bg(if is_user {
-                theme.surface_raised_2
-            } else {
-                theme.surface_raised
-            })
-            .border_1()
-            .border_color(theme.border_soft);
+            .font_family("JetBrains Mono");
+        if is_user {
+            card = card
+                .rounded(px(theme.radius_card()))
+                .bg(theme.block_prompt_bg())
+                .p(px(theme.space_4()));
+        } else {
+            card = card.py(px(theme.space_1()));
+        }
 
         // The role and the time it happened: a turn without them is a rumour.
         let stamp = format_timestamp(turn.ts.as_deref().or(turn.end_ts.as_deref()));
@@ -1078,7 +1081,7 @@ impl ChatView {
                 .items_center()
                 .gap(px(SPACE_2))
                 .text_size(px(11.0 * theme.density_scale()))
-                .text_color(theme.text_dim)
+                .text_color(theme.token_text_dim())
                 .child(role_label)
                 .child(stamp),
         );
@@ -1116,9 +1119,7 @@ impl ChatView {
                     .id(self.next_row_id())
                     .flex()
                     .flex_col()
-                    .gap(px(SPACE_1))
-                    .rounded_md()
-                    .bg(theme.surface_raised);
+                    .gap(px(theme.space_1()));
                 folded = folded.child(
                     Button::new(format!("chat-thinking-{turn_index}-{part_index}"))
                         .debug_selector(|| "chat-thinking".to_string())
@@ -1244,13 +1245,27 @@ impl ChatView {
             .flex()
             .flex_col()
             .gap(px(SPACE_1))
-            .rounded_md()
-            .bg(theme.surface_raised)
-            .p_2();
+            .rounded(px(theme.radius_card()))
+            .bg(theme.block_output_bg())
+            .p(px(theme.space_3()));
 
-        // The header: caret, verb, object (DESIGN.md §5).
+        // The header: caret, verb, object (DESIGN.md §5). A shell call shows
+        // the command it ran, with the `$` a reader expects, instead of the
+        // summary's paraphrase of it.
         let verb = tool_verb(&card.name);
         let object = tool_object(&card.summary, &card.name);
+        let is_shell_call = matches!(card.name.as_str(), "Bash" | "BashOutput");
+        let command = if is_shell_call {
+            card.input
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('{') && !line.starts_with('['))
+                .map(|line| format!("$ {line}"))
+                .unwrap_or(object)
+        } else {
+            object
+        };
         let tool_header_name = format!("Toggle tool {}", card.name);
         row = row.child(
             Button::new(self.next_row_id())
@@ -1271,7 +1286,7 @@ impl ChatView {
                         .flex_row()
                         .items_center()
                         .gap(px(ROW_GAP))
-                        .child(div().text_color(theme.text_dim).child(if open {
+                        .child(div().text_color(theme.token_text_dim()).child(if open {
                             "\u{25be}"
                         } else {
                             "\u{25b8}"
@@ -1282,7 +1297,7 @@ impl ChatView {
                                 .text_color(if failed {
                                     theme.status_blocked
                                 } else {
-                                    theme.text_dim
+                                    theme.token_text_dim()
                                 })
                                 .child(match verb {
                                     Some(verb) => verb.to_string(),
@@ -1296,9 +1311,9 @@ impl ChatView {
                                 .text_color(if failed {
                                     theme.status_blocked
                                 } else {
-                                    theme.text
+                                    theme.text_primary()
                                 })
-                                .child(object),
+                                .child(command),
                         )
                         .child(
                             div()
@@ -1306,7 +1321,7 @@ impl ChatView {
                                 .text_color(if failed {
                                     theme.status_blocked
                                 } else {
-                                    theme.text_dim
+                                    theme.token_text_dim()
                                 })
                                 .child(card.status.as_word()),
                         ),
@@ -1320,7 +1335,7 @@ impl ChatView {
                     .id(self.next_row_id())
                     .text_size(px(11.0 * theme.density_scale()))
                     .font_family("JetBrains Mono")
-                    .text_color(theme.text_dim)
+                    .text_color(theme.token_text_dim())
                     .child(card.name.clone()),
             );
             if !card.input.is_empty() {
@@ -1332,7 +1347,7 @@ impl ChatView {
                         div()
                             .id(self.next_row_id())
                             .text_size(px(11.0 * theme.density_scale()))
-                            .text_color(theme.text_dim)
+                            .text_color(theme.token_text_dim())
                             .child("The arguments are longer than the chat shows."),
                     );
                 }
@@ -1342,7 +1357,7 @@ impl ChatView {
                     div()
                         .id(self.next_row_id())
                         .text_size(px(11.0 * theme.density_scale()))
-                        .text_color(theme.text_dim)
+                        .text_color(theme.token_text_dim())
                         .child("Arguments omitted (too large for the transcript page)."),
                 );
             }
@@ -1383,7 +1398,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let text_style = TextStyle {
-            color: crate::theme::hsla(theme.text),
+            color: crate::theme::hsla(theme.text_primary()),
             font_size: px(theme.chat_code_size()).into(),
             font_family: "JetBrains Mono".into(),
             ..Default::default()
@@ -1394,7 +1409,6 @@ impl ChatView {
             .flex()
             .flex_col()
             .rounded_md()
-            .bg(theme.surface_raised_2)
             .px_2()
             .py_1()
             // A long line stays inside the panel; the whole output is in the
@@ -1429,6 +1443,7 @@ impl ChatView {
                         .debug_selector(|| "chat-file-path".to_string())
                         .label(path.clone())
                         .text()
+                        .text_color(theme.code_accent())
                         .underline()
                         .on_click(cx.listener(move |_this, _, _, cx| {
                             cx.emit(ChatEvent::OpenFile(target.clone()));
@@ -1529,6 +1544,7 @@ impl ChatView {
             .debug_selector(|| "chat-terminals".to_string())
             .flex()
             .flex_col()
+            .font_family("JetBrains Mono")
             .gap(px(SPACE_1))
             .px_3()
             .pb_3()
