@@ -16,4 +16,4 @@ Consequences:
 - The agent-facing surface is the `orion-rt` command, and the guide it prints is `docs/agent-runtime.md`, embedded by the CLI so the two cannot drift apart.
 - The workspace panes stay agent-only. The runtime's registry is a lower layer, and a terminal there may run any program.
 - The runtime crate is part of `orion-core` (`crates/orion-core/src/runtime/`), not a new set of crates: `orion-core` already held the PTY and the emulator, and a parallel crate would have produced two terminal implementations.
-- The emulator stays `vt100`. It is already integrated, it carries truecolor, and Zed's own terminal crates are GPL-3.0, so nothing was copied from them.
+- The emulator was `vt100` when this decision was made. It has since been replaced by vendored `libghostty-vt`, built from pinned source at compile time.

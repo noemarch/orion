@@ -123,7 +123,8 @@ Orion discovers and orchestrates any installed agent CLI on your `PATH`:
 ## Quickstart
 
 ### 1. Prerequisites
-- **Rust 1.80+** (installed via [rustup](https://rustup.rs))
+- **Rust 1.92+** (installed via [rustup](https://rustup.rs))
+- **Zig 0.17.x** (required to build the vendored `libghostty-vt` terminal engine)
 - At least one authenticated agent CLI on your `PATH` (e.g. `claude`, `codex`, `opencode`)
 
 ### 2. Development Setup

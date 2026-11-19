@@ -7,7 +7,8 @@ desktop shell, delivered both as a desktop app (`orion-ui`) and a headless
 ## Layers
 
 - `crates/orion-core` — domain logic: PTY allocation, process supervision,
-  the screen grid (behind a `TerminalEngine` trait, implemented by `vt100`),
+  the screen grid (behind a `TerminalEngine` trait, implemented by vendored
+  `libghostty-vt`),
   introspection parsers, the runtime daemon that owns every terminal, the
   Axum gateway, persistence.
 - `crates/orion-ui` — native GPUI shell: workspaces, the chat lens, the
