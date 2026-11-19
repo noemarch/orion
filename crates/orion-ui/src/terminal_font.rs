@@ -20,6 +20,16 @@
 /// list drops it before the lookup.
 pub const TERMINAL_FONT_STACK: &str = "\"Symbols Nerd Font Mono\", \"JetBrains Mono\", \"Fira Code\", \"D2Coding\", Menlo, Monaco, \"Cascadia Code\", \"Cascadia Mono\", Consolas, \"Noto Sans Mono CJK KR\", monospace, \"Malgun Gothic\"";
 
+/// Whether a family is a symbols-only face kept in the stack for glyph
+/// fallback. Such a face must never size the grid: its letters are drawn from
+/// another font, so its own advance says nothing about a monospace cell.
+///
+/// Case-insensitive: a name containing "nerd font" or starting with "symbols".
+pub fn is_symbol_family(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    name.contains("nerd font") || name.starts_with("symbols")
+}
+
 /// How many characters a sanitized family list may hold, from the reference's
 /// `FONT_FAMILY_MAX_CHARS`.
 pub const FONT_FAMILY_MAX_CHARS: usize = 200;
@@ -163,6 +173,19 @@ pub fn terminal_font_families(chosen: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[::core::prelude::v1::test]
+    fn symbol_families_are_detected_case_insensitively() {
+        assert!(is_symbol_family("Symbols Nerd Font Mono"));
+        assert!(is_symbol_family("symbols nerd font"));
+        assert!(is_symbol_family("SYMBOLS Nerd Font"));
+        assert!(is_symbol_family("Nerd Font"));
+        assert!(is_symbol_family("My Nerd Font Mono"));
+        assert!(!is_symbol_family("JetBrains Mono"));
+        assert!(!is_symbol_family("Consolas"));
+        assert!(!is_symbol_family("Menlo"));
+        assert!(!is_symbol_family(""));
+    }
 
     #[::core::prelude::v1::test]
     fn a_name_with_a_space_is_quoted() {

@@ -15,7 +15,7 @@
 
 use crate::settings::KeyBarExtras;
 use crate::shell_model::ShellLayout;
-use crate::terminal_font::terminal_font_families;
+use crate::terminal_font::{is_symbol_family, terminal_font_families};
 use crate::terminal_grid::{
     build_row, CellScratch, CellSize, GridRow, GridSnapshot, RowCacheKey, RowOverlays, TerminalGrid,
 };
@@ -92,6 +92,11 @@ fn measure_terminal_font(
 ) -> Option<TerminalFont> {
     let installed = text_system.all_font_names();
     for family in families {
+        // A symbols-only face stays in the stack for glyph fallback, but its
+        // own advance is meaningless for a text cell: never size the grid by it.
+        if is_symbol_family(family) {
+            continue;
+        }
         if !installed
             .iter()
             .any(|name| name.eq_ignore_ascii_case(family))
@@ -1464,12 +1469,14 @@ impl Render for TerminalPane {
             .flex_col()
             .size_full()
             .bg(theme.term_bg)
-            .font_family(
-                self.font
-                    .as_ref()
-                    .map(|font| font.family.clone())
-                    .unwrap_or_default(),
-            )
+            .font_family({
+                let family = crate::terminal_font::sanitize_font_family(&self.font_setting);
+                if family.is_empty() {
+                    crate::terminal_font::TERMINAL_FONT_STACK.to_string()
+                } else {
+                    family
+                }
+            })
             .text_size(px(self.font_size))
             .on_key_down(cx.listener(|this, ev, _, cx| {
                 if this.on_key(ev, cx) {
