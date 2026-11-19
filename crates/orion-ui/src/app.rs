@@ -158,9 +158,14 @@ fn start_runtime(session: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        // Give the daemon a hidden console rather than no console at all. With
+        // DETACHED_PROCESS it has none, so every console child it spawns without
+        // explicit flags gets a fresh *visible* window. A hidden console is
+        // inherited by those children, so they stay invisible. The daemon still
+        // outlives this shell - process lifetime does not follow the parent.
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
     command
         .stdin(std::process::Stdio::null())
