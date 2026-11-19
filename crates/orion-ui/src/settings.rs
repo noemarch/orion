@@ -14,6 +14,7 @@
 use crate::theme::{Density, Theme, ThemeMode};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::group_box::GroupBox;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::*;
@@ -40,6 +41,26 @@ pub const KEY_BAR_EXTRAS: &[&str] = &[
     "tilde",
     "slash",
 ];
+
+pub const SHELL_WIRE_KINDS: &[&str] = &["powershell", "pwsh", "bash", "cmd", "zsh"];
+
+#[cfg(windows)]
+const DEFAULT_SHELL: &str = "powershell";
+#[cfg(target_os = "macos")]
+const DEFAULT_SHELL: &str = "zsh";
+#[cfg(all(not(windows), not(target_os = "macos")))]
+const DEFAULT_SHELL: &str = "bash";
+
+/// A user-supplied shell path: trimmed, control characters dropped, capped at
+/// 1024 chars. Existence is checked by the engine at launch time, not here.
+fn sanitize_shell_path(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(1024)
+        .collect()
+}
 
 /// Human labels for the extras checkboxes (keyboard notation, as on the web).
 fn extra_label(extra: &str) -> &str {
@@ -91,6 +112,9 @@ pub struct Preferences {
     pub alerts_on: bool,
     pub alert_input: bool,
     pub alert_done: String,
+    pub default_shell: String,
+    /// An optional absolute path to a shell executable, sent to the engine.
+    pub shell_path: String,
 }
 
 impl Default for Preferences {
@@ -106,6 +130,8 @@ impl Default for Preferences {
             alerts_on: true,
             alert_input: true,
             alert_done: "long".to_string(),
+            default_shell: DEFAULT_SHELL.to_string(),
+            shell_path: String::new(),
         }
     }
 }
@@ -134,6 +160,8 @@ impl Preferences {
             "alertsOn": self.alerts_on,
             "alertInput": self.alert_input,
             "alertDone": self.alert_done,
+            "defaultShell": self.default_shell,
+            "shellPath": self.shell_path,
         })
     }
 
@@ -183,6 +211,15 @@ impl Preferences {
             .and_then(Value::as_u64)
             .map(|value| value.clamp(10, 22) as u32)
             .unwrap_or(13);
+        let default_shell = match get_str("defaultShell") {
+            value if SHELL_WIRE_KINDS.contains(&value) => value.to_string(),
+            _ => defaults.default_shell.clone(),
+        };
+        let shell_path = settings
+            .get("shellPath")
+            .and_then(Value::as_str)
+            .map(sanitize_shell_path)
+            .unwrap_or_default();
         Self {
             theme,
             density,
@@ -192,6 +229,8 @@ impl Preferences {
             alerts_on,
             alert_input,
             alert_done,
+            default_shell,
+            shell_path,
         }
     }
 }
@@ -276,6 +315,8 @@ pub struct SettingsModal {
     last_body: Option<String>,
     focus_handle: FocusHandle,
     open: bool,
+    shell_path_input: Option<Entity<InputState>>,
+    _shell_path_subscription: Option<Subscription>,
 }
 
 impl SettingsModal {
@@ -286,6 +327,8 @@ impl SettingsModal {
             last_body: None,
             focus_handle: cx.focus_handle(),
             open: false,
+            shell_path_input: None,
+            _shell_path_subscription: None,
         }
     }
 
@@ -345,9 +388,44 @@ impl SettingsModal {
 }
 
 impl Render for SettingsModal {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         let scale = theme.density_scale();
+        if self.shell_path_input.is_none() {
+            let value = self.prefs.shell_path.clone();
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(&value)
+                    .placeholder("C:\\path\\to\\shell.exe")
+            });
+            let subscription = cx.subscribe(
+                &input,
+                |this: &mut Self, input: Entity<InputState>, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.prefs.shell_path = input.read(cx).value().to_string();
+                        this.save();
+                        cx.notify();
+                    }
+                },
+            );
+            self.shell_path_input = Some(input);
+            self._shell_path_subscription = Some(subscription);
+        }
+        let shell_path_field = match &self.shell_path_input {
+            Some(state) => div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0 * scale))
+                .child(
+                    div()
+                        .text_size(px(11.0 * scale))
+                        .text_color(theme.text_dim)
+                        .child("Shell path (optional)"),
+                )
+                .child(Input::new(state))
+                .into_any_element(),
+            None => div().into_any_element(),
+        };
         let dark = self.prefs.theme == ThemeMode::Dark;
         let compact = self.prefs.density == Density::Compact;
         let prefs = self.prefs.clone();
@@ -439,6 +517,26 @@ impl Render for SettingsModal {
                 cx.notify();
             }));
 
+        let shell_kinds = orion_core::ShellKind::ALL;
+        let shell_group = RadioGroup::new("settings-default-shell")
+            .children(shell_kinds.iter().enumerate().map(|(index, kind)| {
+                Radio::new(format!("settings-shell-{index}"))
+                    .label(kind.display_name().to_string())
+                    .debug_selector(move || format!("settings-shell-{index}"))
+            }))
+            .selected_index(
+                shell_kinds
+                    .iter()
+                    .position(|kind| kind.wire_kind() == prefs.default_shell.as_str()),
+            )
+            .on_change(cx.listener(|this, index: &usize, _, cx| {
+                if let Some(kind) = orion_core::ShellKind::ALL.get(*index) {
+                    this.prefs.default_shell = kind.wire_kind().to_string();
+                    this.save();
+                    cx.notify();
+                }
+            }));
+
         let body = div()
             .id("settings-panel")
             .flex_col()
@@ -507,6 +605,16 @@ impl Render for SettingsModal {
                                 ),
                         )
                         .child(alert_done_group),
+                ),
+            )
+            .child(
+                GroupBox::new().title("TERMINAL").child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0 * scale))
+                        .child(shell_group)
+                        .child(shell_path_field),
                 ),
             )
             .child(
@@ -618,5 +726,72 @@ mod tests {
         assert!(keys.contains(&("⇧Tab", "shift+tab")));
         assert!(keys.contains(&("^D", "ctrl+d")));
         assert!(keys.contains(&("|", "|")));
+    }
+
+    #[::core::prelude::v1::test]
+    fn default_shell_round_trips_through_settings() {
+        let prefs = Preferences::default();
+        let value = prefs.settings_value();
+        assert_eq!(
+            value.get("defaultShell").and_then(Value::as_str),
+            Some(prefs.default_shell.as_str())
+        );
+        let restored = Preferences::from_settings(&value);
+        assert_eq!(restored.default_shell, prefs.default_shell);
+    }
+
+    #[::core::prelude::v1::test]
+    fn invalid_default_shell_falls_back_to_the_platform_default() {
+        let settings = json!({ "defaultShell": "fish" });
+        let prefs = Preferences::from_settings(&settings);
+        assert_eq!(prefs.default_shell, Preferences::default().default_shell);
+    }
+
+    #[::core::prelude::v1::test]
+    fn settings_value_carries_the_chosen_default_shell() {
+        let mut prefs = Preferences::default();
+        prefs.default_shell = "cmd".to_string();
+        assert_eq!(prefs.settings_value()["defaultShell"], "cmd");
+    }
+
+    #[::core::prelude::v1::test]
+    fn default_shell_matches_the_current_os() {
+        #[cfg(windows)]
+        let expected = "powershell";
+        #[cfg(target_os = "macos")]
+        let expected = "zsh";
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        let expected = "bash";
+        assert_eq!(Preferences::default().default_shell, expected);
+    }
+
+    #[::core::prelude::v1::test]
+    fn shell_path_round_trips_through_settings() {
+        let mut prefs = Preferences::default();
+        assert_eq!(prefs.shell_path, "");
+        prefs.shell_path = "C:\\tools\\nu.exe".to_string();
+        let value = prefs.settings_value();
+        assert_eq!(
+            value.get("shellPath").and_then(Value::as_str),
+            Some("C:\\tools\\nu.exe")
+        );
+        let restored = Preferences::from_settings(&value);
+        assert_eq!(restored.shell_path, prefs.shell_path);
+    }
+
+    #[::core::prelude::v1::test]
+    fn invalid_shell_path_is_sanitized() {
+        let settings = json!({ "shellPath": "  C:\\Program Files\\pwsh.exe\n  " });
+        let prefs = Preferences::from_settings(&settings);
+        assert_eq!(prefs.shell_path, "C:\\Program Files\\pwsh.exe");
+
+        let settings = json!({ "shellPath": "C:\\a\u{0}b\u{1f}c.exe" });
+        let prefs = Preferences::from_settings(&settings);
+        assert_eq!(prefs.shell_path, "C:\\abc.exe");
+
+        let long = "a".repeat(2000);
+        let settings = json!({ "shellPath": long });
+        let prefs = Preferences::from_settings(&settings);
+        assert_eq!(prefs.shell_path.chars().count(), 1024);
     }
 }
