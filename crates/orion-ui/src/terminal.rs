@@ -1020,7 +1020,7 @@ fn key_action(ev: &KeyDownEvent, find_open: bool, has_selection: bool) -> KeyAct
 /// Content coordinates are stable below capacity: when a line enters scrollback,
 /// `scrollback_len` grows by one and every live-screen row's `vis_row` shrinks by one for the
 /// same text, so `content_row = scrollback_len - offset + vis_row` is unchanged. At capacity
-/// vt100 drops the oldest rows without exposing how many, so the shift is unknowable: the
+/// the emulator drops the oldest rows without exposing how many, so the shift is unknowable: the
 /// selection is cleared instead. A lost selection is visible and safe; a silently mis-pointed
 /// one copies the wrong text.
 fn adjust_selection_after_feed(
