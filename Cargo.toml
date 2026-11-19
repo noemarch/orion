@@ -2,6 +2,7 @@
 members = [
     "crates/orion-core",
     "crates/orion-ui",
+    "crates/libghostty-vt",
 ]
 resolver = "2"
 
