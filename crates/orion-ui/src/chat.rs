@@ -52,6 +52,9 @@ use gpui_kit::{
 use orion_core::protocol::AgentStatus;
 use orion_core::runtime::Runtime;
 use serde_json::{json, Value};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -73,6 +76,64 @@ const SPACE_3: f32 = 12.0;
 const TOUCH_TARGET: f32 = 44.0;
 /// Tight gap between the runs of one row (caret, verb, object, status).
 const ROW_GAP: f32 = 6.0;
+
+/// How many distinct prose blocks keep their parsed form in memory. A long
+/// session streams thousands of parts; the cap keeps the cache bounded.
+const MARKDOWN_CACHE_CAP: usize = 256;
+
+/// Parsed markdown, shared so a render can drop the cache borrow at once.
+type ParsedBlocks = Arc<Vec<MarkdownLine>>;
+
+/// Content-keyed parse cache with a bounded LRU. The key is a hash of the
+/// source; the source is kept alongside so a hash collision cannot show the
+/// wrong prose.
+#[derive(Default)]
+struct MarkdownCache {
+    entries: HashMap<u64, (String, ParsedBlocks)>,
+    lru: VecDeque<u64>,
+}
+
+impl MarkdownCache {
+    fn get_or_parse(&mut self, text: &str) -> ParsedBlocks {
+        let key = text_hash(text);
+        let hit = match self.entries.get_mut(&key) {
+            Some(entry) if entry.0 == text => Some(Arc::clone(&entry.1)),
+            _ => None,
+        };
+        if let Some(blocks) = hit {
+            self.touch(key);
+            return blocks;
+        }
+        let blocks = Arc::new(parse_markdown(text));
+        if self
+            .entries
+            .insert(key, (text.to_string(), Arc::clone(&blocks)))
+            .is_none()
+        {
+            self.lru.push_back(key);
+        }
+        while self.lru.len() > MARKDOWN_CACHE_CAP {
+            if let Some(old) = self.lru.pop_front() {
+                self.entries.remove(&old);
+            }
+        }
+        blocks
+    }
+
+    fn touch(&mut self, key: u64) {
+        if let Some(position) = self.lru.iter().position(|&k| k == key) {
+            if let Some(key) = self.lru.remove(position) {
+                self.lru.push_back(key);
+            }
+        }
+    }
+}
+
+fn text_hash(text: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// What the chat asks the shell for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,16 +202,22 @@ pub struct ChatView {
     /// What takes the focus on the next draw.
     focus_wanted: FocusWanted,
     /// Whether this lens is the one on screen. A hidden transcript is not
-    /// re-read: the route reads the agent's whole transcript from disk, and
-    /// doing that on the UI thread every two seconds stalls the frames of
-    /// whatever lens the reader is actually looking at.
+    /// re-read: the route reads the agent's whole transcript from disk, and a
+    /// poll for a lens nobody is looking at is not worth the round-trip.
     visible: bool,
-    /// How many times this view has read the transcript. The poll is what
-    /// costs the UI thread, so the count is worth having.
+    /// How many fetches this view has started. The poll is what costs a socket
+    /// round-trip, so the count is worth having.
     reads: u64,
     scroll_handle: ScrollHandle,
     focus_handle: gpui_kit::FocusHandle,
-    row_seq: usize,
+    /// Element ids are handed out during render; a `Cell` lets the borrowed
+    /// turn iteration below stay immutable while ids advance.
+    row_seq: Cell<usize>,
+    /// Parsed prose, reused across frames until the source text changes.
+    markdown_cache: RefCell<MarkdownCache>,
+    /// Only the newest fetch may apply its answer; older in-flight reads are
+    /// dropped so a slow socket cannot overwrite a fresher transcript.
+    refresh_generation: u64,
 }
 
 /// The message a failed read shows: one sentence, and the Retry beside it
@@ -177,6 +244,30 @@ fn source_label(source: &str) -> &'static str {
     }
 }
 
+/// The three answers one poll gathers, carried back to the frame thread.
+struct RefreshFetch {
+    agent_name: Option<String>,
+    terminals: Option<Value>,
+    status: u16,
+    body: Value,
+}
+
+/// The agent's name for the role label, from the runtime's session snapshot.
+fn fetch_agent_name(engine: &Arc<dyn Runtime>, pane_id: &str) -> Option<String> {
+    let (status, body) = engine.http("GET", "/api/session", &Value::Null);
+    if status != 200 {
+        return None;
+    }
+    body.get("snapshot")?
+        .get("panes")?
+        .as_array()?
+        .iter()
+        .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+        .and_then(|pane| pane.get("display_agent"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 impl ChatView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let scroll_handle = ScrollHandle::new();
@@ -199,15 +290,17 @@ impl ChatView {
             reads: 0,
             scroll_handle,
             focus_handle: cx.focus_handle(),
-            row_seq: 0,
+            row_seq: Cell::new(0),
+            markdown_cache: RefCell::new(MarkdownCache::default()),
+            refresh_generation: 0,
         };
         view.start_poll(cx);
         view
     }
 
-    fn next_row_id(&mut self) -> usize {
-        let id = self.row_seq;
-        self.row_seq += 1;
+    fn next_row_id(&self) -> usize {
+        let id = self.row_seq.get();
+        self.row_seq.set(id + 1);
         id
     }
 
@@ -306,30 +399,70 @@ impl ChatView {
         self.refresh(cx);
     }
 
-    /// Fetch the conversation through the wire seam (`Runtime::http`); the prompt
-    /// card re-syncs from `pane.prompt()` so its DetectPrompt id is always fresh.
+    /// Fetch the conversation through the wire seam (`Runtime::http`). Every
+    /// blocking round-trip runs on a background worker; only the parsed answer
+    /// is applied here, on the frame thread.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        // The stop control is live while the agent works.
         let Some(engine) = self.engine.clone() else {
             return;
         };
-        // The pane's name comes from the runtime, and it is asked for once.
-        if self.agent_name.is_none() {
-            self.read_agent_name(&engine);
-        }
-        // The terminals the agent started are polled on the same tick: a
-        // delegation can appear while the conversation body stands still.
-        self.refresh_terminals(&engine);
-        let path = format!("/api/pane/conversation?pane_id={}", self.pane_id);
+        let pane_id = self.pane_id.clone();
+        let need_agent_name = self.agent_name.is_none();
         self.reads += 1;
-        let (status, body) = engine.http("GET", &path, &Value::Null);
-        if status != 200 {
+        self.refresh_generation += 1;
+        let generation = self.refresh_generation;
+        cx.spawn(async move |view, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move {
+                    let agent_name = if need_agent_name {
+                        fetch_agent_name(&engine, &pane_id)
+                    } else {
+                        None
+                    };
+                    // A delegation can appear while the conversation body
+                    // stands still, so the terminals share this one fetch.
+                    let terminals = engine
+                        .dispatch_from(None, &json!({ "type": "terminal-list" }))
+                        .ok()
+                        .flatten();
+                    let path = format!("/api/pane/conversation?pane_id={pane_id}");
+                    let (status, body) = engine.http("GET", &path, &Value::Null);
+                    RefreshFetch {
+                        agent_name,
+                        terminals,
+                        status,
+                        body,
+                    }
+                })
+                .await;
+            let _ = view.update(cx, |view, cx| view.apply_refresh(fetched, generation, cx));
+        })
+        .detach();
+    }
+
+    /// Apply one background fetch on the frame thread. A stale fetch is
+    /// dropped so a slow socket cannot overwrite a fresher transcript.
+    fn apply_refresh(&mut self, fetched: RefreshFetch, generation: u64, cx: &mut Context<Self>) {
+        if generation != self.refresh_generation {
+            return;
+        }
+        if self.agent_name.is_none() {
+            self.agent_name = fetched.agent_name;
+        }
+        let encoded = fetched.terminals.as_ref().map(Value::to_string);
+        if self.last_terminals != encoded {
+            self.last_terminals = encoded;
+            self.terminals = fetched.terminals;
+        }
+        if fetched.status != 200 {
             // Forget the last good answer: the next good answer must show again
             // even when it is the same body as before.
             self.last_body = None;
-            self.fail_conversation(conversation_error_message(status));
+            self.fail_conversation(conversation_error_message(fetched.status));
             return;
         }
+        let body = fetched.body;
         let encoded = body.to_string();
         if self.last_body.as_deref() == Some(encoded.as_str()) {
             return;
@@ -344,31 +477,13 @@ impl ChatView {
             .update(cx, |composer, _cx| composer.set_running(working));
     }
 
-    /// The runtime's terminals, asked through the same runtime the
-    /// conversation is read from (`terminal-list`, the verb the daemon
-    /// answers). A runtime that cannot answer holds no terminals the chat
-    /// can show, so the answer is an empty list, not an error.
-    fn refresh_terminals(&mut self, engine: &Arc<dyn Runtime>) {
-        let body = engine
-            .dispatch_from(None, &json!({ "type": "terminal-list" }))
-            .ok()
-            .flatten();
-        let encoded = body.as_ref().map(Value::to_string);
-        if self.last_terminals == encoded {
-            return;
-        }
-        self.last_terminals = encoded;
-        self.terminals = body;
-    }
-
     fn start_poll(&self, cx: &mut Context<Self>) {
         let _ = self;
         cx.spawn(async move |view, cx| loop {
             cx.background_executor().timer(Duration::from_secs(5)).await;
             let _ = view.update(cx, |view, cx| {
-                // Only a lens on screen is re-read: the conversation route
-                // reads the agent's whole transcript from disk, and that read
-                // lands on the UI thread.
+                // Only a lens on screen is re-read: an off-screen transcript
+                // is not worth a socket round-trip, even off the main thread.
                 if view.visible {
                     view.refresh(cx);
                 }
@@ -419,36 +534,6 @@ impl ChatView {
             .clone()
             .or_else(|| self.seam.as_ref().map(|seam| seam.agent_label()))
             .unwrap_or_else(|| "Agent".to_string())
-    }
-
-    /// The agent's name for the role label, from the runtime's session
-    /// snapshot: the pane handle names no agent, but the snapshot names every
-    /// pane the runtime holds.
-    fn read_agent_name(&mut self, engine: &Arc<dyn Runtime>) {
-        let (status, body) = engine.http("GET", "/api/session", &Value::Null);
-        if status != 200 {
-            return;
-        }
-        let Some(panes) = body
-            .get("snapshot")
-            .and_then(|snapshot| snapshot.get("panes"))
-            .and_then(Value::as_array)
-        else {
-            return;
-        };
-        let Some(name) = panes
-            .iter()
-            .find(|pane| {
-                pane.get("pane_id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id == self.pane_id)
-            })
-            .and_then(|pane| pane.get("display_agent"))
-            .and_then(Value::as_str)
-        else {
-            return;
-        };
-        self.agent_name = Some(name.to_string());
     }
 
     /// The agent's menu, if it is showing one.
@@ -765,41 +850,46 @@ fn render_rule(theme: Theme) -> impl IntoElement {
         .bg(theme.border_soft)
 }
 
-/// Markdown prose, in the Quiet Slate type scale. `thinking` paints the body
-/// of a thinking row in faint italic mono instead of ordinary prose.
-fn render_text_block(
-    text: &str,
-    theme: Theme,
-    row_seq: &mut usize,
-    thinking: bool,
-) -> Vec<gpui_kit::AnyElement> {
-    let lines = parse_markdown(text);
-    let mut blocks: Vec<gpui_kit::AnyElement> = Vec::new();
-    let mut index = 0;
-    while index < lines.len() {
-        let line = &lines[index];
-        if line.style.is_code() {
-            // A fenced block is one panel, not one panel per line.
-            let start = index;
-            while index < lines.len() && lines[index].style.is_code() {
-                index += 1;
+impl ChatView {
+    /// Markdown prose, in the Quiet Slate type scale. `thinking` paints the
+    /// body of a thinking row in faint italic mono instead of ordinary prose.
+    /// The parse is content-keyed and reused until `text` changes.
+    fn render_text_block(
+        &self,
+        text: &str,
+        theme: Theme,
+        row_seq: &mut usize,
+        thinking: bool,
+    ) -> Vec<gpui_kit::AnyElement> {
+        let lines = self.markdown_cache.borrow_mut().get_or_parse(text);
+        let mut blocks: Vec<gpui_kit::AnyElement> = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            let line = &lines[index];
+            if line.style.is_code() {
+                // A fenced block is one panel, not one panel per line.
+                let start = index;
+                while index < lines.len() && lines[index].style.is_code() {
+                    index += 1;
+                }
+                blocks.push(render_code_block(&lines[start..index], theme).into_any_element());
+                continue;
             }
-            blocks.push(render_code_block(&lines[start..index], theme).into_any_element());
-            continue;
+            if line.style.is_rule() {
+                blocks.push(render_rule(theme).into_any_element());
+            } else {
+                blocks
+                    .push(render_markdown_line(line, theme, row_seq, thinking).into_any_element());
+            }
+            index += 1;
         }
-        if line.style.is_rule() {
-            blocks.push(render_rule(theme).into_any_element());
-        } else {
-            blocks.push(render_markdown_line(line, theme, row_seq, thinking).into_any_element());
-        }
-        index += 1;
+        blocks
     }
-    blocks
 }
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.row_seq = 0;
+        self.row_seq.set(0);
         let theme = Theme::current();
 
         // Where the reader is: the follow rule follows the scroll position,
@@ -1017,15 +1107,12 @@ impl ChatView {
             )
     }
 
-    fn render_turns(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        // `recent_turns` borrows only the visible slice instead of cloning the
-        // whole transcript. The <=200 selected turns are cloned because
-        // `render_turn` needs `&mut self` (row ids, open-row state) while a
-        // borrowed turn would keep `self.model` immutably borrowed for the loop.
-        let turns: Vec<ChatTurn> = recent_turns(self.model.turns(), MAX_RECENT_TURNS)
-            .into_iter()
-            .cloned()
-            .collect();
+    fn render_turns(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        // `recent_turns` borrows only the visible slice. Rendering needs no
+        // mutable access to `self` (row ids live in a `Cell`), so the borrowed
+        // turns stay borrowed for the whole loop instead of cloning up to 200
+        // whole turns every frame.
+        let turns = recent_turns(self.model.turns(), MAX_RECENT_TURNS);
         let total = self.model.turns().len();
         let mut column = div()
             .id("chat-turns")
@@ -1041,7 +1128,7 @@ impl ChatView {
     }
 
     fn render_turn(
-        &mut self,
+        &self,
         index: usize,
         turn: &ChatTurn,
         cx: &mut Context<Self>,
@@ -1093,18 +1180,18 @@ impl ChatView {
     }
 
     /// Prose: the markdown of one part, in the Quiet Slate scale.
-    fn render_prose(&mut self, text: &str, theme: Theme) -> gpui_kit::AnyElement {
+    fn render_prose(&self, text: &str, theme: Theme) -> gpui_kit::AnyElement {
         let mut column = div().id(self.next_row_id()).flex().flex_col();
-        let mut row_seq = self.row_seq;
-        for line in render_text_block(text, theme, &mut row_seq, false) {
+        let mut row_seq = self.row_seq.get();
+        for line in self.render_text_block(text, theme, &mut row_seq, false) {
             column = column.child(line);
         }
-        self.row_seq = row_seq;
+        self.row_seq.set(row_seq);
         column.into_any_element()
     }
 
     fn render_part(
-        &mut self,
+        &self,
         turn_index: usize,
         part_index: usize,
         part: &ChatPart,
@@ -1141,11 +1228,11 @@ impl ChatView {
                         .debug_selector(|| "chat-thinking-body".to_string())
                         .px_2()
                         .py_1();
-                    let mut row_seq = self.row_seq;
-                    for line in render_text_block(&text, theme, &mut row_seq, true) {
+                    let mut row_seq = self.row_seq.get();
+                    for line in self.render_text_block(&text, theme, &mut row_seq, true) {
                         body = body.child(line);
                     }
-                    self.row_seq = row_seq;
+                    self.row_seq.set(row_seq);
                     folded = folded.child(body);
                 }
                 folded.into_any_element()
@@ -1182,7 +1269,7 @@ impl ChatView {
 
     /// The parts this shell does not draw as a card of their own: background
     /// tasks, skills, images.
-    fn render_other_part(&mut self, part: &ChatPart, theme: Theme) -> gpui_kit::AnyElement {
+    fn render_other_part(&self, part: &ChatPart, theme: Theme) -> gpui_kit::AnyElement {
         match part {
             ChatPart::TaskResult { tasks } => {
                 let mut column = div().id(self.next_row_id()).flex().flex_col().gap(px(2.0));
@@ -1227,7 +1314,7 @@ impl ChatView {
 
     /// A tool call: a row that folds away, with its work inside.
     fn render_tool_row(
-        &mut self,
+        &self,
         turn_index: usize,
         part_index: usize,
         card: &ToolCard,
@@ -1393,7 +1480,7 @@ impl ChatView {
     /// A tool's input or output: mono, line by line, with its file paths as
     /// controls inside the line they sit on.
     fn render_tool_text(
-        &mut self,
+        &self,
         text: &str,
         theme: Theme,
         cx: &mut Context<Self>,
@@ -1469,7 +1556,7 @@ impl ChatView {
 
     /// An edit diff: the added lines in `--syntax-inserted`, the deleted ones
     /// in `--syntax-deleted`, with the context between them.
-    fn render_diff(&mut self, lines: &[DiffLine], theme: Theme) -> gpui_kit::AnyElement {
+    fn render_diff(&self, lines: &[DiffLine], theme: Theme) -> gpui_kit::AnyElement {
         let mut block = div()
             .id(self.next_row_id())
             .debug_selector(|| "chat-diff".to_string())
@@ -1511,7 +1598,7 @@ impl ChatView {
     }
 
     /// The path to the whole output: the Terminal Lens has it.
-    fn render_terminal_path(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+    fn render_terminal_path(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let _theme = Theme::current();
         Button::new("chat-terminal-path")
             .debug_selector(|| "chat-terminal-path".to_string())
@@ -1533,7 +1620,7 @@ impl ChatView {
     /// whose they are. The status badge follows the sidebar's rule exactly: a
     /// terminal that has not reported shows no badge, and the shell does not
     /// guess one from the screen.
-    fn render_terminal_cards(&mut self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+    fn render_terminal_cards(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let terminals = self.terminals.as_ref()?;
         let rows = delegated_terminals(terminals, &self.pane_id);
         if rows.is_empty() {
@@ -2876,6 +2963,9 @@ let x = 1;
                     view.attach(Some(Arc::clone(&runtime)), seam, "p1".to_string(), cx);
                 });
             });
+            // `attach` fetches the terminal list on the background executor;
+            // let that answer land before asking the frame for the card.
+            cx.run_until_parked();
             cx.update(|window, cx| window.render_frame(cx));
 
             assert!(
@@ -2934,6 +3024,8 @@ let x = 1;
                     view.attach(Some(Arc::clone(&runtime)), seam, "p1".to_string(), cx);
                 });
             });
+            // The terminal list arrives on the background executor after attach.
+            cx.run_until_parked();
             cx.update(|window, cx| window.render_frame(cx));
 
             let _card = cx
