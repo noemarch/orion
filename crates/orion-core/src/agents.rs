@@ -1,8 +1,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::error::{OrionError, Result};
+use crate::process::silent_command;
 use crate::protocol::{AgentKind, DiscoveredAgent};
 
 /// What to put in a PTY: a program and its arguments, already resolved past any platform shim.
@@ -170,7 +170,7 @@ impl AgentRegistry {
     }
 
     fn query_version(command: &str) -> Option<String> {
-        let output = Command::new(command).arg("--version").output().ok()?;
+        let output = silent_command(command).arg("--version").output().ok()?;
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !stdout.is_empty() {
