@@ -15,6 +15,7 @@ use crate::diff_view::{diff_line_numbers, ChangesView, DiffLine, PatchKind};
 use crate::files_entities::{RepoDiffFile, RepoDiffFileList, RepoDiffFilePatch, RepoDiffStatus};
 use crate::theme::Theme;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{Icon, IconName, Sizable};
 use gpui_kit::*;
 use gpui_kit::{
@@ -365,12 +366,15 @@ impl ReviewPane {
             .debug_selector(|| "review-tabs".to_string())
             .flex()
             .flex_row()
+            .flex_nowrap()
             .items_stretch()
             .h(px(TABS_HEIGHT * scale))
+            .min_w_0()
             .flex_shrink_0()
-            .overflow_hidden()
             .border_b_1()
-            .border_color(theme.border_subtle());
+            .border_color(theme.border_subtle())
+            .overflow_x_scrollbar()
+            .id("review-tabs-scroll");
 
         for (index, file) in files.iter().enumerate() {
             let is_active = active == Some(index);
@@ -842,6 +846,8 @@ impl Render for ReviewPane {
             .flex()
             .flex_col()
             .size_full()
+            .min_w_0()
+            .overflow_hidden()
             .bg(theme.panel_bg())
             .rounded(px(theme.radius_panel()))
             .text_color(theme.text)
@@ -1006,4 +1012,173 @@ mod tests {
         assert_eq!(line_totals(&list.files), Some((3, 1)));
         assert_eq!(scope_label(Some(&list)), "All changes");
     }
+
+    crate::orion_test!(
+        fn eight_file_tabs_scroll_inside_the_review_column(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::{point, size};
+
+            let files = serde_json::json!([
+                {"path": "Cargo.lock", "old_path": null, "status": "modified", "additions": 3, "deletions": 1, "binary": null},
+                {"path": "Cargo.toml", "old_path": null, "status": "modified", "additions": 5, "deletions": 2, "binary": null},
+                {"path": "README.md", "old_path": null, "status": "modified", "additions": 1, "deletions": 0, "binary": null},
+                {"path": "build.rs", "old_path": null, "status": "modified", "additions": 7, "deletions": 3, "binary": null},
+                {"path": "src/main.rs", "old_path": null, "status": "modified", "additions": 2, "deletions": 1, "binary": null},
+                {"path": "src/lib.rs", "old_path": null, "status": "modified", "additions": 9, "deletions": 4, "binary": null},
+                {"path": "tests/ui.rs", "old_path": null, "status": "modified", "additions": 6, "deletions": 0, "binary": null},
+                {"path": "docs/adr/0001.md", "old_path": null, "status": "modified", "additions": 4, "deletions": 2, "binary": null},
+            ]);
+            let list = RepoDiffFileList::parse(&serde_json::json!({
+                "repository": {
+                    "root": "/r", "branch": "main", "head": "abc",
+                    "detached": false, "unborn": false,
+                },
+                "scope": "workspace",
+                "files": files,
+                "total": 8, "truncated": false,
+            }))
+            .expect("parse");
+            assert_eq!(list.files.len(), 8);
+
+            let cx = cx.add_empty_window();
+            let changes = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.update(|_window, app| {
+                changes.update(app, |view, _cx| view.apply_list(list));
+            });
+            let pane = cx.update(|_window, app| app.new(|cx| ReviewPane::new(changes.clone(), cx)));
+
+            let layout = crate::shell_model::reference_layout(1400.0);
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(1400.), px(800.)),
+                |_, _cx| {
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_row()
+                        .child(
+                            div()
+                                .id("sidebar")
+                                .h_full()
+                                .w(px(layout.sidebar_w))
+                                .min_w(px(0.0))
+                                .flex_shrink_0(),
+                        )
+                        .child(
+                            div()
+                                .id("conversation-column")
+                                .h_full()
+                                .w(px(layout.conversation_w))
+                                .min_w(px(0.0))
+                                .flex_shrink_0(),
+                        )
+                        .child(
+                            div()
+                                .id("review-column")
+                                .h_full()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .child(pane.clone()),
+                        )
+                },
+            );
+
+            let window_width = px(1400.0);
+            let pane_bounds = cx.debug_bounds("review-pane").expect("review pane");
+            let strip = cx.debug_bounds("review-tabs").expect("tab strip");
+            let last_tab = cx.debug_bounds("review-tab").expect("last file tab");
+            println!(
+                "GEOMETRY window={:?} pane=[{:?}..{:?}] strip=[{:?}..{:?}] last_tab=[{:?}..{:?}]",
+                window_width,
+                pane_bounds.left(),
+                pane_bounds.right(),
+                strip.left(),
+                strip.right(),
+                last_tab.left(),
+                last_tab.right(),
+            );
+
+            assert!(
+                pane_bounds.right() <= window_width,
+                "the review pane must stay inside the window"
+            );
+            assert!(
+                last_tab.right() > pane_bounds.right(),
+                "eight fixed-width tabs must overflow the pane, not widen it"
+            );
+
+            println!(
+                "GEOMETRY pane.top={:?} strip.top={:?} strip_width={:?}",
+                pane_bounds.top(),
+                strip.top(),
+                strip.size.width,
+            );
+            assert!(
+                strip.size.width > pane_bounds.size.width,
+                "eight tabs must form a scrollable content row wider than the pane"
+            );
+            assert!(
+                cx.debug_bounds("scrollbar-overlay").is_some(),
+                "the tab strip must own a horizontal scrollbar"
+            );
+
+            let narrow_layout = crate::shell_model::reference_layout(1260.0);
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(1260.), px(800.)),
+                |_, _cx| {
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_row()
+                        .child(
+                            div()
+                                .id("sidebar")
+                                .h_full()
+                                .w(px(narrow_layout.sidebar_w))
+                                .min_w(px(0.0))
+                                .flex_shrink_0(),
+                        )
+                        .child(
+                            div()
+                                .id("conversation-column")
+                                .h_full()
+                                .w(px(narrow_layout.conversation_w))
+                                .min_w(px(0.0))
+                                .flex_shrink_0(),
+                        )
+                        .child(
+                            div()
+                                .id("review-column")
+                                .h_full()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .child(pane.clone()),
+                        )
+                },
+            );
+            let narrow_window = px(1260.0);
+            let narrow_pane = cx
+                .debug_bounds("review-pane")
+                .expect("review pane when narrow");
+            let narrow_strip = cx
+                .debug_bounds("review-tabs")
+                .expect("tab strip when narrow");
+            println!(
+                "GEOMETRY narrow window={:?} pane=[{:?}..{:?}] strip=[{:?}..{:?}]",
+                narrow_window,
+                narrow_pane.left(),
+                narrow_pane.right(),
+                narrow_strip.left(),
+                narrow_strip.right(),
+            );
+            assert!(
+                narrow_pane.right() <= narrow_window,
+                "the review pane must stay inside the narrower window"
+            );
+            assert!(
+                narrow_strip.left() >= narrow_pane.left(),
+                "the tab strip must start inside the pane when narrow"
+            );
+        }
+    );
 }
