@@ -266,6 +266,9 @@ pub struct ChangesView {
     row_seq: usize,
     last_list_body: Option<String>,
     last_patch_body: Option<String>,
+    // Set by callers with no Context to spawn on; render spawns the fetch.
+    list_pending: bool,
+    patch_pending: bool,
     /// The list column width the reader dragged; None until then.
     list_width: Option<f32>,
     /// A splitter drag is in progress: the reader has the handle down.
@@ -299,6 +302,8 @@ impl ChangesView {
             row_seq: 0,
             last_list_body: None,
             last_patch_body: None,
+            list_pending: false,
+            patch_pending: false,
             list_width: None,
             resizing: false,
             resize_start_x: 0.0,
@@ -362,29 +367,47 @@ impl ChangesView {
         query
     }
 
-    /// Fetch the file list through the wire seam (`Runtime::http`).
+    /// Ask for a fresh file list. The blocking fetch is spawned by `render`
+    /// (or the poll) once a `Context` is available; callers in other views
+    /// have no `Context` to spawn on, so they only raise the flag here.
     pub fn refresh(&mut self) {
+        self.list_pending = true;
+    }
+
+    /// Spawn the list fetch off the UI thread and apply its answer in one batch.
+    fn spawn_list_refresh(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
         let path = format!("/api/workspace/diff/files?{}", self.query());
-        let (status, body) = engine.http("GET", &path, &Value::Null);
-        if status != 200 {
-            self.error = Some(LIST_ERROR_MESSAGE.to_string());
-            return;
-        }
-        let encoded = body.to_string();
-        if self.last_list_body.as_deref() == Some(encoded.as_str()) {
-            return;
-        }
-        self.last_list_body = Some(encoded);
-        match RepoDiffFileList::parse(&body) {
-            Ok(list) => {
-                self.list = Some(list);
-                self.error = None;
-            }
-            Err(_) => self.error = Some(LIST_ERROR_MESSAGE.to_string()),
-        }
+        cx.spawn(async move |view, cx| {
+            let answer = cx
+                .background_executor()
+                .spawn(async move { engine.http("GET", &path, &Value::Null) })
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                let (status, body) = answer;
+                if status != 200 {
+                    view.error = Some(LIST_ERROR_MESSAGE.to_string());
+                    cx.notify();
+                    return;
+                }
+                let encoded = body.to_string();
+                if view.last_list_body.as_deref() == Some(encoded.as_str()) {
+                    return;
+                }
+                view.last_list_body = Some(encoded);
+                match RepoDiffFileList::parse(&body) {
+                    Ok(list) => {
+                        view.list = Some(list);
+                        view.error = None;
+                    }
+                    Err(_) => view.error = Some(LIST_ERROR_MESSAGE.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn set_scope(&mut self, scope: RepoDiffScope) {
@@ -395,8 +418,14 @@ impl ChangesView {
         self.refresh_patch();
     }
 
-    /// Fetch the selected file's patch through the wire seam.
+    /// Ask for a fresh patch of the selected file. See [`Self::refresh`] for
+    /// why the fetch is deferred to a `Context`-bearing caller.
     pub fn refresh_patch(&mut self) {
+        self.patch_pending = true;
+    }
+
+    /// Spawn the patch fetch off the UI thread and apply its answer in one batch.
+    fn spawn_patch_refresh(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
@@ -408,22 +437,46 @@ impl ChangesView {
             query.push_str(&format!("&old_path={}", url_encode(old_path)));
         }
         let full = format!("/api/workspace/diff/file?{query}");
-        let (status, body) = engine.http("GET", &full, &Value::Null);
-        if status != 200 {
-            self.error = Some(PATCH_ERROR_MESSAGE.to_string());
-            return;
+        cx.spawn(async move |view, cx| {
+            let answer = cx
+                .background_executor()
+                .spawn(async move { engine.http("GET", &full, &Value::Null) })
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                let (status, body) = answer;
+                if status != 200 {
+                    view.error = Some(PATCH_ERROR_MESSAGE.to_string());
+                    cx.notify();
+                    return;
+                }
+                let encoded = body.to_string();
+                if view.last_patch_body.as_deref() == Some(encoded.as_str()) {
+                    return;
+                }
+                view.last_patch_body = Some(encoded);
+                match RepoDiffFilePatch::parse(&body) {
+                    Ok(patch) => {
+                        view.patch = Some(patch);
+                        view.error = None;
+                    }
+                    Err(_) => view.error = Some(PATCH_ERROR_MESSAGE.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Spawn whatever fetches pending flags ask for. Called from `render` and
+    /// the poll, the only places with a `Context` to spawn on.
+    fn pump_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.list_pending {
+            self.list_pending = false;
+            self.spawn_list_refresh(cx);
         }
-        let encoded = body.to_string();
-        if self.last_patch_body.as_deref() == Some(encoded.as_str()) {
-            return;
-        }
-        self.last_patch_body = Some(encoded);
-        match RepoDiffFilePatch::parse(&body) {
-            Ok(patch) => {
-                self.patch = Some(patch);
-                self.error = None;
-            }
-            Err(_) => self.error = Some(PATCH_ERROR_MESSAGE.to_string()),
+        if self.patch_pending {
+            self.patch_pending = false;
+            self.spawn_patch_refresh(cx);
         }
     }
 
@@ -577,10 +630,11 @@ impl ChangesView {
     fn start_poll(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| loop {
             cx.background_executor().timer(Duration::from_secs(5)).await;
-            let _ = view.update(cx, |view, _cx| {
+            let _ = view.update(cx, |view, view_cx| {
                 if view.visible {
                     view.refresh();
                     view.refresh_patch();
+                    view.pump_refresh(view_cx);
                 }
             });
             if view.upgrade().is_none() {
@@ -721,6 +775,7 @@ impl ChangesView {
 impl Render for ChangesView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.row_seq = 0;
+        self.pump_refresh(cx);
         let theme = Theme::current();
         let mut root = div()
             .id("changes-view")
