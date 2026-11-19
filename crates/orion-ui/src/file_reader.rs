@@ -118,17 +118,17 @@ impl FileReader {
     }
 
     /// Wire the engine once it exists (called from `app.rs` after spawn).
-    pub fn attach(&mut self, engine: Arc<dyn Runtime>, pane_id: String) {
+    pub fn attach(&mut self, cx: &mut Context<Self>, engine: Arc<dyn Runtime>, pane_id: String) {
         self.engine = Some(engine);
         self.pane_id = pane_id;
-        self.refresh();
+        self.refresh(cx);
     }
 
     /// Whether the 2s poll runs (the Changes lens is active).
-    pub fn set_visible(&mut self, visible: bool) {
+    pub fn set_visible(&mut self, cx: &mut Context<Self>, visible: bool) {
         self.visible = visible;
         if visible {
-            self.refresh();
+            self.refresh(cx);
         }
     }
 
@@ -137,88 +137,126 @@ impl FileReader {
     }
 
     /// Open one file in this reader.
-    pub fn open(&mut self, path: String) {
+    pub fn open(&mut self, cx: &mut Context<Self>, path: String) {
         self.path = Some(path);
         self.info = None;
         self.text = None;
         self.error = None;
         self.last_body = None;
-        self.refresh();
+        self.refresh(cx);
     }
 
-    /// Fetch stat then text through the wire seam (`Runtime::http`).
-    pub fn refresh(&mut self) {
+    /// Fetch stat then text through the wire seam (`Runtime::http`). Both
+    /// round-trips are blocking, so they run on a background thread and the
+    /// answer is applied to the view in one batch on the UI thread.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
         let Some(path) = self.path.clone() else {
             return;
         };
-        let stat_path = format!(
-            "/api/fs/stat?pane_id={}&path={}",
-            url_encode(&self.pane_id),
-            url_encode(&path),
-        );
-        let (status, body) = engine.http("GET", &stat_path, &Value::Null);
-        if status != 200 {
-            self.error = Some(FILE_ERROR_MESSAGE.to_string());
-            self.info = None;
-            self.text = None;
-            return;
-        }
-        let info = match FileInfo::parse(&body) {
-            Ok(info) => info,
-            Err(_) => {
-                self.error = Some(FILE_ERROR_MESSAGE.to_string());
-                return;
-            }
-        };
-        let encoded = body.to_string();
-        if self.last_body.as_deref() == Some(encoded.as_str()) && self.text.is_some() {
-            return;
-        }
-        let is_binary = info.kind == FileKind::Binary;
-        self.last_body = Some(encoded.clone());
-        self.info = Some(info);
-        self.error = None;
-        if is_binary {
-            self.text = None;
-            return;
-        }
-        let file_path = format!(
-            "/api/fs/file?pane_id={}&path={}",
-            url_encode(&self.pane_id),
-            url_encode(&path),
-        );
-        let (status, body) = engine.http("GET", &file_path, &Value::Null);
-        if status != 200 {
-            self.error = Some(FILE_ERROR_MESSAGE.to_string());
-            self.text = None;
-            return;
-        }
-        match body.get("__raw_text__").and_then(Value::as_str) {
-            Some(text) => {
-                let cut = text.floor_char_boundary(MAX_FILE_CHARS.min(text.len()));
-                let truncated = cut < text.len();
-                self.text = Some(if truncated {
-                    format!(
-                        "{}\n… (preview truncated at {MAX_FILE_CHARS} chars)",
-                        &text[..cut]
-                    )
-                } else {
-                    text.to_string()
-                });
-            }
-            None => self.error = Some(FILE_ERROR_MESSAGE.to_string()),
-        }
+        let pane_id = self.pane_id.clone();
+        let last_body = self.last_body.clone();
+        let has_text = self.text.is_some();
+        cx.spawn(async move |view, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move {
+                    let stat_path = format!(
+                        "/api/fs/stat?pane_id={}&path={}",
+                        url_encode(&pane_id),
+                        url_encode(&path),
+                    );
+                    let (stat_status, stat_body) = engine.http("GET", &stat_path, &Value::Null);
+                    if stat_status != 200 {
+                        return Some((stat_status, stat_body, None));
+                    }
+                    let Ok(info) = FileInfo::parse(&stat_body) else {
+                        return Some((stat_status, stat_body, None));
+                    };
+                    let encoded = stat_body.to_string();
+                    if last_body.as_deref() == Some(encoded.as_str()) && has_text {
+                        return None;
+                    }
+                    if info.kind == FileKind::Binary {
+                        return Some((stat_status, stat_body, None));
+                    }
+                    let file_path = format!(
+                        "/api/fs/file?pane_id={}&path={}",
+                        url_encode(&pane_id),
+                        url_encode(&path),
+                    );
+                    let file = engine.http("GET", &file_path, &Value::Null);
+                    Some((stat_status, stat_body, Some(file)))
+                })
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                let Some((stat_status, stat_body, file)) = fetched else {
+                    return;
+                };
+                if stat_status != 200 {
+                    view.error = Some(FILE_ERROR_MESSAGE.to_string());
+                    view.info = None;
+                    view.text = None;
+                    cx.notify();
+                    return;
+                }
+                let info = match FileInfo::parse(&stat_body) {
+                    Ok(info) => info,
+                    Err(_) => {
+                        view.error = Some(FILE_ERROR_MESSAGE.to_string());
+                        cx.notify();
+                        return;
+                    }
+                };
+                let encoded = stat_body.to_string();
+                let is_binary = info.kind == FileKind::Binary;
+                view.last_body = Some(encoded);
+                view.info = Some(info);
+                view.error = None;
+                if is_binary {
+                    view.text = None;
+                    cx.notify();
+                    return;
+                }
+                let Some((status, body)) = file else {
+                    cx.notify();
+                    return;
+                };
+                if status != 200 {
+                    view.error = Some(FILE_ERROR_MESSAGE.to_string());
+                    view.text = None;
+                    cx.notify();
+                    return;
+                }
+                match body.get("__raw_text__").and_then(Value::as_str) {
+                    Some(text) => {
+                        let cut = text.floor_char_boundary(MAX_FILE_CHARS.min(text.len()));
+                        let truncated = cut < text.len();
+                        view.text = Some(if truncated {
+                            format!(
+                                "{}\n… (preview truncated at {MAX_FILE_CHARS} chars)",
+                                &text[..cut]
+                            )
+                        } else {
+                            text.to_string()
+                        });
+                    }
+                    None => view.error = Some(FILE_ERROR_MESSAGE.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn start_poll(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| loop {
             cx.background_executor().timer(Duration::from_secs(5)).await;
-            let _ = view.update(cx, |view, _cx| {
+            let _ = view.update(cx, |view, view_cx| {
                 if view.visible {
-                    view.refresh();
+                    view.refresh(view_cx);
                 }
             });
             if view.upgrade().is_none() {
@@ -256,10 +294,10 @@ impl FileReader {
 
     /// The reader asked for the file again: forget the cached body so the
     /// next answer is re-parsed even when identical, then re-issue the fetch.
-    pub fn retry(&mut self) {
+    pub fn retry(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         self.last_body = None;
-        self.refresh();
+        self.refresh(cx);
     }
 }
 
@@ -351,7 +389,7 @@ impl Render for FileReader {
                             .primary()
                             .h(px(44.0))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.retry();
+                                this.retry(cx);
                                 cx.notify();
                             })),
                     ),
@@ -580,10 +618,10 @@ mod tests {
             let cx = cx.add_empty_window();
             let view = cx.update(|_window, app| app.new(FileReader::new));
             cx.update(|_window, app| {
-                view.update(app, |v, _cx| {
+                view.update(app, |v, cx| {
                     v.apply_file("/tmp/a.txt".to_string(), text_info(), "one".to_string());
-                    v.set_visible(false);
-                    v.set_visible(true);
+                    v.set_visible(cx, false);
+                    v.set_visible(cx, true);
                 });
                 assert_eq!(
                     view.read(app).path(),
