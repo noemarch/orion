@@ -5,8 +5,19 @@
 //! can read, resize does not lose the screen, Ctrl+C does not kill the TUI, and closing the pane
 //! ends the agent's whole process tree. A machine without the agent skips rather than fails.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+/// Real agent CLIs contend for the same auth/session state when started side by side. The test
+/// harness runs tests in parallel by default, so serialize the spawns; each test still proves the
+/// same PTY behavior, without one agent's startup delaying another's first frame past the wait.
+static REAL_AGENT: Mutex<()> = Mutex::new(());
+
+fn real_agent_lock() -> MutexGuard<'static, ()> {
+    REAL_AGENT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 use orion_core::agents::{find_in_path, LaunchSpec};
 use orion_core::engine::pane::{Pane, PaneConfig, PaneEvent};
@@ -61,6 +72,7 @@ fn claude_draws_a_grid_and_its_tree_dies_with_the_pane() {
         eprintln!("skipped: claude is not on PATH");
         return;
     };
+    let _guard = real_agent_lock();
     let cwd = scratch("agent-smoke");
     let events: Arc<dyn Fn(PaneEvent) + Send + Sync> = Arc::new(|_| {});
     let pane = Pane::spawn(
@@ -73,6 +85,7 @@ fn claude_draws_a_grid_and_its_tree_dies_with_the_pane() {
             cwd: cwd.clone(),
             spec,
             args: Vec::new(),
+            shell_path: None,
             size: TerminalSize {
                 cols: 120,
                 rows: 32,
@@ -85,7 +98,7 @@ fn claude_draws_a_grid_and_its_tree_dies_with_the_pane() {
     .expect("the agent starts in a pane");
     let pid = pane.pid().expect("the agent has a pid");
 
-    let text = wait_for_screen(&pane, 30);
+    let text = wait_for_screen(&pane, 60);
     assert!(
         !text.trim().is_empty(),
         "Claude drew nothing: the PTY or the grid is not working"
@@ -122,6 +135,7 @@ fn the_http_route_starts_an_agent_and_reads_its_screen() {
         eprintln!("skipped: claude is not on PATH");
         return;
     }
+    let _guard = real_agent_lock();
     let dir = scratch("agent-route");
     let engine = Engine::with_store(Store::at(dir.join("data")));
     let cwd = dir.join("project");
@@ -140,7 +154,7 @@ fn the_http_route_starts_an_agent_and_reads_its_screen() {
     assert_eq!(body["agent_started"], true);
     let pane_id = body["pane_id"].as_str().expect("a pane id").to_string();
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut drawn = String::new();
     while Instant::now() < deadline {
         let (status, read) = engine.http(
@@ -194,6 +208,7 @@ fn opencode_draws_a_grid_and_its_tree_dies_with_the_pane() {
         eprintln!("skipped: opencode is not on PATH");
         return;
     };
+    let _guard = real_agent_lock();
     let cwd = scratch("opencode-smoke");
     let events: Arc<dyn Fn(PaneEvent) + Send + Sync> = Arc::new(|_| {});
     let pane = Pane::spawn(
@@ -206,6 +221,7 @@ fn opencode_draws_a_grid_and_its_tree_dies_with_the_pane() {
             cwd: cwd.clone(),
             spec,
             args: Vec::new(),
+            shell_path: None,
             size: TerminalSize {
                 cols: 120,
                 rows: 32,
@@ -218,7 +234,7 @@ fn opencode_draws_a_grid_and_its_tree_dies_with_the_pane() {
     .expect("the agent starts in a pane");
     let pid = pane.pid().expect("the agent has a pid");
 
-    let text = wait_for_screen(&pane, 45);
+    let text = wait_for_screen(&pane, 90);
     assert!(
         !text.trim().is_empty(),
         "OpenCode drew nothing: the PTY or the grid is not working"
@@ -255,6 +271,7 @@ fn omp_draws_a_grid_and_its_tree_dies_with_the_pane() {
         eprintln!("skipped: omp is not on PATH");
         return;
     };
+    let _guard = real_agent_lock();
     let cwd = scratch("omp-smoke");
     let events: Arc<dyn Fn(PaneEvent) + Send + Sync> = Arc::new(|_| {});
     let pane = Pane::spawn(
@@ -267,6 +284,7 @@ fn omp_draws_a_grid_and_its_tree_dies_with_the_pane() {
             cwd: cwd.clone(),
             spec,
             args: Vec::new(),
+            shell_path: None,
             size: TerminalSize {
                 cols: 120,
                 rows: 32,
@@ -279,7 +297,7 @@ fn omp_draws_a_grid_and_its_tree_dies_with_the_pane() {
     .expect("the agent starts in a pane");
     let pid = pane.pid().expect("the agent has a pid");
 
-    let text = wait_for_screen(&pane, 45);
+    let text = wait_for_screen(&pane, 90);
     assert!(
         !text.trim().is_empty(),
         "OMP drew nothing: the PTY or the grid is not working"
