@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -46,6 +47,9 @@ use crate::prompt::DetectedPrompt;
 use crate::protocol::AgentStatus;
 use crate::runtime::framing;
 use crate::runtime::traits::{PaneHandle, Runtime};
+
+/// How long one request waits for its answer before the waiter gives up.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A frame the daemon pushed, with no request waiting for it.
 pub type FrameSink = std::sync::Arc<dyn Fn(Value) + Send + Sync>;
@@ -74,7 +78,7 @@ impl Clone for Box<dyn FrameConnection> {
 
 struct RuntimeClientInner {
     writer: Mutex<Box<dyn FrameConnection>>,
-    in_flight: Mutex<HashMap<String, mpsc::Sender<Value>>>,
+    in_flight: Mutex<HashMap<String, mpsc::SyncSender<Value>>>,
     on_frame_sinks: Mutex<HashMap<u64, FrameSink>>,
     next_sink: AtomicU64,
     connections: Mutex<HashMap<String, FrameSink>>,
@@ -92,6 +96,20 @@ impl RuntimeClientInner {
         for sink in on_frame.into_iter().chain(conns) {
             sink(frame.clone());
         }
+    }
+}
+
+/// Removes a request id from `in_flight` on every exit path, including a write error and a
+/// timeout. The pump may already have removed it when the answer arrived; removing again is
+/// harmless.
+struct InFlightGuard<'a> {
+    in_flight: &'a Mutex<HashMap<String, mpsc::SyncSender<Value>>>,
+    id: &'a str,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.in_flight.lock().remove(self.id);
     }
 }
 
@@ -170,13 +188,23 @@ impl RuntimeClient {
 
     /// Sends one request and waits for its answer.
     pub fn request(&self, request: Value) -> Result<Value, String> {
+        self.request_with_timeout(request, REQUEST_TIMEOUT)
+    }
+
+    fn request_with_timeout(&self, request: Value, timeout: Duration) -> Result<Value, String> {
         let id = Uuid::new_v4().to_string();
         let mut request = request;
         if let Some(object) = request.as_object_mut() {
             object.insert("id".to_string(), Value::String(id.clone()));
         }
-        let (sender, receiver) = mpsc::channel();
+        // One answer per id: a capacity of one is enough and keeps a peer that never reads from
+        // growing the queue.
+        let (sender, receiver) = mpsc::sync_channel(1);
         self.inner.in_flight.lock().insert(id.clone(), sender);
+        let _guard = InFlightGuard {
+            in_flight: &self.inner.in_flight,
+            id: &id,
+        };
 
         {
             let mut writer = self.inner.writer.lock();
@@ -185,7 +213,7 @@ impl RuntimeClient {
                 .map_err(|error| error.to_string())?;
         }
 
-        match receiver.recv_timeout(std::time::Duration::from_secs(30)) {
+        match receiver.recv_timeout(timeout) {
             Ok(frame) => Ok(frame),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 Err("runtime did not answer in time".to_string())
@@ -623,6 +651,51 @@ mod tests {
         let result = client
             .request(json!({ "type": "http", "method": "GET", "path": "/", "body": Value::Null }));
         assert!(result.is_err(), "a request after close must fail");
+    }
+
+    #[test]
+    fn a_timed_out_request_leaves_nothing_in_flight() {
+        let (client_conn, daemon_conn) = make_pair();
+        std::thread::spawn(move || {
+            let mut d = daemon_conn;
+            let _ = d.read_frame();
+            let _ = d.write_frame(&json!({
+                "ok": true,
+                "version": "0",
+                "protocol": framing::PROTOCOL_VERSION,
+            }));
+            // Ignore the first request, answer the second.
+            let _ignored = d.read_frame();
+            if let Ok(Some(frame)) = d.read_frame() {
+                let id = frame.get("id").cloned().unwrap_or(Value::Null);
+                let _ = d.write_frame(&json!({
+                    "id": id,
+                    "type": "http-result",
+                    "status": 200u16,
+                    "body": { "ok": true },
+                }));
+            }
+        });
+
+        let client = RuntimeClient::new(Box::new(client_conn)).expect("client");
+        let slow = client.request_with_timeout(
+            json!({ "type": "http", "method": "GET", "path": "/slow", "body": Value::Null }),
+            Duration::from_millis(50),
+        );
+        assert!(slow.is_err(), "an unanswered request must time out");
+        assert!(
+            client.inner.in_flight.lock().is_empty(),
+            "a timed-out request must not stay in flight"
+        );
+
+        let answer = client
+            .request_with_timeout(
+                json!({ "type": "http", "method": "GET", "path": "/fast", "body": Value::Null }),
+                Duration::from_secs(5),
+            )
+            .expect("the follow-up request is answered");
+        assert_eq!(answer.get("status").and_then(Value::as_u64), Some(200));
+        assert!(client.inner.in_flight.lock().is_empty());
     }
 
     #[test]
