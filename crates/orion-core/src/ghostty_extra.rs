@@ -26,6 +26,13 @@ pub const OPT_CONTINUATION_MAX_BYTES: i32 = 32;
 pub const OPT_MODE: i32 = 35;
 pub const MODE_GRAPHEME_CLUSTER: u16 = 2027;
 
+// `ghostty_terminal_get` data keys (vt 1.0.1 terminal.h).
+pub const GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN: i32 = 6;
+pub const GHOSTTY_TERMINAL_DATA_MODE: i32 = 37;
+// `GhosttyTerminalScreen` values.
+pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: i32 = 0;
+pub const GHOSTTY_TERMINAL_SCREEN_ALTERNATE: i32 = 1;
+
 /// `GhosttyTerminalScrollViewportValue`: a 16-byte, 8-byte-aligned union.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -56,6 +63,10 @@ pub struct ModeConfig {
 
 extern "C" {
     pub fn ghostty_terminal_set(terminal: RawTerminal, option: i32, value: *const c_void) -> i32;
+
+    /// Read a typed property of the terminal. The output type depends on `data`:
+    /// `ACTIVE_SCREEN` writes an `i32`, `MODE` reads/writes a `ModeConfig`.
+    pub fn ghostty_terminal_get(terminal: RawTerminal, data: i32, out: *mut c_void) -> i32;
 
     /// Scroll the terminal viewport to an absolute scrollable-area row, or to
     /// the live bottom.
@@ -147,6 +158,33 @@ pub fn scroll_bottom(terminal: RawTerminal) -> i32 {
             },
         )
     }
+}
+
+/// Whether the emulator is showing the alternate screen right now.
+pub fn active_screen_is_alternate(terminal: RawTerminal) -> bool {
+    let mut screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    let status = unsafe {
+        ghostty_terminal_get(
+            terminal,
+            GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN,
+            &mut screen as *mut i32 as *mut c_void,
+        )
+    };
+    status == GHOSTTY_SUCCESS && screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE
+}
+
+/// Whether a DEC private mode is set. `mode` is the raw mode number (1, 1000,
+/// 1002, 1003, 1007, ...); DEC modes pack to that number with `ansi=false`.
+pub fn mode_enabled(terminal: RawTerminal, mode: u16) -> bool {
+    let mut config = ModeConfig { mode, value: false };
+    let status = unsafe {
+        ghostty_terminal_get(
+            terminal,
+            GHOSTTY_TERMINAL_DATA_MODE,
+            &mut config as *mut ModeConfig as *mut c_void,
+        )
+    };
+    status == GHOSTTY_SUCCESS && config.value
 }
 
 /// Whether the given row was soft-wrapped by the terminal.

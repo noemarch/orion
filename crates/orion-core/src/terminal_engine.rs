@@ -54,6 +54,12 @@ pub struct FindMatch {
     pub end_col: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveScreen {
+    Primary,
+    Alternate,
+}
+
 /// The terminal emulator the shell draws.
 ///
 /// The methods are the surface the terminal lens uses, plus the five that
@@ -123,6 +129,18 @@ pub trait TerminalEngine {
         end_row: usize,
         end_col: usize,
     ) -> String;
+
+    /// The screen the emulator is showing. Defaults to primary so a stand-in
+    /// engine keeps compiling.
+    fn active_screen(&self) -> ActiveScreen {
+        ActiveScreen::Primary
+    }
+
+    /// Whether a DEC private mode is set. `mode` is the raw number (1, 1000,
+    /// 1002, 1003, 1007, ...). Defaults to false for a stand-in engine.
+    fn mode(&self, _mode: u16) -> bool {
+        false
+    }
 }
 
 /// A new engine with an empty grid.
@@ -218,7 +236,21 @@ impl TerminalEngine for ScreenState {
     ) -> String {
         ScreenState::selection(self, start_row, start_col, end_row, end_col)
     }
+
+    fn active_screen(&self) -> ActiveScreen {
+        if self.active_screen_is_alternate() {
+            ActiveScreen::Alternate
+        } else {
+            ActiveScreen::Primary
+        }
+    }
+
+    fn mode(&self, mode: u16) -> bool {
+        self.mode_enabled(mode)
+    }
 }
+
+pub use libghostty_vt::mouse::{encode_sgr_mouse, sgr_mods};
 
 /// Encodes one logical key chord into the bytes a terminal receives.
 ///

@@ -106,6 +106,33 @@ impl MouseFormat {
     }
 }
 
+/// SGR (1006) modifier bits, matching Ghostty's `mouse_encode.zig`.
+pub mod sgr_mods {
+    pub const SHIFT: u8 = 4;
+    pub const ALT: u8 = 8;
+    pub const CTRL: u8 = 16;
+    pub const MOTION: u8 = 32;
+}
+
+/// Encode one SGR (1006) mouse report into `out`.
+///
+/// `button` is the SGR button number (0 left, 64 wheel up, 65 wheel down),
+/// `col`/`row` are clamped to at least 1, and `mods` is a bitmask of
+/// [`sgr_mods`]. A press writes an uppercase `M` final byte; a release writes
+/// lowercase `m`.
+pub fn encode_sgr_mouse(out: &mut Vec<u8>, button: u8, col: u32, row: u32, press: bool, mods: u8) {
+    use std::io::Write as _;
+    let final_byte = if press { 'M' } else { 'm' };
+    let _ = write!(
+        out,
+        "\x1b[<{};{};{}{}",
+        button | mods,
+        col.max(1),
+        row.max(1),
+        final_byte
+    );
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MouseGeometry {
     pub screen_width: u32,
@@ -328,5 +355,60 @@ mod tests {
         encoder
             .set_from_terminal(&terminal)
             .expect("set_from_terminal failed");
+    }
+
+    #[test]
+    fn sgr_wheel_up_is_press_then_release() {
+        let mut out = Vec::new();
+        encode_sgr_mouse(&mut out, 64, 1, 1, true, 0);
+        encode_sgr_mouse(&mut out, 64, 1, 1, false, 0);
+        assert_eq!(
+            out, b"\x1b[<64;1;1M\x1b[<64;1;1m",
+            "wheel up must be button 64 press+release at 1;1"
+        );
+    }
+
+    #[test]
+    fn sgr_wheel_down_is_button_65() {
+        let mut out = Vec::new();
+        encode_sgr_mouse(&mut out, 65, 10, 20, true, 0);
+        assert_eq!(
+            out, b"\x1b[<65;10;20M",
+            "wheel down must be button 65 at 1-based 10;20"
+        );
+    }
+
+    #[test]
+    fn sgr_left_press_motion_release() {
+        let mut out = Vec::new();
+        encode_sgr_mouse(&mut out, 0, 3, 4, true, 0);
+        encode_sgr_mouse(&mut out, 0, 3, 5, true, sgr_mods::MOTION);
+        encode_sgr_mouse(&mut out, 0, 3, 5, false, 0);
+        assert_eq!(
+            out, b"\x1b[<0;3;4M\x1b[<32;3;5M\x1b[<0;3;5m",
+            "left press, motion (button 0 + 32), release must use M/m finals"
+        );
+    }
+
+    #[test]
+    fn sgr_modifier_bits_are_shift_4_alt_8_ctrl_16() {
+        let mut out = Vec::new();
+        encode_sgr_mouse(&mut out, 0, 1, 1, true, sgr_mods::SHIFT);
+        encode_sgr_mouse(&mut out, 0, 1, 1, true, sgr_mods::ALT);
+        encode_sgr_mouse(&mut out, 0, 1, 1, true, sgr_mods::CTRL);
+        assert_eq!(
+            out, b"\x1b[<4;1;1M\x1b[<8;1;1M\x1b[<16;1;1M",
+            "SGR modifier bits must be SHIFT=4, ALT=8, CTRL=16"
+        );
+    }
+
+    #[test]
+    fn sgr_coords_are_one_based() {
+        let mut out = Vec::new();
+        encode_sgr_mouse(&mut out, 0, 0, 0, true, 0);
+        assert_eq!(
+            out, b"\x1b[<0;1;1M",
+            "input (0,0) must clamp to 1-based 1;1"
+        );
     }
 }

@@ -286,6 +286,19 @@ impl ScreenState {
         (cursor.y, cursor.x)
     }
 
+    /// Whether the emulator is showing the alternate screen right now.
+    pub fn active_screen_is_alternate(&self) -> bool {
+        ghostty_extra::active_screen_is_alternate(
+            self.terminal.as_raw() as ghostty_extra::RawTerminal
+        )
+    }
+
+    /// Whether a DEC private mode is set. `mode` is the raw number (1, 1000,
+    /// 1002, 1003, 1007, ...).
+    pub fn mode_enabled(&self, mode: u16) -> bool {
+        ghostty_extra::mode_enabled(self.terminal.as_raw() as ghostty_extra::RawTerminal, mode)
+    }
+
     /// The whole visible screen as plain text, one trimmed line per row. Prompt detection reads
     /// this: it is what the agent's TUI draws, not what the transcript says.
     pub fn visible_text(&self) -> String {

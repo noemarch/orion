@@ -31,7 +31,9 @@ use gpui_kit::{
     StyledText, TextStyle, TextSystem, Window,
 };
 use orion_core::runtime::PaneHandle;
-use orion_core::terminal_engine::{new_engine, Key, TermCell, TerminalEngine};
+use orion_core::terminal_engine::{
+    encode_sgr_mouse, new_engine, sgr_mods, ActiveScreen, Key, TermCell, TerminalEngine,
+};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -201,6 +203,61 @@ fn wheel_rows_up(ev: &ScrollEvent, row_height: f32) -> i64 {
     (value / row_height).round() as i64
 }
 
+/// What one wheel event does, decided purely from the emulator's live mode
+/// state so the priority is testable without a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WheelAction {
+    Scrollback,
+    Sgr,
+    Arrow,
+    Ignore,
+}
+
+fn wheel_action(
+    shift: bool,
+    screen: ActiveScreen,
+    tracking: bool,
+    alternate_scroll: bool,
+) -> WheelAction {
+    if shift {
+        return WheelAction::Scrollback;
+    }
+    if tracking {
+        return WheelAction::Sgr;
+    }
+    if screen == ActiveScreen::Alternate {
+        return if alternate_scroll {
+            WheelAction::Arrow
+        } else {
+            WheelAction::Ignore
+        };
+    }
+    WheelAction::Scrollback
+}
+
+fn arrow_bytes(up: bool, application_cursor: bool) -> &'static str {
+    match (up, application_cursor) {
+        (true, true) => "\x1bOA",
+        (true, false) => "\x1b[A",
+        (false, true) => "\x1bOB",
+        (false, false) => "\x1b[B",
+    }
+}
+
+fn sgr_modifier_bits(mods: &gpui_kit::Modifiers) -> u8 {
+    let mut bits = 0;
+    if mods.shift {
+        bits |= sgr_mods::SHIFT;
+    }
+    if mods.alt {
+        bits |= sgr_mods::ALT;
+    }
+    if mods.control {
+        bits |= sgr_mods::CTRL;
+    }
+    bits
+}
+
 pub struct TerminalPane {
     screen: Box<dyn TerminalEngine>,
     focus_handle: FocusHandle,
@@ -222,6 +279,9 @@ pub struct TerminalPane {
     sel_anchor: Option<(usize, usize)>,
     sel_cursor: Option<(usize, usize)>,
     selecting: bool,
+    /// Whether a mouse-tracking press was forwarded to the PTY, so a release is
+    /// only sent when there was a matching press.
+    mouse_forwarding_press: bool,
     // Geometry measured at render time for mouse→cell mapping.
     char_w: f32,
     last_cols: u16,
@@ -326,6 +386,7 @@ impl TerminalPane {
             sel_anchor: None,
             sel_cursor: None,
             selecting: false,
+            mouse_forwarding_press: false,
             char_w: 7.81, // refined from the measured font on the first frame.
             last_cols: 120,
             last_rows: 32,
@@ -605,6 +666,58 @@ impl TerminalPane {
     fn send_text(&self, text: &str) {
         if let Some(pane) = &self.pane {
             let _ = pane.write(text);
+        }
+    }
+
+    fn mouse_tracking(&self) -> bool {
+        self.screen.mode(1000) || self.screen.mode(1002) || self.screen.mode(1003)
+    }
+
+    fn forward_sgr(&self, button: u8, vis_row: usize, col: usize, press: bool, mods: u8) {
+        let col = u32::try_from(col).unwrap_or(0).saturating_add(1);
+        let row = u32::try_from(vis_row).unwrap_or(0).saturating_add(1);
+        let mut out = Vec::with_capacity(24);
+        encode_sgr_mouse(&mut out, button, col, row, press, mods);
+        let text = String::from_utf8_lossy(&out);
+        self.send_text(text.as_ref());
+    }
+
+    fn handle_scroll(&mut self, ev: &ScrollEvent, row_height: f32, cx: &mut Context<Self>) {
+        let rows_up = wheel_rows_up(ev, row_height);
+        let action = wheel_action(
+            ev.modifiers.shift,
+            self.screen.active_screen(),
+            self.mouse_tracking(),
+            self.screen.mode(1007),
+        );
+        match action {
+            WheelAction::Scrollback => {
+                let max = self.screen.scrollback_len();
+                let next = (self.screen.offset_from_bottom() as i64 + rows_up).clamp(0, max as i64)
+                    as usize;
+                if next != self.screen.offset_from_bottom() {
+                    self.screen.scroll_to(next);
+                    cx.notify();
+                }
+            }
+            WheelAction::Sgr => {
+                if rows_up == 0 {
+                    return;
+                }
+                let (vis_row, col) = self.pos_to_cell(ev.position);
+                let button = if rows_up > 0 { 64 } else { 65 };
+                let mods = sgr_modifier_bits(&ev.modifiers);
+                self.forward_sgr(button, vis_row, col, true, mods);
+                self.forward_sgr(button, vis_row, col, false, mods);
+            }
+            WheelAction::Arrow => {
+                if rows_up == 0 {
+                    return;
+                }
+                let bytes = arrow_bytes(rows_up > 0, self.screen.mode(1));
+                self.send_text(bytes);
+            }
+            WheelAction::Ignore => {}
         }
     }
 
@@ -1521,8 +1634,6 @@ impl Render for TerminalPane {
                 }
             }))
             .on_scroll(cx.listener(move |this, ev: &ScrollEvent, _, cx| {
-                // A touch that reached the grid means the device has one: the
-                // key bar belongs on it.
                 if matches!(ev.touch_phase, gpui_kit::TouchPhase::Started) {
                     this.touch = true;
                 }
@@ -1530,29 +1641,36 @@ impl Render for TerminalPane {
                     .cell()
                     .map(|cell| cell.height)
                     .unwrap_or(this.font_size);
-                let rows_up = wheel_rows_up(ev, row_height);
-                let max = this.screen.scrollback_len();
-                let next = (this.screen.offset_from_bottom() as i64 + rows_up).clamp(0, max as i64)
-                    as usize;
-                if next != this.screen.offset_from_bottom() {
-                    this.screen.scroll_to(next);
-                    cx.notify();
-                }
+                this.handle_scroll(ev, row_height, cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                     this.focus_handle.focus(window, cx);
-                    if ev.button == MouseButton::Left {
-                        let (vis_row, col) = this.pos_to_cell(ev.position);
-                        this.sel_anchor = Some(this.cell_to_content(vis_row, col));
-                        this.sel_cursor = this.sel_anchor;
-                        this.selecting = true;
-                        cx.notify();
+                    if ev.button != MouseButton::Left {
+                        return;
                     }
+                    if this.mouse_tracking() && !ev.modifiers.shift {
+                        let (vis_row, col) = this.pos_to_cell(ev.position);
+                        let mods = sgr_modifier_bits(&ev.modifiers);
+                        this.forward_sgr(0, vis_row, col, true, mods);
+                        this.mouse_forwarding_press = true;
+                        return;
+                    }
+                    let (vis_row, col) = this.pos_to_cell(ev.position);
+                    this.sel_anchor = Some(this.cell_to_content(vis_row, col));
+                    this.sel_cursor = this.sel_anchor;
+                    this.selecting = true;
+                    cx.notify();
                 }),
             )
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if this.mouse_forwarding_press && ev.dragging() {
+                    let (vis_row, col) = this.pos_to_cell(ev.position);
+                    let mods = sgr_modifier_bits(&ev.modifiers) | sgr_mods::MOTION;
+                    this.forward_sgr(0, vis_row, col, true, mods);
+                    return;
+                }
                 if this.selecting && ev.dragging() {
                     let (vis_row, col) = this.pos_to_cell(ev.position);
                     this.sel_cursor = Some(this.cell_to_content(vis_row, col));
@@ -1562,7 +1680,17 @@ impl Render for TerminalPane {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseUpEvent, _, cx| {
-                    if ev.button == MouseButton::Left && this.selecting {
+                    if ev.button != MouseButton::Left {
+                        return;
+                    }
+                    if this.mouse_forwarding_press {
+                        this.mouse_forwarding_press = false;
+                        let (vis_row, col) = this.pos_to_cell(ev.position);
+                        let mods = sgr_modifier_bits(&ev.modifiers);
+                        this.forward_sgr(0, vis_row, col, false, mods);
+                        return;
+                    }
+                    if this.selecting {
                         this.selecting = false;
                         cx.notify();
                     }
@@ -1777,6 +1905,49 @@ mod tests {
         assert_eq!(wheel_rows_up(&ev, -1.0), 0);
     }
 
+    fn arrow_bytes_respect_application_cursor_mode() {
+        assert_eq!(arrow_bytes(true, true), "\x1bOA", "up + DECCKM");
+        assert_eq!(arrow_bytes(true, false), "\x1b[A", "up + normal");
+        assert_eq!(arrow_bytes(false, true), "\x1bOB", "down + DECCKM");
+        assert_eq!(arrow_bytes(false, false), "\x1b[B", "down + normal");
+    }
+
+    #[::core::prelude::v1::test]
+    fn wheel_action_decision_table() {
+        use ActiveScreen::{Alternate, Primary};
+        assert_eq!(
+            wheel_action(false, Primary, false, false),
+            WheelAction::Scrollback,
+            "primary, no tracking -> scrollback"
+        );
+        assert_eq!(
+            wheel_action(false, Primary, true, false),
+            WheelAction::Sgr,
+            "primary, tracking -> SGR"
+        );
+        assert_eq!(
+            wheel_action(false, Alternate, false, true),
+            WheelAction::Arrow,
+            "alt, ?1007, no tracking -> arrows"
+        );
+        assert_eq!(
+            wheel_action(false, Alternate, true, true),
+            WheelAction::Sgr,
+            "alt, tracking -> SGR"
+        );
+        assert_eq!(
+            wheel_action(false, Alternate, false, false),
+            WheelAction::Ignore,
+            "alt, neither -> ignore"
+        );
+        assert_eq!(
+            wheel_action(true, Alternate, true, true),
+            WheelAction::Scrollback,
+            "shift -> local scrollback"
+        );
+    }
+
+    #[::core::prelude::v1::test]
     #[::core::prelude::v1::test]
     fn find_debounce_fires_at_most_twice_for_20_keystrokes_in_1s() {
         let mut debouncer = FindDebouncer::new(Duration::from_millis(FIND_DEBOUNCE_MS));
