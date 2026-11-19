@@ -41,6 +41,7 @@ fn pane_config(
         cwd: cwd.to_path_buf(),
         spec: fake_agent(),
         args: Vec::new(),
+        shell_path: None,
         size: TerminalSize {
             rows: 32,
             cols: 120,

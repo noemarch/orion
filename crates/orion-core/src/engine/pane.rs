@@ -76,6 +76,8 @@ pub struct PaneConfig {
     pub spec: LaunchSpec,
     /// The agent's own arguments, without the resume flags the spec adds: what a restart saves.
     pub args: Vec<String>,
+    /// The user-supplied shell executable, when the pane was opened from a custom path.
+    pub shell_path: Option<String>,
     pub size: TerminalSize,
 }
 
@@ -105,6 +107,7 @@ pub struct Pane {
     label: Mutex<String>,
     pub cwd: PathBuf,
     pub args: Vec<String>,
+    pub shell_path: Option<String>,
     pub started_at: DateTime<Utc>,
     session: Arc<PtySession>,
     state: Arc<Mutex<PaneState>>,
@@ -184,6 +187,7 @@ impl Pane {
             label: Mutex::new(config.label),
             cwd: config.cwd,
             args: config.args,
+            shell_path: config.shell_path,
             started_at: Utc::now(),
             session: Arc::new(session),
             state,
@@ -565,6 +569,9 @@ impl Pane {
             "revision": state.screen.revision(),
             "terminal_id": self.id,
             "scroll": state.screen.scroll_info(),
+            "pane_kind": if self.agent.is_shell() { "shell" } else { "agent" },
+            "agent_kind": self.agent.wire_kind(),
+            "shell_path": self.shell_path,
         })
     }
 
@@ -588,7 +595,15 @@ impl Pane {
             "completion_seq": state.completion_seq,
             "state_change_seq": state.state_change_seq,
             "interactive_ready": true,
+            "pane_kind": if self.agent.is_shell() { "shell" } else { "agent" },
+            "agent_kind": self.agent.wire_kind(),
+            "shell_path": self.shell_path,
         })
+    }
+
+    /// Whether this pane runs a user-invoked shell rather than an AI agent CLI.
+    pub fn is_shell(&self) -> bool {
+        self.agent.is_shell()
     }
 
     pub fn wait_exit(&self) -> Option<i32> {
@@ -633,15 +648,16 @@ const DETECT_QUIET: Duration = Duration::from_millis(120);
 
 /// Whether this agent's turn state can be read from its grid.
 fn agent_uses_grid_status(agent: AgentKind) -> bool {
-    !matches!(
-        agent,
-        AgentKind::Omo
-            | AgentKind::Omp
-            | AgentKind::Pi
-            | AgentKind::Hermes
-            | AgentKind::Grok
-            | AgentKind::Cursor
-    )
+    !agent.is_shell()
+        && !matches!(
+            agent,
+            AgentKind::Omo
+                | AgentKind::Omp
+                | AgentKind::Pi
+                | AgentKind::Hermes
+                | AgentKind::Grok
+                | AgentKind::Cursor
+        )
 }
 
 /// Follows one pane's output and scans the grid once it goes quiet, off the PTY reader thread.

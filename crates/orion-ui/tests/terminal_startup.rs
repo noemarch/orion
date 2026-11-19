@@ -110,6 +110,7 @@ fn measure(
             cwd,
             spec,
             args: Vec::new(),
+            shell_path: None,
             size: TerminalSize {
                 rows: 32,
                 cols: 120,

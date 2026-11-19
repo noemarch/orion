@@ -28,6 +28,9 @@ pub struct SavedPane {
     /// Claude's session id, when it was learned: a restart resumes that conversation.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// The user-supplied shell executable, when the pane was opened from a custom path.
+    #[serde(default)]
+    pub shell_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,9 +223,15 @@ fn predecessor_config_dir() -> Option<PathBuf> {
 /// The saved pane as a runnable launch: a saved session id wins, else the directory's latest
 /// conversation (`--continue`), matching what a user would type after a restart.
 pub fn spec_for_saved_pane(pane: &SavedPane) -> Result<LaunchSpec> {
+    if let Some(path) = pane.shell_path.as_deref().filter(|path| !path.is_empty()) {
+        return LaunchSpec::for_shell_path(Path::new(path), &pane.args);
+    }
     let kind = AgentKind::from_wire(&pane.agent).ok_or_else(|| {
         OrionError::AgentNotFound(format!("'{}' is not an agent Orion starts", pane.agent))
     })?;
+    if let Some(shell) = kind.as_shell() {
+        return LaunchSpec::for_shell(shell, &pane.args);
+    }
     LaunchSpec::for_agent(
         kind,
         &pane.args,
@@ -271,6 +280,7 @@ mod tests {
                 cwd: "C:\\rust-projects\\orion".into(),
                 args: vec!["--permission-mode".into(), "bypassPermissions".into()],
                 session_id: Some("abc".into()),
+                shell_path: None,
             }],
             focused_pane_id: Some("p1".into()),
         };
@@ -297,6 +307,45 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_shell_pane_never_gets_resume_flags() {
+        #[cfg(windows)]
+        let agent = "powershell";
+        #[cfg(not(windows))]
+        let agent = "bash";
+        let pane = SavedPane {
+            id: "p1".into(),
+            agent: agent.into(),
+            label: "shell".into(),
+            cwd: ".".into(),
+            args: vec!["-Extra".into()],
+            session_id: Some("some-session".into()),
+            shell_path: None,
+        };
+        let spec = spec_for_saved_pane(&pane).expect("shell spec");
+        assert!(!spec
+            .args
+            .iter()
+            .any(|arg| arg == "--resume" || arg == "--continue"));
+        assert!(spec.args.iter().any(|arg| arg == "-Extra"));
+    }
+
+    #[test]
+    fn a_saved_shell_pane_with_a_custom_path_restores_from_that_path() {
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let pane = SavedPane {
+            id: "p1".into(),
+            agent: "cmd".into(),
+            label: "custom".into(),
+            cwd: ".".into(),
+            args: vec![],
+            session_id: None,
+            shell_path: Some(exe.to_string_lossy().to_string()),
+        };
+        let spec = spec_for_saved_pane(&pane).expect("custom shell spec");
+        assert_eq!(spec.program, exe);
+    }
+
+    #[test]
     fn an_unknown_agent_in_the_saved_session_is_refused_not_guessed() {
         let pane = SavedPane {
             id: "p1".into(),
@@ -305,6 +354,7 @@ mod tests {
             cwd: ".".into(),
             args: vec![],
             session_id: None,
+            shell_path: None,
         };
         assert!(spec_for_saved_pane(&pane).is_err());
     }

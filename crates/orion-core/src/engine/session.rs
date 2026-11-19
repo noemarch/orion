@@ -308,6 +308,7 @@ impl SessionState {
                 cwd: pane.cwd.to_string_lossy().to_string(),
                 args: pane.args.clone(),
                 session_id: None,
+                shell_path: pane.shell_path.clone(),
             });
         }
         saved
@@ -512,6 +513,7 @@ mod tests {
                         args: vec!["--list".to_string()],
                     },
                     args: Vec::new(),
+                    shell_path: None,
                     size: crate::TerminalSize {
                         rows: 32,
                         cols: 120,

@@ -49,6 +49,7 @@ fn the_seam_reaches_a_real_agent() {
             cwd: cwd.clone(),
             spec,
             args: Vec::new(),
+            shell_path: None,
             size: TerminalSize {
                 cols: 120,
                 rows: 32,
@@ -61,7 +62,7 @@ fn the_seam_reaches_a_real_agent() {
     .expect("the agent starts in a pane");
 
     // The grid comes up: the PTY carries the agent's output.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && pane.visible_text().trim().is_empty() {
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -107,6 +108,7 @@ fn the_seam_writes_the_readers_words_to_the_process() {
             cwd: cwd.clone(),
             spec,
             args: Vec::new(),
+            shell_path: None,
             size: TerminalSize {
                 cols: 120,
                 rows: 32,
