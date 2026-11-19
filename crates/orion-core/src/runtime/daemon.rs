@@ -301,6 +301,10 @@ fn push_outbound_with(
         return;
     }
     let mut frame = frame;
+    // Back off from 1ms to a 25ms ceiling: a stalled client costs ~40 wakeups/s instead of
+    // 1000, while the pause never runs past the deadline.
+    const MAX_BACKOFF: Duration = Duration::from_millis(25);
+    let mut backoff = Duration::from_millis(1);
     loop {
         match out_tx.try_send(frame) {
             Ok(()) => return,
@@ -312,7 +316,8 @@ fn push_outbound_with(
                     let _ = dead_tx.send(());
                     return;
                 }
-                clock.pause((timeout - waited).min(Duration::from_millis(1)));
+                clock.pause(backoff.min(timeout - waited));
+                backoff = (backoff * 2).min(MAX_BACKOFF);
             }
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
         }
