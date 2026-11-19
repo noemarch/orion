@@ -187,6 +187,20 @@ fn scroll_offset_for_thumb(y: f32, track_h: f32, thumb_h: f32, max_offset: usize
     (fraction * max_offset as f32).round() as usize
 }
 
+/// Map a GPUI scroll event to signed rows scrolled UP into history: positive
+/// means wheel up (toward older output), negative means wheel down (toward the
+/// live prompt). Both `Lines` and `Pixels` deltas preserve the platform sign,
+/// so one formula serves both. On Windows, Shift redirects the vertical wheel
+/// into `delta.x`, so read that axis when Shift is held.
+fn wheel_rows_up(ev: &ScrollEvent, row_height: f32) -> i64 {
+    if row_height <= 0.0 {
+        return 0;
+    }
+    let delta = ev.delta.pixel_delta(px(row_height));
+    let value = f32::from(if ev.modifiers.shift { delta.x } else { delta.y });
+    (value / row_height).round() as i64
+}
+
 pub struct TerminalPane {
     screen: Box<dyn TerminalEngine>,
     focus_handle: FocusHandle,
@@ -1516,11 +1530,10 @@ impl Render for TerminalPane {
                     .cell()
                     .map(|cell| cell.height)
                     .unwrap_or(this.font_size);
-                let delta = ev.delta.pixel_delta(px(row_height));
-                let lines = (f32::from(delta.y) / row_height).round() as i64;
+                let rows_up = wheel_rows_up(ev, row_height);
                 let max = this.screen.scrollback_len();
-                let next =
-                    (this.screen.offset_from_bottom() as i64 - lines).clamp(0, max as i64) as usize;
+                let next = (this.screen.offset_from_bottom() as i64 + rows_up).clamp(0, max as i64)
+                    as usize;
                 if next != this.screen.offset_from_bottom() {
                     this.screen.scroll_to(next);
                     cx.notify();
@@ -1689,6 +1702,79 @@ mod tests {
         assert_eq!(scroll_offset_for_thumb(10.0, 100.0, 100.0, 1000), 0);
         assert_eq!(scroll_offset_for_thumb(10.0, 100.0, 120.0, 1000), 0);
         assert_eq!(scroll_offset_for_thumb(10.0, 100.0, 20.0, 0), 0);
+    }
+
+    fn scroll_ev(delta: gpui_kit::ScrollDelta, shift: bool) -> ScrollEvent {
+        ScrollEvent {
+            position: gpui_kit::point(px(0.), px(0.)),
+            delta,
+            modifiers: gpui_kit::Modifiers {
+                shift,
+                ..Default::default()
+            },
+            touch_phase: gpui_kit::TouchPhase::default(),
+            source: gpui_kit::ScrollSource::Pointer,
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn wheel_rows_up_lines_delta_up_is_positive() {
+        let ev = scroll_ev(
+            gpui_kit::ScrollDelta::Lines(gpui_kit::point(0.0, 3.0)),
+            false,
+        );
+        assert_eq!(wheel_rows_up(&ev, 16.0), 3);
+    }
+
+    #[::core::prelude::v1::test]
+    fn wheel_rows_up_lines_delta_down_is_negative() {
+        let ev = scroll_ev(
+            gpui_kit::ScrollDelta::Lines(gpui_kit::point(0.0, -2.0)),
+            false,
+        );
+        assert_eq!(wheel_rows_up(&ev, 16.0), -2);
+    }
+
+    #[::core::prelude::v1::test]
+    fn wheel_rows_up_pixel_delta_up_is_positive() {
+        let ev = scroll_ev(
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(48.))),
+            false,
+        );
+        assert_eq!(wheel_rows_up(&ev, 16.0), 3);
+    }
+
+    #[::core::prelude::v1::test]
+    fn wheel_rows_up_pixel_delta_down_is_negative() {
+        let ev = scroll_ev(
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-32.))),
+            false,
+        );
+        assert_eq!(wheel_rows_up(&ev, 16.0), -2);
+    }
+
+    #[::core::prelude::v1::test]
+    fn wheel_rows_up_shift_reads_x_not_y() {
+        let lines = scroll_ev(
+            gpui_kit::ScrollDelta::Lines(gpui_kit::point(4.0, 99.0)),
+            true,
+        );
+        assert_eq!(wheel_rows_up(&lines, 16.0), 4);
+        let pixels = scroll_ev(
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(32.), px(999.))),
+            true,
+        );
+        assert_eq!(wheel_rows_up(&pixels, 16.0), 2);
+    }
+
+    #[::core::prelude::v1::test]
+    fn wheel_rows_up_zero_or_negative_row_height_is_zero() {
+        let ev = scroll_ev(
+            gpui_kit::ScrollDelta::Lines(gpui_kit::point(0.0, 3.0)),
+            false,
+        );
+        assert_eq!(wheel_rows_up(&ev, 0.0), 0);
+        assert_eq!(wheel_rows_up(&ev, -1.0), 0);
     }
 
     #[::core::prelude::v1::test]
