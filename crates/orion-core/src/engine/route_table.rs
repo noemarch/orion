@@ -25,7 +25,7 @@ use crate::engine::transcript_manager::TranscriptManager;
 use crate::engine::watcher::Watcher;
 use crate::engine::{expand_home, home_dir, PROTOCOL_VERSION};
 use crate::error::Result;
-use crate::protocol::{AgentKind, AgentStatus, TabLayout, TerminalSize};
+use crate::protocol::{AgentKind, AgentStatus, ShellKind, TabLayout, TerminalSize};
 
 /// The REST seam.
 pub struct RouteTable {
@@ -116,6 +116,7 @@ impl RouteTable {
             ("GET", "/api/machines") => Ok((200, self.machines())),
             ("GET", "/api/session") => Ok((200, json!({ "snapshot": self.snapshot_value() }))),
             ("GET", "/api/agents") => Ok((200, self.agents())),
+            ("GET", "/api/shells") => Ok((200, self.shells())),
             ("GET", "/api/integrations") => Ok((200, self.integrations())),
             ("GET", "/api/preferences") => self.get_preferences(),
             ("PUT", "/api/preferences") => self.put_preferences(body),
@@ -144,6 +145,7 @@ impl RouteTable {
             ("POST", "/api/tab/move") => self.move_tab(body),
             ("POST", "/api/pane/close") => self.close_pane(body),
             ("POST", "/api/pane/split") => self.split_pane(body),
+            ("POST", "/api/pane/shell") => self.create_shell_pane(body),
             ("POST", "/api/pane/zoom") => self.zoom_pane(body),
             ("POST", "/api/pane/swap") => self.swap_pane(body),
             ("POST", "/api/pane/resize") => self.resize_pane(body),
@@ -301,6 +303,21 @@ impl RouteTable {
             })
             .collect::<Vec<_>>();
         json!({ "agents": agents })
+    }
+
+    fn shells(&self) -> Value {
+        let shells = AgentRegistry::discover_shells()
+            .into_iter()
+            .map(|shell| {
+                json!({
+                    "kind": shell.kind.wire_kind(),
+                    "label": shell.name,
+                    "command": shell.command,
+                    "installed": shell.installed,
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({ "shells": shells })
     }
 
     fn integrations(&self) -> Value {
@@ -1135,6 +1152,178 @@ impl RouteTable {
         ))
     }
 
+    /// Opens a user-invoked shell terminal pane in an existing workspace. Shells are the one
+    /// deliberate exception to the agent-only rule; they never run agent status detection.
+    fn create_shell_pane(&self, body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
+        let (workspace_id, tab_id, workspace_cwd) = {
+            let session = self.session.read();
+            let workspace = if let Some(id) = body.get("workspace_id").and_then(Value::as_str) {
+                session.workspace_of(id)
+            } else if let Some(focused) = session.focused_pane.as_deref() {
+                session
+                    .panes
+                    .get(focused)
+                    .and_then(|pane| session.workspace_of(&pane.workspace_id))
+            } else {
+                session.workspaces.first()
+            }
+            .ok_or_else(|| {
+                api_error(
+                    400,
+                    "invalid_request",
+                    "No workspace is open. Create a workspace first.",
+                )
+            })?;
+            let tab_id = if workspace.active_tab.is_empty() {
+                workspace.tabs.first().map(|tab| tab.id.clone())
+            } else {
+                Some(workspace.active_tab.clone())
+            }
+            .ok_or_else(|| {
+                api_error(
+                    400,
+                    "invalid_request",
+                    "The workspace has no tab to host a shell pane.",
+                )
+            })?;
+            (workspace.id.clone(), tab_id, workspace.cwd.clone())
+        };
+
+        let cwd = match body.get("cwd").and_then(Value::as_str) {
+            Some(cwd) => resolve_cwd(Some(cwd))?,
+            None => workspace_cwd,
+        };
+
+        let shell = body.get("shell");
+        let custom_path = shell
+            .and_then(|shell| shell.get("path"))
+            .and_then(Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .map(str::to_string);
+        let raw_kind = shell
+            .and_then(|shell| shell.get("kind"))
+            .and_then(Value::as_str);
+
+        let (kind, spec, shell_path, label) = if let Some(path) = custom_path {
+            if !Path::new(&path).is_file() {
+                return Err(api_error(
+                    400,
+                    "shell_not_found",
+                    "The shell executable is not a file on this PC.",
+                ));
+            }
+            let kind = match raw_kind {
+                Some(raw) => ShellKind::from_wire(raw).ok_or_else(|| {
+                    api_error(400, "unknown_shell", "Orion does not start that shell.")
+                })?,
+                None => ShellKind::Cmd,
+            };
+            let spec = LaunchSpec::for_shell_path(Path::new(&path), &[]).map_err(|error| {
+                api_error(
+                    400,
+                    "shell_failed",
+                    &format!("The shell could not start: {error}"),
+                )
+            })?;
+            let label = body
+                .get("label")
+                .and_then(Value::as_str)
+                .filter(|label| !label.trim().is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    Path::new(&path)
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| kind.display_name().to_string());
+            (kind, spec, Some(path), label)
+        } else {
+            let raw_kind = raw_kind
+                .ok_or_else(|| api_error(400, "unknown_shell", "shell.kind is required."))?;
+            let kind = ShellKind::from_wire(raw_kind).ok_or_else(|| {
+                api_error(400, "unknown_shell", "Orion does not start that shell.")
+            })?;
+            let command = kind.default_command();
+            if find_in_path(command).is_none() {
+                return Err(api_error(
+                    400,
+                    "shell_not_found",
+                    &format!("'{command}' is not on this PC's PATH."),
+                ));
+            }
+            let spec = LaunchSpec::for_shell(kind, &[]).map_err(|error| {
+                api_error(
+                    400,
+                    "shell_failed",
+                    &format!("The shell could not start: {error}"),
+                )
+            })?;
+            let label = body
+                .get("label")
+                .and_then(Value::as_str)
+                .filter(|label| !label.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| kind.display_name().to_string());
+            (kind, spec, None, label)
+        };
+
+        let id = Uuid::new_v4().to_string();
+        self.spawn_pane(PaneConfig {
+            id: id.clone(),
+            workspace_id: workspace_id.clone(),
+            tab_id: tab_id.clone(),
+            agent: kind.into(),
+            label,
+            cwd,
+            spec,
+            args: Vec::new(),
+            shell_path,
+            size: TerminalSize {
+                rows: DEFAULT_SIZE.rows,
+                cols: DEFAULT_SIZE.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+        })
+        .map_err(|error| {
+            api_error(
+                400,
+                "shell_failed",
+                &format!("The shell could not start: {error}"),
+            )
+        })?;
+
+        // register_pane already focuses the new pane; make the tab membership explicit so a
+        // caller that races with another spawn still sees this pane as the active one.
+        {
+            let mut session = self.session.write();
+            for workspace in &mut session.workspaces {
+                if workspace.id != workspace_id {
+                    continue;
+                }
+                for tab in &mut workspace.tabs {
+                    if tab.id == tab_id {
+                        if !tab.panes.contains(&id) {
+                            tab.panes.push(id.clone());
+                        }
+                        tab.active_pane = id.clone();
+                    }
+                }
+            }
+            session.focused_pane = Some(id.clone());
+        }
+
+        Ok((
+            200,
+            json!({
+                "pane_id": id,
+                "workspace_id": workspace_id,
+                "shell": kind.wire_kind(),
+            }),
+        ))
+    }
+
     fn close_pane(&self, body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
         let pane_id = body
             .get("pane_id")
@@ -1247,8 +1436,12 @@ impl RouteTable {
         };
 
         let new_pane_id = Uuid::new_v4().to_string();
-        let spec = LaunchSpec::for_agent(agent, &args, None, false)
-            .map_err(|error| api_error(400, "agent_failed", &format!("{error}")))?;
+        let spec = if let Some(shell) = agent.as_shell() {
+            LaunchSpec::for_shell(shell, &args)
+        } else {
+            LaunchSpec::for_agent(agent, &args, None, false)
+        }
+        .map_err(|error| api_error(400, "agent_failed", &format!("{error}")))?;
         let on_event = self.on_event();
         let new_pane = Pane::spawn(
             PaneConfig {
@@ -1260,6 +1453,7 @@ impl RouteTable {
                 cwd,
                 spec,
                 args,
+                shell_path: None,
                 size: DEFAULT_SIZE,
             },
             on_event,
@@ -2153,6 +2347,7 @@ impl RouteTable {
                 cwd: request.cwd,
                 spec,
                 args: request.args,
+                shell_path: None,
                 size,
             },
             on_event,
@@ -2213,6 +2408,7 @@ impl RouteTable {
                     cwd,
                     spec,
                     args: pane.args.clone(),
+                    shell_path: pane.shell_path.clone(),
                     size: DEFAULT_SIZE,
                 },
                 on_event,
@@ -2300,6 +2496,13 @@ fn agent_request(body: &Value) -> std::result::Result<AgentRequest, (u16, Value)
         .ok_or_else(|| api_error(400, "invalid_request", "agent.kind is required."))?;
     let kind = AgentKind::from_wire(kind)
         .ok_or_else(|| api_error(400, "unknown_agent", "Orion does not start that agent."))?;
+    if kind.is_shell() {
+        return Err(api_error(
+            400,
+            "unknown_agent",
+            "Use POST /api/pane/shell to open a shell terminal.",
+        ));
+    }
     let command = kind.default_command();
     if find_in_path(command).is_none() {
         return Err(api_error(
@@ -2413,4 +2616,171 @@ struct PaneRequest {
     args: Vec<String>,
     session: Option<String>,
     resume_last: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::connection_registry::ConnectionRegistry;
+    use crate::engine::devices::DeviceStore;
+    use crate::engine::push::PushService;
+    use crate::engine::session::{SessionState, Tab, Workspace};
+    use crate::engine::transcript_manager::TranscriptManager;
+
+    fn test_routes() -> RouteTable {
+        let dir = std::env::temp_dir().join(format!("orion-routes-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let store = Store::at(dir);
+        let devices = DeviceStore::new(&store);
+        let push = PushService::new(&store);
+        RouteTable::new(
+            Arc::new(SessionState::new()),
+            Arc::new(TranscriptManager::new()),
+            Arc::new(store),
+            Arc::new(push),
+            Arc::new(devices),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(json!({}))),
+            "test".to_string(),
+            Arc::new(ConnectionRegistry::new()),
+        )
+    }
+
+    fn seed_workspace(routes: &RouteTable) {
+        let mut session = routes.session.write();
+        session.workspaces.push(Workspace {
+            id: "w1".into(),
+            label: "w".into(),
+            cwd: std::env::current_dir().expect("cwd"),
+            number: 1,
+            tabs: vec![Tab {
+                id: "t1".into(),
+                label: "t".into(),
+                number: 1,
+                panes: Vec::new(),
+                active_pane: String::new(),
+                layout: TabLayout::Single,
+                zoomed_pane: None,
+                split_ratios: HashMap::new(),
+            }],
+            active_tab: "t1".into(),
+        });
+    }
+
+    fn harmless_executable() -> PathBuf {
+        #[cfg(windows)]
+        {
+            std::env::var_os("COMSPEC")
+                .map(PathBuf::from)
+                .or_else(|| find_in_path("cmd"))
+                .expect("cmd.exe on Windows")
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/bin/sh")
+        }
+    }
+
+    #[test]
+    fn shells_route_lists_five_shells() {
+        let routes = test_routes();
+        let (status, body) = routes.http("GET", "/api/shells", &json!({}));
+        assert_eq!(status, 200);
+        let shells = body["shells"].as_array().expect("shells array");
+        assert_eq!(shells.len(), 5);
+        assert_eq!(shells[0]["kind"], "powershell");
+        assert_eq!(shells[1]["kind"], "pwsh");
+        assert_eq!(shells[2]["kind"], "bash");
+        assert_eq!(shells[3]["kind"], "cmd");
+        assert_eq!(shells[4]["kind"], "zsh");
+    }
+
+    #[test]
+    fn create_shell_pane_rejects_unknown_shell() {
+        let routes = test_routes();
+        seed_workspace(&routes);
+        let (status, body) = routes.http(
+            "POST",
+            "/api/pane/shell",
+            &json!({ "workspace_id": "w1", "shell": { "kind": "not-a-shell" } }),
+        );
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "unknown_shell");
+    }
+
+    #[test]
+    fn create_shell_pane_rejects_a_missing_custom_path() {
+        let routes = test_routes();
+        seed_workspace(&routes);
+        let missing = std::env::temp_dir().join(format!("orion-missing-shell-{}", Uuid::new_v4()));
+        let (status, body) = routes.http(
+            "POST",
+            "/api/pane/shell",
+            &json!({
+                "workspace_id": "w1",
+                "shell": { "path": missing.to_string_lossy().to_string() }
+            }),
+        );
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "shell_not_found");
+    }
+
+    #[test]
+    fn create_shell_pane_with_a_custom_path_carries_shell_path() {
+        let routes = test_routes();
+        seed_workspace(&routes);
+        let exe = harmless_executable();
+        let path = exe.to_string_lossy().to_string();
+        let (status, body) = routes.http(
+            "POST",
+            "/api/pane/shell",
+            &json!({ "workspace_id": "w1", "shell": { "path": path } }),
+        );
+        assert_eq!(status, 200, "{body}");
+        let pane_id = body["pane_id"].as_str().expect("pane id").to_string();
+
+        let snapshot = routes.snapshot_value();
+        let pane = snapshot["panes"]
+            .as_array()
+            .expect("panes array")
+            .iter()
+            .find(|pane| pane["pane_id"].as_str() == Some(pane_id.as_str()))
+            .expect("the new pane is in the snapshot");
+        assert_eq!(pane["shell_path"], path);
+        assert_eq!(pane["pane_kind"], "shell");
+
+        let saved = routes.session.to_saved();
+        let saved_pane = saved
+            .panes
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .expect("the new pane is saved");
+        assert_eq!(saved_pane.shell_path.as_deref(), Some(path.as_str()));
+        let spec = spec_for_saved_pane(saved_pane).expect("the shell restores from its path");
+        assert_eq!(spec.program, exe);
+    }
+
+    #[test]
+    fn create_shell_pane_requires_a_workspace() {
+        let routes = test_routes();
+        let (status, body) = routes.http(
+            "POST",
+            "/api/pane/shell",
+            &json!({ "shell": { "kind": "pwsh" } }),
+        );
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn agent_request_rejects_shell_kind() {
+        for kind in ["pwsh", "zsh"] {
+            let (status, body) = match agent_request(&json!({ "agent": { "kind": kind } })) {
+                Ok(_) => panic!("shells are not agents"),
+                Err(error) => error,
+            };
+            assert_eq!(status, 400);
+            assert_eq!(body["error"]["code"], "unknown_agent");
+        }
+    }
 }
