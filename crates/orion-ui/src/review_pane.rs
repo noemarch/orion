@@ -21,6 +21,13 @@ use gpui_kit::*;
 use gpui_kit::{
     div, px, Context, ElementId, Entity, Render, Rgba, ScrollHandle, Subscription, Window,
 };
+use std::cell::RefCell;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+/// Tokenised patch rows together with the source they were built from, so a
+/// hash collision cannot make one patch render another patch's rows.
+type RowsCache = Option<(u64, String, Arc<Vec<ReviewRow>>)>;
 
 /// The monospace face the diff gutter, code and tab counts read in.
 const MONO: &str = "JetBrains Mono";
@@ -71,6 +78,12 @@ pub struct ReviewRow {
     pub new_no: Option<usize>,
     pub new_text: String,
     pub kind: RowKind,
+}
+
+fn text_hash(text: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Pair classified patch lines into the review grid's rows.
@@ -210,6 +223,9 @@ pub struct ReviewPane {
     scroll: ScrollHandle,
     /// Re-render when the Changes view answers a fetch or changes selection.
     _changes_subscription: Subscription,
+    /// The one patch on screen, tokenised once until its text changes. The
+    /// source is kept beside the hash so a collision cannot show a wrong diff.
+    rows_cache: RefCell<RowsCache>,
 }
 
 impl ReviewPane {
@@ -221,6 +237,7 @@ impl ReviewPane {
             selected: 0,
             scroll: ScrollHandle::new(),
             _changes_subscription: subscription,
+            rows_cache: RefCell::new(None),
         }
     }
 
@@ -273,7 +290,7 @@ impl ReviewPane {
         list: Option<&RepoDiffFileList>,
         files: &[RepoDiffFile],
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         let scale = theme.density_scale();
         let mut row = div()
@@ -358,7 +375,7 @@ impl ReviewPane {
         files: &[RepoDiffFile],
         active: Option<usize>,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         let scale = theme.density_scale();
         let mut strip = div()
@@ -735,7 +752,23 @@ impl ReviewPane {
             .child(head);
 
         if let Some(text) = patch.patch_text() {
-            let rows = build_rows(&diff_line_numbers(text));
+            let key = text_hash(text);
+            let rows = {
+                let mut cache = self.rows_cache.borrow_mut();
+                let hit = match cache.as_ref() {
+                    Some((cached_key, source, rows)) if *cached_key == key && source == text => {
+                        Some(Arc::clone(rows))
+                    }
+                    _ => None,
+                };
+                if let Some(rows) = hit {
+                    rows
+                } else {
+                    let rows = Arc::new(build_rows(&diff_line_numbers(text)));
+                    *cache = Some((key, text.to_string(), Arc::clone(&rows)));
+                    rows
+                }
+            };
             let mut grid = div().id("review-grid").flex().flex_col();
             for (sequence, row) in rows.iter().enumerate() {
                 grid = grid.child(self.render_row(&file.path, sequence, row, theme));
@@ -821,24 +854,18 @@ fn code_cell(
 impl Render for ReviewPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
-        let (list, patch, base, head) = {
-            let changes = self.changes.read(cx);
-            (
-                changes.file_list().cloned(),
-                changes.current_patch().cloned(),
-                changes.base().map(str::to_string),
-                changes.head().map(str::to_string),
-            )
-        };
-        let files = list
-            .as_ref()
-            .map(|list| list.files.clone())
-            .unwrap_or_default();
+        // Borrow the shared Changes data for this frame instead of cloning the
+        // whole patch and file list on every repaint.
+        let changes = self.changes.read(cx);
+        let list = changes.file_list();
+        let patch = changes.current_patch();
+        let base = changes.base();
+        let head = changes.head();
+        let files: &[RepoDiffFile] = list.map(|list| list.files.as_slice()).unwrap_or(&[]);
         let active = patch
-            .as_ref()
             .and_then(|patch| files.iter().position(|file| file.path == patch.file.path))
             .or_else(|| (self.selected < files.len()).then_some(self.selected));
-        let label = header_label(list.as_ref(), base.as_deref(), head.as_deref());
+        let label = header_label(list, base, head);
 
         div()
             .id("review-pane")
@@ -852,8 +879,8 @@ impl Render for ReviewPane {
             .rounded(px(theme.radius_panel()))
             .text_color(theme.text)
             .child(self.render_header(label, &theme))
-            .child(self.render_toolbar(list.as_ref(), &files, &theme, cx))
-            .child(self.render_tabs(&files, active, &theme, cx))
+            .child(self.render_toolbar(list, files, &theme, cx))
+            .child(self.render_tabs(files, active, &theme, cx))
             .child(
                 div()
                     .id("review-body")
@@ -862,7 +889,7 @@ impl Render for ReviewPane {
                     .min_h(px(0.0))
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .child(self.render_body(list.as_ref(), &files, patch.as_ref(), active, &theme)),
+                    .child(self.render_body(list, files, patch, active, &theme)),
             )
     }
 }
