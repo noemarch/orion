@@ -1,8 +1,82 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Supported AI Agent kinds in Orion.
-/// Orion orchestrates AI agent CLIs exclusively — never raw shell sessions.
+/// Shells Orion can open as a user-invoked terminal pane.
+///
+/// Shells are the one deliberate exception to the agent-only rule: they are opened only through
+/// `POST /api/pane/shell` and never run agent status detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShellKind {
+    PowerShell,
+    Pwsh,
+    Bash,
+    Cmd,
+    Zsh,
+}
+
+impl ShellKind {
+    pub const ALL: [Self; 5] = [
+        Self::PowerShell,
+        Self::Pwsh,
+        Self::Bash,
+        Self::Cmd,
+        Self::Zsh,
+    ];
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::PowerShell => "Windows PowerShell",
+            Self::Pwsh => "PowerShell 7",
+            Self::Bash => "Bash",
+            Self::Cmd => "Command Prompt",
+            Self::Zsh => "Zsh",
+        }
+    }
+
+    pub fn default_command(&self) -> &'static str {
+        match self {
+            Self::PowerShell => "powershell",
+            Self::Pwsh => "pwsh",
+            Self::Bash => "bash",
+            Self::Cmd => "cmd",
+            Self::Zsh => "zsh",
+        }
+    }
+
+    pub fn default_args(&self) -> &'static [&'static str] {
+        match self {
+            Self::PowerShell | Self::Pwsh => &["-NoLogo"],
+            Self::Bash | Self::Cmd | Self::Zsh => &[],
+        }
+    }
+
+    pub fn wire_kind(&self) -> &'static str {
+        match self {
+            Self::PowerShell => "powershell",
+            Self::Pwsh => "pwsh",
+            Self::Bash => "bash",
+            Self::Cmd => "cmd",
+            Self::Zsh => "zsh",
+        }
+    }
+
+    pub fn from_wire(kind: &str) -> Option<Self> {
+        Some(match kind {
+            "powershell" | "shell" => Self::PowerShell,
+            "pwsh" | "powershell7" => Self::Pwsh,
+            "bash" => Self::Bash,
+            "cmd" => Self::Cmd,
+            "zsh" => Self::Zsh,
+            _ => return None,
+        })
+    }
+}
+
+/// Kinds of program a pane may launch.
+///
+/// A pane may launch an agent CLI or, as the one deliberate exception, a shell. Shells are opened
+/// only through `POST /api/pane/shell` and never run agent status detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
@@ -17,6 +91,11 @@ pub enum AgentKind {
     Pi,
     Hermes,
     Devin,
+    PowerShell,
+    Pwsh,
+    Bash,
+    Cmd,
+    Zsh,
 }
 
 impl AgentKind {
@@ -33,6 +112,11 @@ impl AgentKind {
             Self::Pi => "pi",
             Self::Hermes => "Hermes",
             Self::Devin => "Devin CLI",
+            Self::PowerShell => ShellKind::PowerShell.display_name(),
+            Self::Pwsh => ShellKind::Pwsh.display_name(),
+            Self::Bash => ShellKind::Bash.display_name(),
+            Self::Cmd => ShellKind::Cmd.display_name(),
+            Self::Zsh => ShellKind::Zsh.display_name(),
         }
     }
 
@@ -49,6 +133,11 @@ impl AgentKind {
             Self::Pi => "pi",
             Self::Hermes => "hermes",
             Self::Devin => "devin",
+            Self::PowerShell => ShellKind::PowerShell.default_command(),
+            Self::Pwsh => ShellKind::Pwsh.default_command(),
+            Self::Bash => ShellKind::Bash.default_command(),
+            Self::Cmd => ShellKind::Cmd.default_command(),
+            Self::Zsh => ShellKind::Zsh.default_command(),
         }
     }
 
@@ -67,6 +156,11 @@ impl AgentKind {
             Self::Pi => "pi",
             Self::Hermes => "hermes",
             Self::Devin => "devin",
+            Self::PowerShell => ShellKind::PowerShell.wire_kind(),
+            Self::Pwsh => ShellKind::Pwsh.wire_kind(),
+            Self::Bash => ShellKind::Bash.wire_kind(),
+            Self::Cmd => ShellKind::Cmd.wire_kind(),
+            Self::Zsh => ShellKind::Zsh.wire_kind(),
         }
     }
 
@@ -83,8 +177,33 @@ impl AgentKind {
             "pi" => Self::Pi,
             "hermes" => Self::Hermes,
             "devin" => Self::Devin,
+            "powershell" | "shell" => Self::PowerShell,
+            "pwsh" | "powershell7" => Self::Pwsh,
+            "bash" => Self::Bash,
+            "cmd" => Self::Cmd,
+            "zsh" => Self::Zsh,
             _ => return None,
         })
+    }
+
+    /// Whether this kind is a user-invoked shell rather than an AI agent CLI.
+    pub fn is_shell(&self) -> bool {
+        matches!(
+            self,
+            Self::PowerShell | Self::Pwsh | Self::Bash | Self::Cmd | Self::Zsh
+        )
+    }
+
+    /// The shell this kind represents, or `None` for an AI agent CLI.
+    pub fn as_shell(&self) -> Option<ShellKind> {
+        match self {
+            Self::PowerShell => Some(ShellKind::PowerShell),
+            Self::Pwsh => Some(ShellKind::Pwsh),
+            Self::Bash => Some(ShellKind::Bash),
+            Self::Cmd => Some(ShellKind::Cmd),
+            Self::Zsh => Some(ShellKind::Zsh),
+            _ => None,
+        }
     }
 }
 
@@ -387,7 +506,72 @@ pub struct PushPayload {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentStatus, ReportedStatus};
+    use super::{AgentKind, AgentStatus, ReportedStatus, ShellKind};
+
+    #[test]
+    fn shell_kinds_wire_names_round_trip() {
+        assert_eq!(ShellKind::ALL.len(), 5);
+        for kind in ShellKind::ALL {
+            assert_eq!(ShellKind::from_wire(kind.wire_kind()), Some(kind));
+            let agent: AgentKind = kind.into();
+            assert_eq!(AgentKind::from_wire(agent.wire_kind()), Some(agent));
+            assert_eq!(agent.as_shell(), Some(kind));
+        }
+    }
+
+    #[test]
+    fn zsh_round_trips_through_wire() {
+        assert_eq!(ShellKind::from_wire("zsh"), Some(ShellKind::Zsh));
+        assert_eq!(ShellKind::Zsh.wire_kind(), "zsh");
+        assert_eq!(ShellKind::Zsh.display_name(), "Zsh");
+        assert_eq!(ShellKind::Zsh.default_command(), "zsh");
+        assert_eq!(AgentKind::from_wire("zsh"), Some(AgentKind::Zsh));
+        assert_eq!(AgentKind::Zsh.wire_kind(), "zsh");
+        assert_eq!(AgentKind::Zsh.as_shell(), Some(ShellKind::Zsh));
+        assert!(AgentKind::Zsh.is_shell());
+    }
+
+    #[test]
+    fn shell_kind_from_wire_accepts_aliases() {
+        assert_eq!(ShellKind::from_wire("shell"), Some(ShellKind::PowerShell));
+        assert_eq!(ShellKind::from_wire("powershell7"), Some(ShellKind::Pwsh));
+        assert_eq!(AgentKind::from_wire("shell"), Some(AgentKind::PowerShell));
+        assert_eq!(AgentKind::from_wire("powershell7"), Some(AgentKind::Pwsh));
+        assert_eq!(ShellKind::from_wire("nope"), None);
+    }
+
+    #[test]
+    fn shell_kind_default_args() {
+        assert_eq!(ShellKind::PowerShell.default_args(), &["-NoLogo"]);
+        assert_eq!(ShellKind::Pwsh.default_args(), &["-NoLogo"]);
+        assert!(ShellKind::Bash.default_args().is_empty());
+        assert!(ShellKind::Cmd.default_args().is_empty());
+        assert!(ShellKind::Zsh.default_args().is_empty());
+    }
+
+    #[test]
+    fn is_shell_is_true_only_for_shell_kinds() {
+        for kind in ShellKind::ALL {
+            let agent: AgentKind = kind.into();
+            assert!(agent.is_shell(), "{agent:?} should be a shell");
+        }
+        for agent in [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Antigravity,
+            AgentKind::OpenCode,
+            AgentKind::Cursor,
+            AgentKind::Grok,
+            AgentKind::Omp,
+            AgentKind::Omo,
+            AgentKind::Pi,
+            AgentKind::Hermes,
+            AgentKind::Devin,
+        ] {
+            assert!(!agent.is_shell(), "{agent:?} should not be a shell");
+            assert_eq!(agent.as_shell(), None);
+        }
+    }
 
     #[test]
     fn agent_status_wire_names_round_trip() {
