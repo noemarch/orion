@@ -2,14 +2,16 @@
 //!
 //! PTY bytes are text, not a picture: the same bytes the shell draws feed this grid, so the
 //! server can read a pane (chat lens, prompt detection, assistant status) without a second
-//! process. `vt100` owns the escape-sequence state machine and the scrollback ring; this
+//! process. `libghostty-vt` owns the escape-sequence state machine and the scrollback ring; this
 //! module adds the revision counter, the plain-text views and the small selection/find surface the
 //! HTTP routes expose.
 
 use std::num::NonZeroU16;
 
+use libghostty_vt::render::{Color, RenderState, RenderedCell, Terminal};
 use serde_json::{json, Value};
 
+use crate::ghostty_extra;
 use crate::terminal_engine::FindMatch;
 
 /// History rows kept per pane. A busy agent can emit hundreds of thousands of rows; the ring
@@ -31,12 +33,12 @@ pub enum TermColor {
     Rgb(u8, u8, u8),
 }
 
-impl From<vt100::Color> for TermColor {
-    fn from(color: vt100::Color) -> Self {
+impl From<Color> for TermColor {
+    fn from(color: Color) -> Self {
         match color {
-            vt100::Color::Default => Self::Default,
-            vt100::Color::Idx(index) => Self::Indexed(index),
-            vt100::Color::Rgb(red, green, blue) => Self::Rgb(red, green, blue),
+            Color::Default => Self::Default,
+            Color::Indexed(index) => Self::Indexed(index),
+            Color::Rgb(red, green, blue) => Self::Rgb(red, green, blue),
         }
     }
 }
@@ -63,18 +65,48 @@ pub struct TermCell {
 }
 
 impl TermCell {
-    fn from_vt100(cell: &vt100::Cell) -> Self {
+    fn from_rendered(cell: &RenderedCell) -> Self {
         Self {
-            text: cell.contents().to_string(),
-            fg: cell.fgcolor().into(),
-            bg: cell.bgcolor().into(),
-            bold: cell.bold(),
-            dim: cell.dim(),
-            italic: cell.italic(),
-            underline: cell.underline(),
-            inverse: cell.inverse(),
-            wide: cell.is_wide(),
-            wide_continuation: cell.is_wide_continuation(),
+            text: cell.graphemes.clone(),
+            fg: cell.fg.into(),
+            bg: cell.bg.into(),
+            bold: cell.bold,
+            dim: cell.dim,
+            italic: cell.italic,
+            underline: cell.underline,
+            inverse: cell.inverse,
+            wide: cell.wide,
+            wide_continuation: cell.wide_continuation,
+        }
+    }
+}
+
+/// One row held by the Rust-side mirror of the grid: its plain text, its soft-wrap flag and its
+/// styled cells. The mirror is fed from ghostty's render state on every mutation so reads never
+/// have to walk the scrollback ring one `grid_ref` at a time.
+#[derive(Clone)]
+struct CachedRow {
+    text: String,
+    wrapped: bool,
+    cells: Vec<TermCell>,
+}
+
+impl CachedRow {
+    fn from_rendered(cells: Vec<TermCell>) -> Self {
+        let wrapped = !cells.is_empty()
+            && cells
+                .iter()
+                .all(|cell| cell.wide_continuation || !cell.text.trim().is_empty());
+        let mut text = String::new();
+        for cell in &cells {
+            if !cell.wide_continuation {
+                text.push_str(&cell.text);
+            }
+        }
+        Self {
+            text: text.trim_end().to_string(),
+            wrapped,
+            cells,
         }
     }
 }
@@ -82,26 +114,44 @@ impl TermCell {
 /// One terminal's parsed state. Every mutation bumps `revision`, so a client can tell a still
 /// screen from a redrawn one without diffing text.
 pub struct ScreenState {
-    parser: vt100::Parser,
+    terminal: Terminal,
+    render: RenderState,
     revision: u64,
     /// Where the last scroll request put the shared viewport, in rows above the live bottom. The
-    /// parser itself is never left offset: reads, status detection and prompt detection always see
+    /// terminal itself is never left offset: reads, status detection and prompt detection always see
     /// the live screen, and a scroll produces one repaint for the client that asked.
     scroll_offset: usize,
     /// Set by `process` when the ring was already at capacity before the feed: rows may have
-    /// scrolled off the top, shifting every content coordinate by an amount vt100 does not
+    /// scrolled off the top, shifting every content coordinate by an amount ghostty does not
     /// expose. Callers holding content-coordinate state (selection) must treat it as stale.
     ring_wrapped: bool,
+    /// The full logical row list, oldest first: scrollback tail followed by the live screen.
+    rows: Vec<CachedRow>,
 }
 
 impl ScreenState {
     pub fn new(rows: u16, cols: u16) -> Self {
-        Self {
-            parser: vt100::Parser::new(nonzero(rows), nonzero(cols), SCROLLBACK_ROWS),
+        let (rows, cols) = (nonzero(rows).get(), nonzero(cols).get());
+        let mut terminal = Terminal::new(cols, rows).expect("ghostty terminal creation failed");
+        ghostty_extra::configure(
+            terminal.as_raw() as ghostty_extra::RawTerminal,
+            SCROLLBACK_ROWS * 2,
+            64 * 1024 * 1024,
+            64 * 1024,
+            true,
+        );
+        let mut render = RenderState::new().expect("ghostty render state creation failed");
+        render.update(&mut terminal);
+        let mut state = Self {
+            terminal,
+            render,
             revision: 0,
             scroll_offset: 0,
             ring_wrapped: false,
-        }
+            rows: Vec::new(),
+        };
+        state.rows = state.all_rows();
+        state
     }
 
     /// Feeds decoded text to the grid. Returns the new revision.
@@ -114,18 +164,43 @@ impl ScreenState {
     /// The bytes go to the parser as they are: a multi-byte character split
     /// across two reads is the parser's business, not the caller's.
     pub fn process_bytes(&mut self, bytes: &[u8]) -> u64 {
-        let at_capacity = self.scrollback_len() >= SCROLLBACK_ROWS;
-        self.parser.process(bytes);
+        let before = scrollback_len(&self.render);
+        let at_capacity = before >= SCROLLBACK_ROWS;
+        let screen_rows = usize::from(self.render.frame().size().0).max(1);
+        self.terminal.write(bytes);
+        self.render.update(&mut self.terminal);
+        let after = scrollback_len(&self.render);
         self.revision += 1;
-        // Conservative: any mutation while the ring is full may have dropped rows. vt100 keeps
-        // no public dropped-row counter, so callers must assume content coordinates shifted.
+        // Conservative: any mutation while the ring is full may have dropped rows. ghostty keeps
+        // no public dropped-row counter through this surface, so callers must assume content
+        // coordinates shifted.
         self.ring_wrapped = at_capacity;
+        let live = read_live(&self.render);
+        let keep = self
+            .rows
+            .len()
+            .saturating_sub(screen_rows)
+            .min(after)
+            .min(SCROLLBACK_ROWS);
+        self.rows.truncate(keep);
+        if after > before {
+            let grown = self.read_scrolled(after - before, after);
+            let grown_len = grown.len();
+            let room = SCROLLBACK_ROWS.saturating_sub(keep);
+            self.rows
+                .extend(grown.into_iter().skip(grown_len.saturating_sub(room)));
+        }
+        self.rows.extend(live);
         self.revision
     }
 
-    /// Resizes the grid; the parser moves rows that fall off the top into scrollback.
+    /// Resizes the grid; rows that fall off the top move into scrollback.
     pub fn resize(&mut self, rows: u16, cols: u16) -> u64 {
-        self.parser.set_size(nonzero(rows), nonzero(cols));
+        let (rows, cols) = (nonzero(rows).get(), nonzero(cols).get());
+        let status = self.terminal.resize(cols, rows, 1, 1);
+        assert!(status.is_ok(), "ghostty resize failed: {status:?}");
+        self.render.update(&mut self.terminal);
+        self.rows = self.all_rows();
         self.revision += 1;
         self.ring_wrapped = false;
         self.revision
@@ -133,8 +208,9 @@ impl ScreenState {
 
     /// Blanks the grid and drops its history: the pane keeps its size, the agent keeps running.
     pub fn clear(&mut self) {
-        let (rows, cols) = self.size();
-        self.parser = vt100::Parser::new(nonzero(rows), nonzero(cols), SCROLLBACK_ROWS);
+        self.terminal.reset();
+        self.render.update(&mut self.terminal);
+        self.rows = self.all_rows();
         self.scroll_offset = 0;
         self.revision += 1;
         self.ring_wrapped = false;
@@ -151,26 +227,25 @@ impl ScreenState {
     }
 
     pub fn size(&self) -> (u16, u16) {
-        let (rows, cols) = self.parser.screen().size();
-        (rows.get(), cols.get())
+        self.render.frame().size()
     }
 
     pub fn scrollback_len(&self) -> usize {
-        self.parser.screen().scrollback_len()
+        let screen_rows = usize::from(self.render.frame().size().0).max(1);
+        self.rows.len().saturating_sub(screen_rows)
     }
 
     pub fn offset_from_bottom(&self) -> usize {
         self.scroll_offset.min(self.scrollback_len())
     }
 
-    /// Moves the shared viewport and returns the repaint for it. The parser goes back to the live
+    /// Moves the shared viewport and returns the repaint for it. The terminal goes back to the live
     /// bottom at once, so nothing reads a scrolled screen by accident.
     pub fn scroll_to(&mut self, offset: usize) -> String {
         let max = self.scrollback_len();
         self.scroll_offset = offset.min(max);
-        self.parser.screen_mut().set_scrollback(self.scroll_offset);
-        let replay = self.replay();
-        self.parser.screen_mut().set_scrollback(0);
+        let window = self.viewport(self.scroll_offset);
+        let replay = repaint(&window, self.cursor_position(), self.scroll_offset);
         self.revision += 1;
         replay
     }
@@ -186,63 +261,39 @@ impl ScreenState {
     }
 
     /// The rows the pane shows when its viewport sits `offset_from_bottom` rows above the live
-    /// bottom: the scrollback just above the live screen, then the live screen itself. Cheap
-    /// enough for a per-frame draw: it offsets the parser for the read, then restores the live
-    /// bottom, so no screen is cloned and the ring is not walked.
+    /// bottom: the scrollback just above the live screen, then the live screen itself. The terminal
+    /// viewport is moved for the read and restored to the live bottom immediately afterwards.
     pub fn viewport_rows(&mut self, offset_from_bottom: usize) -> Vec<String> {
-        let (_, cols) = self.size();
-        let offset = offset_from_bottom.min(self.scrollback_len());
-        self.parser.screen_mut().set_scrollback(offset);
-        let rows = self
-            .parser
-            .screen()
-            .rows(0, cols)
-            .map(|row| row.trim_end().to_string())
-            .collect();
-        self.parser.screen_mut().set_scrollback(0);
-        rows
+        self.viewport(offset_from_bottom)
+            .iter()
+            .map(|row| row.text.clone())
+            .collect()
     }
 
     /// The rows the pane shows when its viewport sits `offset_from_bottom` rows above the live
     /// bottom, with every cell's styling. Same rows as `viewport_rows`, so the terminal lens can
     /// paint colour without a second source of truth for what is on screen.
     pub fn viewport_cells(&mut self, offset_from_bottom: usize) -> Vec<Vec<TermCell>> {
-        let (rows, cols) = self.size();
-        let offset = offset_from_bottom.min(self.scrollback_len());
-        self.parser.screen_mut().set_scrollback(offset);
-        let cells = {
-            let screen = self.parser.screen();
-            (0..rows)
-                .map(|row| {
-                    (0..cols)
-                        .map(|col| {
-                            TermCell::from_vt100(
-                                screen
-                                    .cell(row, col)
-                                    .expect("row and col come from the grid's own size"),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect()
-        };
-        self.parser.screen_mut().set_scrollback(0);
-        cells
+        self.viewport(offset_from_bottom)
+            .iter()
+            .map(|row| row.cells.clone())
+            .collect()
     }
 
     /// The live screen's cursor cell as `(row, col)`, for the terminal lens's cursor.
     pub fn cursor_position(&self) -> (u16, u16) {
-        self.parser.screen().cursor_position()
+        let cursor = self.render.frame().cursor();
+        (cursor.y, cursor.x)
     }
 
     /// The whole visible screen as plain text, one trimmed line per row. Prompt detection reads
     /// this: it is what the agent's TUI draws, not what the transcript says.
     pub fn visible_text(&self) -> String {
-        let (_, cols) = self.size();
-        self.parser
-            .screen()
-            .rows(0, cols)
-            .map(|row| row.trim_end().to_string())
+        let screen_rows = usize::from(self.render.frame().size().0);
+        self.rows
+            .iter()
+            .skip(self.rows.len().saturating_sub(screen_rows))
+            .map(|row| row.text.as_str())
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -260,32 +311,11 @@ impl ScreenState {
     /// History rows with their soft-wrap flag, so the chat can rejoin a line the PTY wrapped.
     // PERF: full-ring clone, O(scrollback)
     pub fn rows_with_wrap(&self) -> Vec<(String, bool)> {
-        let (rows, cols) = self.size();
-        let rows = rows as usize;
-        let total_history = self.scrollback_len();
-        let mut out: Vec<(String, bool)> = Vec::with_capacity(total_history + rows);
-
-        let mut screen = self.parser.screen().clone();
-        let mut taken = 0usize;
-        while taken < total_history {
-            let take = rows.min(total_history - taken);
-            screen.set_scrollback(total_history - taken);
-            for (index, text) in screen.rows(0, cols).take(take).enumerate() {
-                out.push((
-                    text.trim_end().to_string(),
-                    screen.row_wrapped(index as u16),
-                ));
-            }
-            taken += take;
-        }
-        screen.set_scrollback(0);
-        for (index, text) in screen.rows(0, cols).enumerate() {
-            out.push((
-                text.trim_end().to_string(),
-                screen.row_wrapped(index as u16),
-            ));
-        }
-
+        let mut out: Vec<(String, bool)> = self
+            .rows
+            .iter()
+            .map(|row| (row.text.clone(), row.wrapped))
+            .collect();
         while out
             .last()
             .is_some_and(|(text, wrapped)| text.is_empty() && !*wrapped)
@@ -325,12 +355,15 @@ impl ScreenState {
     /// A complete repaint for a client that just attached. A fresh view starts blank, so it needs the
     /// cursor, every visible cell and the terminal modes, not a diff against a screen it lacks.
     pub fn replay(&self) -> String {
-        let screen = self.parser.screen();
-        format!(
-            "{}{}",
-            screen.contents_formatted(),
-            screen.input_mode_formatted()
-        )
+        let offset = self.offset_from_bottom();
+        let window = self.window(offset);
+        if window
+            .iter()
+            .all(|row| row.cells.iter().all(|cell| cell.text.trim().is_empty()))
+        {
+            return String::new();
+        }
+        repaint(&window, self.cursor_position(), offset)
     }
 
     /// Whether the live screen or history contains `needle` (case-insensitive).
@@ -426,6 +459,176 @@ impl ScreenState {
             }
         }
         text
+    }
+
+    /// The screen-sized window `offset_from_bottom` rows above the live bottom.
+    fn window(&self, offset_from_bottom: usize) -> Vec<CachedRow> {
+        let screen_rows = usize::from(self.render.frame().size().0).max(1);
+        let sbl = self.scrollback_len();
+        let offset = offset_from_bottom.min(sbl);
+        let end = self.rows.len().saturating_sub(offset);
+        let start = end.saturating_sub(screen_rows);
+        self.rows[start..end].to_vec()
+    }
+
+    /// Rebuild the mirror from ghostty's own scrollback, reading it in screen-sized viewport chunks.
+    fn all_rows(&mut self) -> Vec<CachedRow> {
+        let sbl = scrollback_len(&self.render);
+        let screen_rows = usize::from(self.render.frame().size().0).max(1);
+        let total = sbl + screen_rows;
+        let mut all = Vec::with_capacity(total);
+        let mut start = 0usize;
+        while start < total {
+            let offset = sbl.saturating_sub(start);
+            let chunk = self.viewport(offset);
+            let len = chunk.len();
+            let base = sbl - offset.min(sbl);
+            for (index, row) in chunk.into_iter().enumerate() {
+                let absolute = base + index;
+                if absolute >= start && absolute < total {
+                    all.push(row);
+                }
+            }
+            let next = base + len;
+            if next <= start {
+                break;
+            }
+            start = next;
+        }
+        let excess = all
+            .len()
+            .saturating_sub(SCROLLBACK_ROWS.saturating_add(screen_rows));
+        if excess > 0 {
+            all.drain(..excess);
+        }
+        all
+    }
+
+    /// Move the ghostty viewport for one read, then put it back at the live bottom. The absolute
+    /// row is `scrollback_rows - offset`, so the requested row becomes the top visible row.
+    fn viewport(&mut self, offset_from_bottom: usize) -> Vec<CachedRow> {
+        let scrollback = scrollback_len(&self.render);
+        let offset = offset_from_bottom.min(scrollback);
+        let raw = self.terminal.as_raw() as ghostty_extra::RawTerminal;
+        let status = ghostty_extra::scroll_to_row(raw, scrollback - offset);
+        assert_eq!(
+            status,
+            ghostty_extra::GHOSTTY_SUCCESS,
+            "ghostty viewport scroll failed"
+        );
+        self.render.update(&mut self.terminal);
+        let rows = read_live(&self.render);
+        let status = ghostty_extra::scroll_bottom(raw);
+        assert_eq!(
+            status,
+            ghostty_extra::GHOSTTY_SUCCESS,
+            "ghostty viewport restore failed"
+        );
+        self.render.update(&mut self.terminal);
+        rows
+    }
+
+    /// Read the newest `count` scrollback rows, oldest of them first.
+    fn read_scrolled(&mut self, count: usize, scrollback: usize) -> Vec<CachedRow> {
+        let mut rows = Vec::with_capacity(count);
+        let mut remaining = count.min(scrollback);
+        while remaining > 0 {
+            let chunk = self.viewport(remaining);
+            let take = remaining.min(chunk.len());
+            rows.extend(chunk.into_iter().take(take));
+            remaining -= take;
+        }
+        rows
+    }
+}
+
+/// Plain rows of the live screen, read from the render state in one pass.
+fn read_live(render: &RenderState) -> Vec<CachedRow> {
+    let frame = render.frame();
+    let (rows, _) = frame.size();
+    (0..rows)
+        .map(|y| {
+            let row = frame
+                .row(y)
+                .expect("row index comes from the frame's own size");
+            let cells = row.cells().map(TermCell::from_rendered).collect();
+            CachedRow::from_rendered(cells)
+        })
+        .collect()
+}
+
+fn repaint(rows: &[CachedRow], cursor: (u16, u16), offset: usize) -> String {
+    let mut out = String::from("\x1b[?25l\x1b[H\x1b[2J");
+    let mut current_fg: Option<TermColor> = None;
+    let mut current_bg: Option<TermColor> = None;
+    let mut flags = (false, false, false, false, false);
+    for (y, row) in rows.iter().enumerate() {
+        out.push_str(&format!("\x1b[{};1H", y + 1));
+        for cell in &row.cells {
+            if cell.wide_continuation {
+                continue;
+            }
+            let next = (
+                cell.bold,
+                cell.dim,
+                cell.italic,
+                cell.underline,
+                cell.inverse,
+            );
+            if next != flags {
+                out.push_str("\x1b[0m");
+                if cell.bold {
+                    out.push_str("\x1b[1m");
+                }
+                if cell.dim {
+                    out.push_str("\x1b[2m");
+                }
+                if cell.italic {
+                    out.push_str("\x1b[3m");
+                }
+                if cell.underline {
+                    out.push_str("\x1b[4m");
+                }
+                if cell.inverse {
+                    out.push_str("\x1b[7m");
+                }
+                flags = next;
+            }
+            if cell.fg != TermColor::Default && Some(cell.fg) != current_fg {
+                out.push_str(&sgr_color(38, cell.fg));
+                current_fg = Some(cell.fg);
+            } else if cell.fg == TermColor::Default && current_fg.is_some() {
+                out.push_str("\x1b[39m");
+                current_fg = None;
+            }
+            if cell.bg != TermColor::Default && Some(cell.bg) != current_bg {
+                out.push_str(&sgr_color(48, cell.bg));
+                current_bg = Some(cell.bg);
+            } else if cell.bg == TermColor::Default && current_bg.is_some() {
+                out.push_str("\x1b[49m");
+                current_bg = None;
+            }
+            out.push_str(&cell.text);
+        }
+    }
+    out.push_str(&format!(
+        "\x1b[{};{}H\x1b[?25h\x1b[?1l\x1b>",
+        cursor.0.saturating_sub(offset as u16) + 1,
+        cursor.1 + 1,
+    ));
+    out
+}
+
+/// Scrollback row count reported by the render state.
+fn scrollback_len(render: &RenderState) -> usize {
+    render.frame().scrollback_rows()
+}
+
+fn sgr_color(kind: u8, color: TermColor) -> String {
+    match color {
+        TermColor::Default => String::new(),
+        TermColor::Indexed(index) => format!("\x1b[{kind};5;{index}m"),
+        TermColor::Rgb(red, green, blue) => format!("\x1b[{kind};2;{red};{green};{blue}m"),
     }
 }
 
