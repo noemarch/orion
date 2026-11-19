@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::Duration;
@@ -31,6 +32,10 @@ use crate::runtime::terminal::Terminal;
 /// Bounded and modest: a program that ends is noticed within a tenth of a second, and a registry
 /// full of idle terminals costs one sleeping thread each and no CPU worth measuring.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How long a status change waits before the records are written back. Bursts of agent status
+/// flips collapse into one write instead of one full serialize each.
+const PERSIST_DEBOUNCE: Duration = Duration::from_millis(1000);
 
 /// What the registry says about a terminal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +100,11 @@ struct Inner {
     /// The next short id. Seeded from a random uuid, so ids do not repeat across restarts, and
     /// handed out by a counter, so two terminals in one daemon can never share one.
     next_id: AtomicU32,
+    /// Signals the background writer that a debounced change is waiting.
+    persist_wake: mpsc::SyncSender<()>,
+    /// Serializes the temp-file-and-rename writes so a debounced write and a synchronous one
+    /// never share the same temp path.
+    writes: Mutex<()>,
 }
 
 impl Inner {
@@ -118,8 +128,19 @@ impl Inner {
         let Some(store) = self.store.as_ref() else {
             return;
         };
+        let _writing = self.writes.lock();
         let infos = self.records();
         let _ = store.save_terminals(&infos);
+    }
+
+    /// Asks the background writer to persist after the debounce window, coalescing bursts of
+    /// status changes into one write.
+    fn persist_soon(&self) {
+        match self.persist_wake.try_send(()) {
+            Ok(()) | Err(mpsc::TrySendError::Full(())) => {}
+            // No writer thread: fall back to writing synchronously rather than losing the change.
+            Err(mpsc::TrySendError::Disconnected(())) => self.persist(),
+        }
     }
 
     /// Every record in the table, in id order.
@@ -132,6 +153,24 @@ impl Inner {
             .collect::<Vec<_>>();
         infos.sort_by(|left, right| left.id.cmp(&right.id));
         infos
+    }
+}
+
+/// Writes the records once changes stop for a debounce window, so a burst of status flips costs
+/// one document write instead of one per flip. Exits when the registry is dropped.
+fn persist_worker(inner: Weak<Inner>, wake: mpsc::Receiver<()>) {
+    while wake.recv().is_ok() {
+        loop {
+            match wake.recv_timeout(PERSIST_DEBOUNCE) {
+                Ok(()) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+        match inner.upgrade() {
+            Some(inner) => inner.persist(),
+            None => return,
+        }
     }
 }
 
@@ -199,16 +238,23 @@ impl Registry {
 
     /// The registry behind every constructor.
     fn build(limits: RuntimeLimits, store: Option<RuntimeStore>) -> Self {
-        Self {
-            inner: Arc::new(Inner {
-                limits,
-                store,
-                terminals: Mutex::new(HashMap::new()),
-                watchers: Mutex::new(Vec::new()),
-                next_watcher: AtomicU64::new(0),
-                next_id: AtomicU32::new(id_seed()),
-            }),
-        }
+        let (persist_wake, persist_rx) = mpsc::sync_channel::<()>(1);
+        let inner = Arc::new(Inner {
+            limits,
+            store,
+            terminals: Mutex::new(HashMap::new()),
+            watchers: Mutex::new(Vec::new()),
+            next_watcher: AtomicU64::new(0),
+            next_id: AtomicU32::new(id_seed()),
+            persist_wake,
+            writes: Mutex::new(()),
+        });
+        let worker = Arc::downgrade(&inner);
+        // A failed spawn drops the receiver; `persist_soon` then writes synchronously.
+        let _ = thread::Builder::new()
+            .name("orion-registry-persist".to_string())
+            .spawn(move || persist_worker(worker, persist_rx));
+        Self { inner }
     }
 
     /// Reads the terminals a previous runtime recorded.
@@ -456,7 +502,7 @@ impl Registry {
             }
         };
         if changed {
-            self.inner.persist();
+            self.inner.persist_soon();
             self.inner.emit(RegistryEvent::StatusChanged {
                 id: id.to_string(),
                 status,
@@ -597,7 +643,11 @@ impl Registry {
                     }
                 }
                 if changed {
-                    registry.persist();
+                    if ended {
+                        registry.persist();
+                    } else {
+                        registry.persist_soon();
+                    }
                 }
                 if let Some(event) = status_event {
                     registry.emit(event);
