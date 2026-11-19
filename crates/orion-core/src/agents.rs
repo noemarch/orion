@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{OrionError, Result};
 use crate::process::silent_command;
-use crate::protocol::{AgentKind, DiscoveredAgent};
+use crate::protocol::{AgentKind, DiscoveredAgent, ShellKind};
 
 /// What to put in a PTY: a program and its arguments, already resolved past any platform shim.
 ///
@@ -34,6 +34,34 @@ impl LaunchSpec {
         }
         args.extend(extra_args.iter().cloned());
         Self::for_command(command, &args)
+    }
+
+    /// Resolves a user-invoked shell. The shell's own default arguments come first, then any
+    /// extra arguments; no agent resume flags are ever added.
+    pub fn for_shell(kind: ShellKind, extra_args: &[String]) -> Result<Self> {
+        let command = kind.default_command();
+        let path = find_in_path(command).ok_or_else(|| {
+            OrionError::AgentNotFound(format!("'{command}' is not on this PC's PATH"))
+        })?;
+        let mut args: Vec<String> = kind
+            .default_args()
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect();
+        args.extend(extra_args.iter().cloned());
+        Self::from_path(&path, &args)
+    }
+
+    /// Resolves a user-supplied shell executable at an absolute path. The path must name a file;
+    /// Windows shims are resolved by [`LaunchSpec::from_path`].
+    pub fn for_shell_path(path: &Path, args: &[String]) -> Result<Self> {
+        if !path.is_file() {
+            return Err(OrionError::AgentNotFound(format!(
+                "'{}' is not a file on this PC",
+                path.display()
+            )));
+        }
+        Self::from_path(path, args)
     }
 
     /// Resolves an arbitrary command name or path. Used by agent kinds and by tests.
@@ -123,6 +151,18 @@ fn strip_dp0(token: &str) -> Option<&str> {
     None
 }
 
+impl From<ShellKind> for AgentKind {
+    fn from(kind: ShellKind) -> Self {
+        match kind {
+            ShellKind::PowerShell => Self::PowerShell,
+            ShellKind::Pwsh => Self::Pwsh,
+            ShellKind::Bash => Self::Bash,
+            ShellKind::Cmd => Self::Cmd,
+            ShellKind::Zsh => Self::Zsh,
+        }
+    }
+}
+
 pub struct AgentRegistry;
 
 impl AgentRegistry {
@@ -146,6 +186,29 @@ impl AgentRegistry {
             .iter()
             .map(|kind| Self::inspect_agent(*kind))
             .collect()
+    }
+
+    /// Discover the shells Orion can open as terminal panes. Kept separate from
+    /// [`AgentRegistry::discover_all`] so `/api/agents` stays agent-only.
+    pub fn discover_shells() -> Vec<DiscoveredAgent> {
+        ShellKind::ALL
+            .iter()
+            .map(|kind| Self::inspect_shell(*kind))
+            .collect()
+    }
+
+    fn inspect_shell(kind: ShellKind) -> DiscoveredAgent {
+        let command = kind.default_command();
+        let path = find_in_path(command);
+        let installed = path.is_some();
+        DiscoveredAgent {
+            kind: kind.into(),
+            name: kind.display_name().to_string(),
+            command: command.to_string(),
+            path: path.map(|p| p.to_string_lossy().to_string()),
+            installed,
+            version: None,
+        }
     }
 
     /// Inspect a specific agent kind on PATH.
@@ -211,4 +274,66 @@ pub fn find_in_path(binary: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn for_shell_resolves_a_shell_and_keeps_default_args() {
+        #[cfg(windows)]
+        let kind = ShellKind::PowerShell;
+        #[cfg(not(windows))]
+        let kind = ShellKind::Bash;
+
+        let spec = LaunchSpec::for_shell(kind, &[]).expect("shell on PATH");
+        assert!(spec
+            .program
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .contains(kind.default_command()));
+        for arg in kind.default_args() {
+            assert!(spec.args.iter().any(|value| value == arg));
+        }
+    }
+
+    #[test]
+    fn for_shell_appends_extra_args_after_defaults() {
+        #[cfg(windows)]
+        let kind = ShellKind::PowerShell;
+        #[cfg(not(windows))]
+        let kind = ShellKind::Bash;
+
+        let extra = vec!["-Extra".to_string()];
+        let spec = LaunchSpec::for_shell(kind, &extra).expect("shell on PATH");
+        let defaults = kind.default_args();
+        assert_eq!(&spec.args[..defaults.len()], defaults);
+        assert_eq!(&spec.args[defaults.len()..], &extra);
+    }
+
+    #[test]
+    fn discover_shells_returns_five_entries() {
+        let shells = AgentRegistry::discover_shells();
+        assert_eq!(shells.len(), 5);
+        assert_eq!(shells[0].kind, AgentKind::PowerShell);
+        assert_eq!(shells[1].kind, AgentKind::Pwsh);
+        assert_eq!(shells[2].kind, AgentKind::Bash);
+        assert_eq!(shells[3].kind, AgentKind::Cmd);
+        assert_eq!(shells[4].kind, AgentKind::Zsh);
+        assert!(shells.iter().all(|shell| shell.version.is_none()));
+    }
+
+    #[test]
+    fn for_shell_path_uses_the_supplied_executable() {
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let spec = LaunchSpec::for_shell_path(&exe, &[]).expect("current exe is a file");
+        assert_eq!(spec.program, exe);
+    }
+
+    #[test]
+    fn for_shell_path_rejects_a_missing_file() {
+        let missing = std::env::temp_dir().join(format!("orion-no-shell-{}", uuid::Uuid::new_v4()));
+        assert!(LaunchSpec::for_shell_path(&missing, &[]).is_err());
+    }
 }
