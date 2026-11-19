@@ -10,15 +10,15 @@
 /// The built-in fallback order, from Orbit `src/lib/fontFamily.ts`
 /// (`TERMINAL_FONT_STACK`).
 ///
-/// "Symbols Nerd Font Mono" comes first: it draws the Nerd Font icons a prompt
-/// prints, which no system font has. It never sizes a cell, so the text fonts
-/// after it are what the grid measures.
+/// "Symbols Nerd Font Mono" comes last: it draws the Nerd Font icons a prompt
+/// prints, which no system font has, as a glyph fallback. It never sizes a
+/// cell, so the monospace faces before it are what the grid measures.
 ///
 /// The CSS generic `monospace` sits in this stack exactly as the reference
 /// writes it, because that string is also the CSS `font-family` the web client
 /// sends. GPUI cannot use it (see [`terminal_font_families`]), so the family
 /// list drops it before the lookup.
-pub const TERMINAL_FONT_STACK: &str = "\"Symbols Nerd Font Mono\", \"JetBrains Mono\", \"Fira Code\", \"D2Coding\", Menlo, Monaco, \"Cascadia Code\", \"Cascadia Mono\", Consolas, \"Noto Sans Mono CJK KR\", monospace, \"Malgun Gothic\"";
+pub const TERMINAL_FONT_STACK: &str = "\"JetBrains Mono\", \"Fira Code\", \"D2Coding\", Menlo, Monaco, \"Cascadia Code\", \"Cascadia Mono\", Consolas, \"Noto Sans Mono CJK KR\", \"Malgun Gothic\", monospace, \"Symbols Nerd Font Mono\"";
 
 /// Whether a family is a symbols-only face kept in the stack for glyph
 /// fallback. Such a face must never size the grid: its letters are drawn from
@@ -273,7 +273,6 @@ mod tests {
         assert_eq!(
             families,
             vec![
-                "Symbols Nerd Font Mono".to_string(),
                 "JetBrains Mono".to_string(),
                 "Fira Code".to_string(),
                 "D2Coding".to_string(),
@@ -284,19 +283,24 @@ mod tests {
                 "Consolas".to_string(),
                 "Noto Sans Mono CJK KR".to_string(),
                 "Malgun Gothic".to_string(),
+                "Symbols Nerd Font Mono".to_string(),
             ]
         );
+        assert!(!is_symbol_family(families.first().unwrap()));
+        assert!(is_symbol_family(families.last().unwrap()));
     }
 
     #[::core::prelude::v1::test]
     fn a_chosen_family_comes_before_the_built_in_stack() {
         let families = terminal_font_families("Iosevka");
         assert_eq!(families.first().map(String::as_str), Some("Iosevka"));
+        assert_eq!(families.get(1).map(String::as_str), Some("JetBrains Mono"));
         assert_eq!(
-            families.get(1).map(String::as_str),
+            families.last().map(String::as_str),
             Some("Symbols Nerd Font Mono")
         );
-        assert_eq!(families.last().map(String::as_str), Some("Malgun Gothic"));
+        assert!(!is_symbol_family(families.first().unwrap()));
+        assert!(is_symbol_family(families.last().unwrap()));
     }
 
     #[::core::prelude::v1::test]
