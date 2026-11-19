@@ -6,16 +6,20 @@
 //! `git diff --numstat`; a single file's patch is `git diff` for that path.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+#[cfg(test)]
+use std::process::Command;
+use std::process::{Output, Stdio};
 
 use serde_json::{json, Value};
+
+use crate::process::silent_command;
 
 /// The largest patch the file route hands over, in bytes. A bigger patch is
 /// reported as unavailable instead of flooding the client.
 const MAX_PATCH_BYTES: usize = 262_144;
 
 fn git_output(cwd: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new("git")
+    silent_command("git")
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
