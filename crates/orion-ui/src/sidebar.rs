@@ -7,7 +7,7 @@
 //! `active_tab_id`/`agent_status`, tabs carry `tab_id`/`workspace_id`/
 //! `label`/`agent_status`, panes carry `pane_id`/`workspace_id`/`tab_id`/
 //! `label`/`display_agent`/`agent_status`/`focused`. This view polls that
-//! seam on a 2s timer (the `ChatView` pattern) and renders one row per
+//! seam on a 5s timer (the `ChatView` pattern) and renders one row per
 //! workspace — leading agent mark, title, trailing status dot (DESIGN.md
 //! §1's single-row sidebar, Quiet Slate theme tokens).
 //!
@@ -154,6 +154,12 @@ impl WorkspaceSidebar {
     /// The snapshot body (`snapshot` object) backing the current render.
     pub fn snapshot(&self) -> Option<Value> {
         self.snapshot.clone()
+    }
+
+    /// Opaque token that changes only when the session body changes. The app
+    /// compares it on sidebar notifies to skip cache rebuilds on pulse ticks.
+    pub fn snapshot_fingerprint(&self) -> Option<&str> {
+        self.last_body.as_deref()
     }
 
     /// Workspaces of the current snapshot, in engine order. Each entry points
@@ -324,40 +330,45 @@ impl WorkspaceSidebar {
         self.refresh();
     }
 
-    pub fn refresh(&mut self) {
-        self.refresh_session();
-        self.refresh_terminals();
+    /// Returns whether either source actually changed, so the poll can notify
+    /// only on a real update instead of relying on the pulse to repaint.
+    pub fn refresh(&mut self) -> bool {
+        let session_changed = self.refresh_session();
+        let terminals_changed = self.refresh_terminals();
+        session_changed || terminals_changed
     }
 
-    fn refresh_session(&mut self) {
+    fn refresh_session(&mut self) -> bool {
         let Some(engine) = self.engine.clone() else {
-            return;
+            return false;
         };
         let (status, body) = engine.http("GET", "/api/session", &Value::Null);
         if status != 200 {
-            return;
+            return false;
         }
         let encoded = body.to_string();
         if self.last_body.as_deref() == Some(encoded.as_str()) {
-            return;
+            return false;
         }
         self.last_body = Some(encoded);
         self.snapshot = body.get("snapshot").cloned();
+        true
     }
 
     /// The terminal source is polled on the same tick as the session. A source
     /// that cannot answer, or an empty runtime, is an empty list, not an error.
-    fn refresh_terminals(&mut self) {
+    fn refresh_terminals(&mut self) -> bool {
         let Some(source) = self.terminal_source.clone() else {
-            return;
+            return false;
         };
         let body = source.terminals();
         let encoded = body.as_ref().map(Value::to_string);
         if self.last_terminals == encoded {
-            return;
+            return false;
         }
         self.last_terminals = encoded;
         self.terminals = body;
+        true
     }
 
     /// The runtime's terminals as tree rows; empty when nothing is attached.
@@ -371,7 +382,11 @@ impl WorkspaceSidebar {
     fn start_poll(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| loop {
             cx.background_executor().timer(Duration::from_secs(5)).await;
-            let _ = view.update(cx, |view, _cx| view.refresh());
+            let _ = view.update(cx, |view, cx| {
+                if view.refresh() {
+                    cx.notify();
+                }
+            });
             if view.upgrade().is_none() {
                 break;
             }
@@ -385,16 +400,61 @@ impl WorkspaceSidebar {
                 .timer(std::time::Duration::from_millis(250))
                 .await;
             let _ = view.update(cx, |view, cx| {
-                // Pulse only matters for live statuses; tick the phase so
-                // the dots breathe instead of strobing with the 2s poll.
-                view.pulse_phase = view.pulse_phase.wrapping_add(1);
-                cx.notify();
+                // Only a live status breathes. When nothing is animating, do
+                // no work and do not notify: an idle shell must not repaint
+                // four times a second.
+                if view.has_animating_status() {
+                    view.pulse_phase = view.pulse_phase.wrapping_add(1);
+                    cx.notify();
+                }
             });
             if view.upgrade().is_none() {
                 break;
             }
         })
         .detach();
+    }
+
+    /// Whether any status the sidebar paints is animating (RUN/INPUT). The
+    /// pulse timer notifies only then. Reads the same fields `render` uses,
+    /// without building the row vectors.
+    fn has_animating_status(&self) -> bool {
+        fn is_animating(status: AgentStatus) -> bool {
+            matches!(status, AgentStatus::Working | AgentStatus::Blocked)
+        }
+        let wire_animating = |raw: Option<&str>| {
+            raw.and_then(AgentStatus::from_wire)
+                .is_some_and(is_animating)
+        };
+        if let Some(snapshot) = self.snapshot.as_ref() {
+            // Workspace cards read `agent_status` off the workspace; agent
+            // cards read it off the pane. Both are painted with the pulse.
+            for key in ["workspaces", "panes"] {
+                if let Some(rows) = snapshot.get(key).and_then(Value::as_array) {
+                    if rows
+                        .iter()
+                        .any(|row| wire_animating(row.get("agent_status").and_then(Value::as_str)))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        if let Some(terminals) = self.terminals.as_ref() {
+            let rows = terminals
+                .as_array()
+                .or_else(|| terminals.get("terminals").and_then(Value::as_array));
+            if let Some(rows) = rows {
+                if rows.iter().any(|row| {
+                    status_token(row.get("status").and_then(Value::as_str))
+                        .and_then(AgentStatus::from_wire)
+                        .is_some_and(is_animating)
+                }) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Status dot color for a protocol `AgentStatus`. Never rose (DESIGN.md
