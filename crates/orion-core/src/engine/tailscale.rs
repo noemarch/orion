@@ -5,9 +5,11 @@
 //! The Phone panel turns the answer into the address that already works, or the one command
 //! the user still has to run on this PC.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde_json::Value;
+
+use crate::process::silent_command;
 
 const LOOPBACK: [&str; 4] = ["127.0.0.1", "localhost", "[::1]", "::1"];
 const HTTPS_PORTS: [u16; 4] = [443, 8443, 7317, 17317];
@@ -164,7 +166,7 @@ pub fn tailscale_binary() -> Option<std::path::PathBuf> {
 }
 
 fn run(binary: &std::path::Path, args: &[&str]) -> Option<String> {
-    let output = Command::new(binary)
+    let output = silent_command(binary)
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
