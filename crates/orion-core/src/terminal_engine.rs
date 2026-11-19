@@ -1,12 +1,12 @@
 //! The terminal emulator behind one trait.
 //!
 //! The shell draws a grid. The grid comes from an emulator, and today that
-//! emulator is `vt100`. Nothing outside this module should have to say so:
+//! emulator is libghostty-vt. Nothing outside this module should have to say so:
 //! the shell depends on [`TerminalEngine`], so another emulator can be
 //! measured against this one without the shell changing.
 //!
-//! The trait is the seam, not a rewrite. The one implementation here is the
-//! emulator Orion already had.
+//! The trait is the seam: the implementation here is backed by the headless
+//! libghostty-vt terminal-state library.
 
 use std::ops::Range;
 
