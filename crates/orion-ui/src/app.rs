@@ -24,9 +24,10 @@ use crate::pane_seam::seam_of;
 use crate::review_pane::ReviewPane;
 use crate::settings::{KeyBarExtras, Preferences, SettingsModal};
 use crate::shell_model::{
-    reference_layout, review_column_visible, sidebar_visible, HeaderModel, LensBook, ShellLayout,
-    FILES_SURFACE_WIDTH_WIDE,
+    effective_conversation_width, reference_layout, review_column_visible_for_terminal,
+    sidebar_visible, HeaderModel, LensBook, ShellLayout, FILES_SURFACE_WIDTH_WIDE,
 };
+use crate::shell_picker::{ShellPickerEvent, ShellPickerModal};
 use crate::sidebar::{SidebarEvent, TabEntry, WorkspaceEntry};
 use crate::terminal::TerminalPane;
 use crate::theme::Theme;
@@ -67,6 +68,7 @@ pub struct OrionApp {
     sidebar_open: bool,
     settings: Entity<SettingsModal>,
     new_workspace: Entity<NewWorkspaceModal>,
+    shell_picker: Entity<ShellPickerModal>,
     /// The runtime the shell talks to: the engine in this process, or one in
     /// the daemon. The shell holds the runtime, not the terminals.
     engine: Arc<dyn Runtime>,
@@ -96,6 +98,7 @@ pub struct OrionApp {
     /// reads cached values instead of cloning the whole session JSON.
     last_render_prefs: Option<Preferences>,
     cached_live_panes: Vec<String>,
+    cached_shell_panes: Vec<String>,
     cached_agent_label: String,
     cached_has_workspaces: bool,
     cached_split_panes: Vec<String>,
@@ -403,6 +406,16 @@ fn spawn_status_poller(
     .detach();
 }
 
+fn pane_is_shell(pane: &Value) -> bool {
+    if pane.get("pane_kind").and_then(Value::as_str) == Some("shell") {
+        return true;
+    }
+    matches!(
+        pane.get("agent").and_then(Value::as_str),
+        Some("powershell" | "pwsh" | "bash" | "cmd")
+    )
+}
+
 impl OrionApp {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let workspace_sidebar = cx.new(WorkspaceSidebar::new);
@@ -413,6 +426,7 @@ impl OrionApp {
         let review_pane = cx.new(|cx| ReviewPane::new(changes_view.clone(), cx));
         let settings = cx.new(SettingsModal::new);
         let new_workspace = cx.new(NewWorkspaceModal::new);
+        let shell_picker = cx.new(ShellPickerModal::new);
         let split_chat_view = cx.new(ChatView::new);
         let split_terminal_pane = cx.new(TerminalPane::new);
         let split_file_tree = cx.new(FileTree::new);
@@ -448,6 +462,7 @@ impl OrionApp {
             sidebar_open: true,
             settings,
             new_workspace,
+            shell_picker,
             engine,
             lens_book: LensBook::new(),
             focused_pane: None,
@@ -465,6 +480,7 @@ impl OrionApp {
             notice,
             last_render_prefs: None,
             cached_live_panes: Vec::new(),
+            cached_shell_panes: Vec::new(),
             cached_agent_label: "the agent".to_string(),
             cached_has_workspaces: false,
             cached_split_panes: Vec::new(),
@@ -506,6 +522,25 @@ impl OrionApp {
             this.refresh_shell_cache(cx);
             cx.notify();
         });
+        let shell_picker_events = app.shell_picker.clone();
+        let shell_picker_sub = cx.subscribe(
+            &shell_picker_events,
+            |this, _, event: &ShellPickerEvent, cx| {
+                let ShellPickerEvent::Created(pane_id) = event;
+                this.workspace_sidebar
+                    .update(cx, |view, _cx| view.refresh());
+                this.lens_book.set(Some(pane_id), Lens::Terminal);
+                this.focused_pane = Some(pane_id.clone());
+                let attach_id = pane_id.clone();
+                cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                    let _ = this.update(cx, |this, cx| this.attach_pane(cx, &attach_id));
+                })
+                .detach();
+                this.terminal_pane.update(cx, |view, _cx| view.take_focus());
+                this.refresh_shell_cache(cx);
+                cx.notify();
+            },
+        );
         // The chat asks the shell for the Terminal Lens or for a file: the
         // lens switch and the file viewer live in the app root.
         let chat_events = app.chat_view.clone();
@@ -533,6 +568,7 @@ impl OrionApp {
         app.subscriptions = vec![
             sidebar_sub,
             modal_sub,
+            shell_picker_sub,
             chat_sub,
             split_chat_sub,
             sidebar_observe,
@@ -551,6 +587,8 @@ impl OrionApp {
         self.settings
             .update(cx, |view, _cx| view.attach(Arc::clone(&engine)));
         self.new_workspace
+            .update(cx, |view, _cx| view.attach(Arc::clone(&engine)));
+        self.shell_picker
             .update(cx, |view, _cx| view.attach(Arc::clone(&engine)));
 
         // Put the user back where they were before starting a fresh agent.
@@ -635,6 +673,20 @@ impl OrionApp {
             return;
         }
         self.attached_pane = Some(pane_id.to_string());
+
+        let is_shell = engine
+            .snapshot_value()
+            .get("panes")
+            .and_then(Value::as_array)
+            .and_then(|panes| {
+                panes
+                    .iter()
+                    .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+            })
+            .is_some_and(pane_is_shell);
+        if is_shell {
+            self.lens_book.set(Some(pane_id), Lens::Terminal);
+        }
 
         self.terminal_pane.update(cx, |view, cx| {
             view.set_pane(Arc::clone(&pane));
@@ -1055,6 +1107,31 @@ impl OrionApp {
                     .accessibility_label(review_label)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.review_open = !this.review_open;
+                        cx.notify();
+                    })),
+            )
+            .content(
+                Button::new("header-new-terminal")
+                    .label("New Terminal")
+                    .secondary()
+                    .small()
+                    .h(px(44.0))
+                    .min_h(px(44.0))
+                    .tooltip("New Terminal")
+                    .accessibility_label("New Terminal")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let default = this
+                            .settings
+                            .update(cx, |view, _cx| view.prefs().default_shell.clone());
+                        let cwd = this
+                            .cached_workspaces
+                            .iter()
+                            .find(|workspace| workspace.focused)
+                            .or_else(|| this.cached_workspaces.first())
+                            .and_then(|workspace| workspace.cwd.clone());
+                        this.shell_picker.update(cx, |view, cx| {
+                            view.open_with_default(&default, cwd, cx);
+                        });
                         cx.notify();
                     })),
             )
@@ -1484,81 +1561,108 @@ impl OrionApp {
             .read(cx)
             .snapshot_fingerprint()
             .map(str::to_string);
-        let (focused, live, agent_label, has_workspaces, split_panes, workspaces, tabs, tabs_ws_id) =
-            self.workspace_sidebar.update(cx, |view, _cx| {
-                let snapshot = view.snapshot();
-                let focused = snapshot.as_ref().and_then(|snapshot| {
-                    snapshot
-                        .get("focused_pane_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                });
-                let live = snapshot
-                    .as_ref()
-                    .and_then(|snapshot| snapshot.get("panes"))
-                    .and_then(Value::as_array)
-                    .map(|panes| {
-                        panes
-                            .iter()
-                            .filter_map(|pane| {
-                                pane.get("pane_id")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_string)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                let agent_label = focused
-                    .as_deref()
-                    .and_then(|pane_id| {
-                        snapshot.as_ref().and_then(|snapshot| {
-                            snapshot
-                                .get("panes")
-                                .and_then(Value::as_array)
-                                .and_then(|panes| {
-                                    panes.iter().find(|pane| {
-                                        pane.get("pane_id").and_then(Value::as_str) == Some(pane_id)
-                                    })
-                                })
-                                .and_then(|pane| pane.get("display_agent").and_then(Value::as_str))
+        let (
+            focused,
+            live,
+            shell_panes,
+            agent_label,
+            has_workspaces,
+            split_panes,
+            workspaces,
+            tabs,
+            tabs_ws_id,
+        ) = self.workspace_sidebar.update(cx, |view, _cx| {
+            let snapshot = view.snapshot();
+            let focused = snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .get("focused_pane_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+            let live = snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.get("panes"))
+                .and_then(Value::as_array)
+                .map(|panes| {
+                    panes
+                        .iter()
+                        .filter_map(|pane| {
+                            pane.get("pane_id")
+                                .and_then(Value::as_str)
                                 .map(str::to_string)
                         })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let shell_panes = snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.get("panes"))
+                .and_then(Value::as_array)
+                .map(|panes| {
+                    panes
+                        .iter()
+                        .filter(|pane| pane_is_shell(pane))
+                        .filter_map(|pane| {
+                            pane.get("pane_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let agent_label = focused
+                .as_deref()
+                .and_then(|pane_id| {
+                    snapshot.as_ref().and_then(|snapshot| {
+                        snapshot
+                            .get("panes")
+                            .and_then(Value::as_array)
+                            .and_then(|panes| {
+                                panes.iter().find(|pane| {
+                                    pane.get("pane_id").and_then(Value::as_str) == Some(pane_id)
+                                })
+                            })
+                            .and_then(|pane| pane.get("display_agent").and_then(Value::as_str))
+                            .map(str::to_string)
                     })
-                    .unwrap_or_else(|| "the agent".to_string());
-                let workspaces = view.workspaces();
-                let has_workspaces = !workspaces.is_empty();
-                let focused_ws = workspaces
-                    .iter()
-                    .find(|w| w.focused)
-                    .or_else(|| workspaces.first())
-                    .cloned();
-                let (split_panes, tabs, tabs_ws_id) = match focused_ws {
-                    Some(ws) => {
-                        let tabs = view.tabs(&ws.id);
-                        let focused_tab = tabs.iter().find(|t| t.focused).or_else(|| tabs.first());
-                        let split_panes = match focused_tab {
-                            Some(tab) if tab.layout != "single" && tab.pane_ids.len() >= 2 => {
-                                tab.pane_ids.clone()
-                            }
-                            _ => Vec::new(),
-                        };
-                        (split_panes, tabs, Some(ws.id))
-                    }
-                    None => (Vec::new(), Vec::new(), None),
-                };
-                (
-                    focused,
-                    live,
-                    agent_label,
-                    has_workspaces,
-                    split_panes,
-                    workspaces,
-                    tabs,
-                    tabs_ws_id,
-                )
-            });
+                })
+                .unwrap_or_else(|| "the agent".to_string());
+            let workspaces = view.workspaces();
+            let has_workspaces = !workspaces.is_empty();
+            let focused_ws = workspaces
+                .iter()
+                .find(|w| w.focused)
+                .or_else(|| workspaces.first())
+                .cloned();
+            let (split_panes, tabs, tabs_ws_id) = match focused_ws {
+                Some(ws) => {
+                    let tabs = view.tabs(&ws.id);
+                    let focused_tab = tabs.iter().find(|t| t.focused).or_else(|| tabs.first());
+                    let split_panes = match focused_tab {
+                        Some(tab) if tab.layout != "single" && tab.pane_ids.len() >= 2 => {
+                            tab.pane_ids.clone()
+                        }
+                        _ => Vec::new(),
+                    };
+                    (split_panes, tabs, Some(ws.id))
+                }
+                None => (Vec::new(), Vec::new(), None),
+            };
+            (
+                focused,
+                live,
+                shell_panes,
+                agent_label,
+                has_workspaces,
+                split_panes,
+                workspaces,
+                tabs,
+                tabs_ws_id,
+            )
+        });
         self.focused_pane = focused;
         self.cached_live_panes = live;
+        self.cached_shell_panes = shell_panes;
         self.cached_agent_label = agent_label;
         self.cached_has_workspaces = has_workspaces;
         self.cached_split_panes = split_panes;
@@ -1653,11 +1757,17 @@ impl Render for OrionApp {
         // resolved. The review column reads the same Changes view as the
         // classic lens, so that view polls in either mode.
         let reference = reference_layout(window_w);
-        let review_visible = review_column_visible(
+        let shell_terminal_active = self.current_lens() == Lens::Terminal
+            && self
+                .focused_pane
+                .as_deref()
+                .is_some_and(|pane_id| self.cached_shell_panes.iter().any(|id| id == pane_id));
+        let review_visible = review_column_visible_for_terminal(
             self.review_open,
             reference.collapse_review,
             has_workspaces,
             split_second.is_some(),
+            shell_terminal_active,
         );
         let changes_active = self.current_lens() == Lens::Changes;
         self.file_tree
@@ -1905,7 +2015,10 @@ impl Render for OrionApp {
                         .id("conversation-column")
                         .flex()
                         .flex_col()
-                        .w(px(reference.conversation_w))
+                        .w(px(effective_conversation_width(
+                            &reference,
+                            shell_terminal_active,
+                        )))
                         .flex_shrink_0()
                         .min_w(px(0.0))
                         .bg(theme.panel_bg())
@@ -2027,6 +2140,17 @@ impl Render for OrionApp {
                         .child(self.new_workspace.clone())
                 } else {
                     div().id("no-new-workspace-modal")
+                },
+            )
+            .child(
+                if self.shell_picker.update(cx, |view, _cx| view.is_open()) {
+                    div()
+                        .id("shell-picker-host")
+                        .absolute()
+                        .inset_0()
+                        .child(self.shell_picker.clone())
+                } else {
+                    div().id("no-shell-picker-modal")
                 },
             );
         root
@@ -2424,6 +2548,7 @@ mod tests {
                 label: "test".into(),
                 cwd: std::env::temp_dir(),
                 spec,
+                shell_path: None,
                 args: Vec::new(),
                 size: TerminalSize {
                     cols: 120,
