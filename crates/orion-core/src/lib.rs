@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod engine;
 pub mod error;
+mod ghostty_extra;
 pub mod process;
 pub mod prompt;
 pub mod protocol;
