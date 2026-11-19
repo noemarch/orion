@@ -139,12 +139,14 @@ impl FileTree {
         self.expanded.insert(root);
         self.listings.clear();
         let reader = self.file_reader.clone();
-        reader.update(cx, |reader, _cx| reader.attach(engine, pane_id));
+        reader.update(cx, |reader, reader_cx| {
+            reader.attach(reader_cx, engine, pane_id)
+        });
         // The listing is a filesystem read: it must not run while another
         // lens is on screen. The Changes lens reads it when it comes back
         // (`set_visible`).
         if self.visible {
-            self.refresh();
+            self.refresh(cx);
         }
     }
 
@@ -155,9 +157,11 @@ impl FileTree {
         }
         self.visible = visible;
         let reader = self.file_reader.clone();
-        reader.update(cx, |reader, _cx| reader.set_visible(visible));
+        reader.update(cx, |reader, reader_cx| {
+            reader.set_visible(reader_cx, visible)
+        });
         if visible {
-            self.refresh();
+            self.refresh(cx);
         }
     }
 
@@ -166,56 +170,76 @@ impl FileTree {
     }
 
     /// Fetch a listing for EVERY expanded folder through the wire seam
-    /// (`Runtime::http`). A folder whose fetch fails — it vanished, or it is
-    /// not a directory — is dropped from the tree and the failure is recorded
-    /// as the tree's error; the root itself stays expanded (it is the pane's
-    /// cwd) so the tree keeps its anchor. When every fetch succeeds, the
-    /// error clears.
-    pub fn refresh(&mut self) {
+    /// (`Runtime::http`). The socket round-trips are blocking, so they run in
+    /// one background task and the answers are applied to the view in a single
+    /// batch on the UI thread — a folder per poll never blocks the foreground.
+    /// A folder whose fetch fails — it vanished, or it is not a directory — is
+    /// dropped from the tree and the failure is recorded as the tree's error;
+    /// the root itself stays expanded (it is the pane's cwd) so the tree keeps
+    /// its anchor. When every fetch succeeds, the error clears.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
-        let mut any_failed = false;
-        for path in self.expanded.clone() {
-            let route = format!(
-                "/api/workspace/directories?path={}&files=1",
-                url_encode(&path)
-            );
-            let (status, body) = engine.http("GET", &route, &Value::Null);
-            let parsed = if status == 200 {
-                DirectoryListing::parse(&body).ok()
-            } else {
-                None
-            };
-            match parsed {
-                Some(listing) => {
-                    self.listings.insert(path, listing);
-                }
-                None => {
-                    any_failed = true;
-                    if Some(path.as_str()) != self.root_path.as_deref() {
-                        self.expanded.remove(&path);
-                        self.listings.remove(&path);
+        let paths: Vec<String> = self.expanded.iter().cloned().collect();
+        cx.spawn(async move |view, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    paths
+                        .into_iter()
+                        .map(|path| {
+                            let route = format!(
+                                "/api/workspace/directories?path={}&files=1",
+                                url_encode(&path)
+                            );
+                            let (status, body) = engine.http("GET", &route, &Value::Null);
+                            let listing = if status == 200 {
+                                DirectoryListing::parse(&body).ok()
+                            } else {
+                                None
+                            };
+                            (path, listing)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                let mut any_failed = false;
+                for (path, listing) in results {
+                    match listing {
+                        Some(listing) => {
+                            view.listings.insert(path, listing);
+                        }
+                        None => {
+                            any_failed = true;
+                            if Some(path.as_str()) != view.root_path.as_deref() {
+                                view.expanded.remove(&path);
+                                view.listings.remove(&path);
+                            }
+                        }
                     }
                 }
-            }
-        }
-        self.error = if any_failed {
-            Some(DIRECTORY_ERROR_MESSAGE.to_string())
-        } else {
-            None
-        };
+                view.error = if any_failed {
+                    Some(DIRECTORY_ERROR_MESSAGE.to_string())
+                } else {
+                    None
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Expand or collapse one folder. Expanding fetches its listing so the
     /// children appear; collapsing drops the folder and its listing.
-    pub fn toggle_folder(&mut self, path: String) {
+    pub fn toggle_folder(&mut self, path: String, cx: &mut Context<Self>) {
         if self.expanded.contains(&path) {
             self.expanded.remove(&path);
             self.listings.remove(&path);
         } else {
             self.expanded.insert(path);
-            self.refresh();
+            self.refresh(cx);
         }
     }
 
@@ -253,15 +277,15 @@ impl FileTree {
         }
         self.selected_file = Some(resolved.clone());
         let reader = self.file_reader.clone();
-        reader.update(cx, |reader, _cx| reader.open(resolved));
-        self.refresh();
+        reader.update(cx, |reader, reader_cx| reader.open(reader_cx, resolved));
+        self.refresh(cx);
     }
 
     /// The reader asked for the data again: clear the failure and re-issue
     /// the fetches.
-    pub fn retry(&mut self) {
+    pub fn retry(&mut self, cx: &mut Context<Self>) {
         self.error = None;
-        self.refresh();
+        self.refresh(cx);
     }
 
     /// The tree's root (the pane's cwd), absolute, forward slashes.
@@ -340,16 +364,16 @@ impl FileTree {
     fn open_file(&mut self, path: String, cx: &mut Context<Self>) {
         self.selected_file = Some(path.clone());
         let reader = self.file_reader.clone();
-        reader.update(cx, |reader, _cx| reader.open(path));
+        reader.update(cx, |reader, reader_cx| reader.open(reader_cx, path));
         cx.notify();
     }
 
     fn start_poll(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| loop {
             cx.background_executor().timer(Duration::from_secs(5)).await;
-            let _ = view.update(cx, |view, _cx| {
+            let _ = view.update(cx, |view, view_cx| {
                 if view.visible {
-                    view.refresh();
+                    view.refresh(view_cx);
                 }
             });
             if view.upgrade().is_none() {
@@ -417,7 +441,7 @@ impl FileTree {
                             .primary()
                             .h(px(44.0))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.retry();
+                                this.retry(cx);
                                 cx.notify();
                             })),
                     ),
@@ -478,7 +502,7 @@ impl FileTree {
                     .px_2()
                     .py_1()
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_folder(child_clone.clone());
+                        this.toggle_folder(child_clone.clone(), cx);
                         cx.notify();
                     })),
             );
@@ -720,18 +744,18 @@ mod tests {
             let cx = cx.add_empty_window();
             let view = cx.update(|_window, app| app.new(FileTree::new));
             cx.update(|_window, app| {
-                view.update(app, |v, _cx| {
+                view.update(app, |v, cx| {
                     v.apply_listing(
                         "/proj".to_string(),
                         listing_json("/proj", &["src", "docs"], json!([])),
                     );
-                    v.toggle_folder("/proj/src".to_string());
+                    v.toggle_folder("/proj/src".to_string(), cx);
                 });
                 assert!(
                     view.read(app).expanded().any(|p| p == "/proj/src"),
                     "the folder is expanded"
                 );
-                view.update(app, |v, _cx| v.toggle_folder("/proj/src".to_string()));
+                view.update(app, |v, cx| v.toggle_folder("/proj/src".to_string(), cx));
                 assert!(
                     !view.read(app).expanded().any(|p| p == "/proj/src"),
                     "the folder is collapsed again"
