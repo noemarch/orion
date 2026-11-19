@@ -5,6 +5,33 @@
 //! `claude.exe`, `codex.exe` and their tooling running with nobody watching. M0 puts the app
 //! itself in such a job; M1 adds each spawned agent to it as well.
 
+/// `CREATE_NO_WINDOW`: the child gets a console, but no window is shown for it.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// A `Command` for a helper process whose console window must never appear.
+///
+/// A process that has no console of its own — the GUI app, or the `orion daemon` it starts
+/// detached — makes Windows allocate a fresh console window for every console child it starts.
+/// That window is the stray terminal that flashes while `git`, `tailscale`, or an agent's
+/// `--version` query runs. `CREATE_NO_WINDOW` suppresses it at creation time.
+///
+/// Agent panes do not use this: `portable-pty` gives its child a hidden ConPTY console on purpose.
+#[cfg(windows)]
+pub fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+
+    let mut command = std::process::Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+/// Non-Windows platforms never allocate a console window for a child; build the command as usual.
+#[cfg(not(windows))]
+pub fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    std::process::Command::new(program)
+}
+
 /// Puts the current process in a job object that kills every member when the last handle to the
 /// job closes — which happens when Orion exits, including a crash.
 ///
