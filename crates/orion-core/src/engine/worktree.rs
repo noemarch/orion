@@ -6,13 +6,15 @@
 //! worktree is just a workspace in its path, so agents run in it like anywhere else.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde_json::{json, Value};
 
+use crate::process::silent_command;
+
 /// Runs `git` in `cwd` and returns stdout. Stderr is captured for the error message.
 fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = silent_command("git")
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
