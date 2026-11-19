@@ -80,11 +80,19 @@ impl Terminal {
         let on_text: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |text: String| {
             let (cleaned, sinks) = {
                 let mut state = output_state.lock();
-                // An OSC status sequence may be split across reads: carry the
-                // tail from the previous chunk and prepend it before filtering.
-                let combined = std::mem::take(&mut state.osc_pending) + &text;
-                let (cleaned, leftover, status) = filter_osc(&combined);
-                state.osc_pending = leftover;
+                let (cleaned, status) =
+                    if state.osc_pending.is_empty() && !text.as_bytes().contains(&0x1b) {
+                        // An OSC sequence starts with ESC, so a chunk without one needs no filter.
+                        (text, None)
+                    } else {
+                        // An OSC status sequence may be split across reads: append the chunk to the
+                        // carried tail in place instead of building a third string.
+                        let mut combined = std::mem::take(&mut state.osc_pending);
+                        combined.push_str(&text);
+                        let (cleaned, leftover, status) = filter_osc(&combined);
+                        state.osc_pending = leftover;
+                        (cleaned, status)
+                    };
                 if let Some(status) = status {
                     state.reported = Some(status);
                 }
@@ -95,8 +103,13 @@ impl Terminal {
                 state.output.push_back(cleaned.clone());
                 (cleaned, state.sinks.clone())
             };
-            for sink in sinks {
-                sink(cleaned.clone());
+            // Every sink takes an owned String, so each needs its own copy; the last one can
+            // take the original.
+            if let Some((last, rest)) = sinks.split_last() {
+                for sink in rest {
+                    sink(cleaned.clone());
+                }
+                last(cleaned);
             }
         });
 
