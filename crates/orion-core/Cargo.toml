@@ -34,7 +34,7 @@ hkdf = { workspace = true }
 aes-gcm = { workspace = true }
 reqwest = { workspace = true }
 signature = { workspace = true }
-vt100 = "0.18.1"
+libghostty-vt = { path = "../libghostty-vt" }
 
 [[bin]]
 name = "orion"
