@@ -11,7 +11,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -87,6 +89,9 @@ struct PaneState {
     status: AgentStatus,
     completion_seq: u64,
     state_change_seq: u64,
+    /// How many output chunks the grid has consumed. A debounced detection snapshots it and
+    /// discards its result if newer output arrived while the screen was being scanned.
+    grid_seq: u64,
     prompt: Option<DetectedPrompt>,
     exit: Option<i32>,
 }
@@ -112,42 +117,70 @@ impl Pane {
         on_event: Arc<dyn Fn(PaneEvent) + Send + Sync>,
     ) -> Result<Self> {
         let pane_id = config.id.clone();
+        let agent = config.agent;
         let state = Arc::new(Mutex::new(PaneState {
             screen: ScreenState::new(config.size.rows.max(1), config.size.cols.max(1)),
             attached: HashMap::new(),
             status: AgentStatus::Idle,
             completion_seq: 0,
             state_change_seq: 0,
+            grid_seq: 0,
             prompt: None,
             exit: None,
         }));
 
+        // Prompt detection scans the whole visible screen, so it must not run per PTY chunk under
+        // the pane lock. The reader only signals this channel; the detector waits for output to go
+        // quiet, then scans a snapshot outside the lock.
+        let (detect_wake, detect_rx) = mpsc::sync_channel::<()>(1);
+
         let output_state = Arc::clone(&state);
         let output_id = pane_id.clone();
-        let output_agent = config.agent;
-        let output_events = Arc::clone(&on_event);
+        let output_signal = detect_wake.clone();
         let on_text: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |text: String| {
-            let mut state = output_state.lock();
-            state.screen.process(&text);
-            update_status(&mut state, &output_id, output_agent, &output_events);
+            let sinks: Vec<FrameSink> = {
+                let mut state = output_state.lock();
+                state.screen.process(&text);
+                state.grid_seq = state.grid_seq.wrapping_add(1);
+                state
+                    .attached
+                    .values()
+                    .map(|attached| Arc::clone(&attached.sink))
+                    .collect()
+            };
+            // A full channel already has a wake pending: one signal per quiet window is enough.
+            let _ = output_signal.try_send(());
             let data = json!({
                 "type": "pty-data",
                 "pane_id": output_id,
                 "data": text,
             });
-            for attached in state.attached.values() {
-                (attached.sink)(data.clone());
+            for sink in sinks {
+                (sink)(data.clone());
             }
         });
 
         let session =
             PtySession::spawn(&config.spec, Some(&config.cwd), &[], config.size, on_text)?;
 
+        if agent_uses_grid_status(agent) {
+            if let Err(error) = spawn_detector(
+                pane_id.clone(),
+                agent,
+                Arc::clone(&state),
+                detect_rx,
+                Arc::clone(&on_event),
+            ) {
+                session.kill();
+                return Err(error);
+            }
+        }
+
         let pane = Self {
             id: pane_id.clone(),
             workspace_id: config.workspace_id,
             tab_id: config.tab_id,
-            agent: config.agent,
+            agent,
             label: Mutex::new(config.label),
             cwd: config.cwd,
             args: config.args,
@@ -173,6 +206,9 @@ impl Pane {
                 loop {
                     match watch_session.try_wait() {
                         Ok(Some(code)) => {
+                            // Flush the last screen before the exit state lands: a prompt drawn by
+                            // the final chunk must still be reported.
+                            detect_and_apply(&watch_state, &watch_id, agent, &watch_events);
                             let status = status_after_exit(code);
                             {
                                 let mut state = watch_state.lock();
@@ -591,16 +627,13 @@ fn apply_transcript_status(
     Some((next, completion))
 }
 
-/// Recomputes the agent status after a grid change, and reports a transition once.
-fn update_status(
-    state: &mut PaneState,
-    pane_id: &str,
-    agent: AgentKind,
-    on_event: &Arc<dyn Fn(PaneEvent) + Send + Sync>,
-) {
-    // omo, omp, pi and hermes draw a TUI that says nothing about their turn; their transcript is
-    // the only record, and it is read when the chat asks (Pane::note_transcript_status).
-    if matches!(
+/// How long a pane's output must stay quiet before the grid is scanned. Coalesces a burst of PTY
+/// chunks into one scan, and lands within a frame or two of the agent going idle.
+const DETECT_QUIET: Duration = Duration::from_millis(120);
+
+/// Whether this agent's turn state can be read from its grid.
+fn agent_uses_grid_status(agent: AgentKind) -> bool {
+    !matches!(
         agent,
         AgentKind::Omo
             | AgentKind::Omp
@@ -608,35 +641,109 @@ fn update_status(
             | AgentKind::Hermes
             | AgentKind::Grok
             | AgentKind::Cursor
-    ) {
+    )
+}
+
+/// Follows one pane's output and scans the grid once it goes quiet, off the PTY reader thread.
+fn spawn_detector(
+    pane_id: String,
+    agent: AgentKind,
+    state: Arc<Mutex<PaneState>>,
+    wake: mpsc::Receiver<()>,
+    on_event: Arc<dyn Fn(PaneEvent) + Send + Sync>,
+) -> Result<()> {
+    std::thread::Builder::new()
+        .name(format!("orion-pane-detect-{pane_id}"))
+        .spawn(move || loop {
+            if wake.recv().is_err() {
+                return;
+            }
+            loop {
+                match wake.recv_timeout(DETECT_QUIET) {
+                    Ok(()) => continue,
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        // The pane is shutting down: scan the last screen once, then stop.
+                        detect_and_apply(&state, &pane_id, agent, &on_event);
+                        return;
+                    }
+                }
+            }
+            detect_and_apply(&state, &pane_id, agent, &on_event);
+        })
+        .map(|_| ())
+        .map_err(|error| OrionError::Process(format!("failed to watch for prompts: {error}")))
+}
+
+/// One detection pass: snapshot the visible screen under the lock, scan it outside, then apply
+/// only if the grid did not change while the scan ran. The probe describes one screen, so a newer
+/// chunk is the only thing that invalidates it; the current status is read again under the lock.
+fn detect_and_apply(
+    state: &Mutex<PaneState>,
+    pane_id: &str,
+    agent: AgentKind,
+    on_event: &Arc<dyn Fn(PaneEvent) + Send + Sync>,
+) {
+    let (visible, grid_seq) = {
+        let state = state.lock();
+        (state.screen.visible_text(), state.grid_seq)
+    };
+    let Some(probe) = probe_status(&visible, agent) else {
+        return;
+    };
+    let mut state = state.lock();
+    if state.grid_seq != grid_seq {
         return;
     }
-    let visible = state.screen.visible_text();
-    let menu = match agent {
-        AgentKind::Claude => prompt::detect_claude(&visible),
-        AgentKind::Codex => prompt::detect_codex(&visible),
+    apply_probe(&mut state, probe, pane_id, on_event);
+}
+
+/// What one screen scan found, before it is reconciled with the pane's current state.
+struct StatusProbe {
+    prompt: Option<DetectedPrompt>,
+    blocked: bool,
+    working: bool,
+}
+
+/// Reads the grid for a prompt or a turn in progress. `None` means this agent reports its turn
+/// through its transcript, not its screen.
+fn probe_status(visible: &str, agent: AgentKind) -> Option<StatusProbe> {
+    if !agent_uses_grid_status(agent) {
+        return None;
+    }
+    let prompt = match agent {
+        AgentKind::Claude => prompt::detect_claude(visible),
+        AgentKind::Codex => prompt::detect_codex(visible),
         _ => None,
     };
-    // A collapsed Codex queue shows only a count: it still blocks, even though only the
-    // rollout names the question.
     let blocked =
-        menu.is_some() || (agent == AgentKind::Codex && prompt::codex_queued_count(&visible) > 0);
-    let working = !blocked
-        && match agent {
-            AgentKind::Claude => prompt::claude_is_working(&visible),
-            _ => false,
-        };
+        prompt.is_some() || (agent == AgentKind::Codex && prompt::codex_queued_count(visible) > 0);
+    let working = !blocked && agent == AgentKind::Claude && prompt::claude_is_working(visible);
+    Some(StatusProbe {
+        prompt,
+        blocked,
+        working,
+    })
+}
+
+/// Reconciles one scan with the pane's state and reports a transition once.
+fn apply_probe(
+    state: &mut PaneState,
+    probe: StatusProbe,
+    pane_id: &str,
+    on_event: &Arc<dyn Fn(PaneEvent) + Send + Sync>,
+) {
     let previous = state.status;
-    let next = if blocked {
+    let next = if probe.blocked {
         AgentStatus::Blocked
-    } else if working {
+    } else if probe.working {
         AgentStatus::Working
     } else if previous == AgentStatus::Working {
         AgentStatus::Done
     } else {
         previous
     };
-    state.prompt = menu;
+    state.prompt = probe.prompt;
     if next == previous {
         return;
     }
@@ -651,6 +758,19 @@ fn update_status(
         status: next,
         completion,
     });
+}
+
+#[cfg(test)]
+fn update_status(
+    state: &mut PaneState,
+    pane_id: &str,
+    agent: AgentKind,
+    on_event: &Arc<dyn Fn(PaneEvent) + Send + Sync>,
+) {
+    let visible = state.screen.visible_text();
+    if let Some(probe) = probe_status(&visible, agent) {
+        apply_probe(state, probe, pane_id, on_event);
+    }
 }
 
 /// A pane whose process ended is done when it exited cleanly and in error when
@@ -748,6 +868,7 @@ mod tests {
             status,
             completion_seq: 0,
             state_change_seq: 0,
+            grid_seq: 0,
             prompt: None,
             exit: None,
         }
