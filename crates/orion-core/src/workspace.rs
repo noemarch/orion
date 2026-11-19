@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -8,6 +7,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::error::{OrionError, Result};
+use crate::process::silent_command;
 use crate::protocol::{AgentKind, AgentStatus, PaneInfo, TabInfo, TabLayout, WorkspaceInfo};
 
 pub struct WorkspaceManager {
@@ -140,7 +140,7 @@ impl WorkspaceManager {
             std::fs::create_dir_all(parent)?;
         }
 
-        let output = Command::new("git")
+        let output = silent_command("git")
             .current_dir(repo_root)
             .args([
                 "worktree",
@@ -168,7 +168,7 @@ impl WorkspaceManager {
 
     /// Remove a Git worktree cleanly.
     pub fn remove_git_worktree(&self, repo_root: &str, worktree_path: &Path) -> Result<()> {
-        let output = Command::new("git")
+        let output = silent_command("git")
             .current_dir(repo_root)
             .args([
                 "worktree",
@@ -188,7 +188,7 @@ impl WorkspaceManager {
     }
 
     fn detect_git_branch(cwd: &str) -> Option<String> {
-        let output = Command::new("git")
+        let output = silent_command("git")
             .current_dir(cwd)
             .args(["branch", "--show-current"])
             .output()
