@@ -102,6 +102,9 @@ pub struct OrionApp {
     cached_workspaces: Vec<WorkspaceEntry>,
     cached_tabs: Vec<TabEntry>,
     cached_tabs_workspace_id: Option<String>,
+    /// Last sidebar session-body token seen by the observer. Pulse ticks leave
+    /// it unchanged, so the observer skips the cache rebuild and repaint.
+    cached_sidebar_fingerprint: Option<String>,
 }
 
 /// The runtime session this shell belongs to.
@@ -468,6 +471,7 @@ impl OrionApp {
             cached_workspaces: Vec::new(),
             cached_tabs: Vec::new(),
             cached_tabs_workspace_id: None,
+            cached_sidebar_fingerprint: None,
         };
 
         // Lifecycle clicks are events, so the shell re-renders at once instead
@@ -514,7 +518,15 @@ impl OrionApp {
             this.handle_chat_event(event, ChatPane::Split, cx);
             cx.notify();
         });
-        let sidebar_observe = cx.observe(&app.workspace_sidebar, |this, _view, cx| {
+        let sidebar_observe = cx.observe(&app.workspace_sidebar, |this, view, cx| {
+            // The sidebar notifies on every pulse tick while a status animates.
+            // Its session data is unchanged on those ticks, so skip the costly
+            // cache rebuild and repaint unless the snapshot actually moved.
+            let unchanged =
+                view.read(cx).snapshot_fingerprint() == this.cached_sidebar_fingerprint.as_deref();
+            if unchanged {
+                return;
+            }
             this.refresh_shell_cache(cx);
             cx.notify();
         });
@@ -1467,6 +1479,11 @@ impl OrionApp {
     /// session events and at startup, never from `render`, so the frame path
     /// never clones the whole session JSON or rebuilds these collections.
     fn refresh_shell_cache(&mut self, cx: &mut App) {
+        self.cached_sidebar_fingerprint = self
+            .workspace_sidebar
+            .read(cx)
+            .snapshot_fingerprint()
+            .map(str::to_string);
         let (focused, live, agent_label, has_workspaces, split_panes, workspaces, tabs, tabs_ws_id) =
             self.workspace_sidebar.update(cx, |view, _cx| {
                 let snapshot = view.snapshot();
