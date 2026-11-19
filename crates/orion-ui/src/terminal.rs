@@ -175,6 +175,18 @@ const FIND_DEBOUNCE_MS: u64 = 150;
 /// How often the "Starting …" placeholder redraws its elapsed seconds.
 const PLACEHOLDER_TICK_MS: u64 = 100;
 
+/// Map a y coordinate inside the scrollbar track to a scroll offset. The thumb
+/// travels `track_h - thumb_h` pixels: the top of that travel is offset 0 and
+/// the bottom is `max_offset`. A track with no travel maps to 0.
+fn scroll_offset_for_thumb(y: f32, track_h: f32, thumb_h: f32, max_offset: usize) -> usize {
+    let travel = track_h - thumb_h;
+    if track_h <= 0.0 || thumb_h <= 0.0 || travel <= 0.0 || max_offset == 0 {
+        return 0;
+    }
+    let fraction = (y / travel).clamp(0.0, 1.0);
+    (fraction * max_offset as f32).round() as usize
+}
+
 pub struct TerminalPane {
     screen: Box<dyn TerminalEngine>,
     focus_handle: FocusHandle,
@@ -207,6 +219,10 @@ pub struct TerminalPane {
     /// window's. The layout writes it during prepaint; the next frame draws
     /// with it.
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Whether the scrollbar thumb is being dragged.
+    scrollbar_dragging: bool,
+    /// The scroll offset when the current thumb drag began.
+    drag_scroll_base: usize,
     /// The box the last frame drew with.
     drawn_bounds: Option<Bounds<Pixels>>,
     /// The font the grid draws with, measured from the family's metrics.
@@ -302,6 +318,8 @@ impl TerminalPane {
             last_resize: Instant::now() - Duration::from_millis(RESIZE_DEBOUNCE_MS),
             font_size: DEFAULT_FONT_PX,
             grid_bounds: Rc::new(Cell::new(None)),
+            scrollbar_dragging: false,
+            drag_scroll_base: 0,
             drawn_bounds: None,
             font: None,
             font_setting: String::new(),
@@ -1462,6 +1480,11 @@ impl Render for TerminalPane {
             self.keep_placeholder_ticking(cx);
         }
 
+        // The scrollbar track's box, learned from its layout so a drag can map
+        // the pointer's y to a scroll offset. Mirrors `grid_bounds`.
+        let scrollbar_bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+        let thumb_h_px = thumb_h * grid_height / 100.0;
+
         let pane = div()
             .id("terminal-pane")
             .track_focus(&self.focus_handle)
@@ -1532,9 +1555,72 @@ impl Render for TerminalPane {
                     }
                 }),
             )
-            .child(
-                div().flex().flex_row().flex_1().child(grid).child(
-                    div().id("scrollbar").w(px(10.0)).h_full().relative().child(
+            .child(div().flex().flex_row().flex_1().child(grid).child({
+                let prepaint_bounds = Rc::clone(&scrollbar_bounds);
+                let down_bounds = Rc::clone(&scrollbar_bounds);
+                let move_bounds = Rc::clone(&scrollbar_bounds);
+                div()
+                    .w(px(10.0))
+                    .h_full()
+                    .relative()
+                    .on_children_prepainted(move |bounds, _window, _cx| {
+                        if let Some(bounds) = bounds.first() {
+                            prepaint_bounds.set(Some(*bounds));
+                        }
+                    })
+                    .id("scrollbar")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            this.focus_handle.focus(window, cx);
+                            this.scrollbar_dragging = true;
+                            let max = this.screen.scrollback_len();
+                            this.drag_scroll_base = this.screen.offset_from_bottom();
+                            let next = match down_bounds.get() {
+                                Some(bounds) => scroll_offset_for_thumb(
+                                    f32::from(ev.position.y - bounds.origin.y),
+                                    f32::from(bounds.size.height),
+                                    thumb_h_px,
+                                    max,
+                                ),
+                                None => this.drag_scroll_base,
+                            };
+                            this.screen.scroll_to(next);
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                        if !this.scrollbar_dragging {
+                            return;
+                        }
+                        let max = this.screen.scrollback_len();
+                        let next = match move_bounds.get() {
+                            Some(bounds) => scroll_offset_for_thumb(
+                                f32::from(ev.position.y - bounds.origin.y),
+                                f32::from(bounds.size.height),
+                                thumb_h_px,
+                                max,
+                            ),
+                            None => this.drag_scroll_base,
+                        };
+                        if next != this.screen.offset_from_bottom() {
+                            this.screen.scroll_to(next);
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                            if this.scrollbar_dragging {
+                                this.scrollbar_dragging = false;
+                                cx.notify();
+                            }
+                        }),
+                    )
+                    // Invisible full-size child: its bounds are the track's,
+                    // which `on_children_prepainted` reports to the drag handlers.
+                    .child(div().absolute().inset_0())
+                    .child(
                         div()
                             .id("thumb")
                             .w_full()
@@ -1543,9 +1629,8 @@ impl Render for TerminalPane {
                             .bg(theme.surface_hover)
                             .absolute()
                             .top(px(thumb_top * grid_height / 100.0)),
-                    ),
-                ),
-            )
+                    )
+            }))
             .child(find_bar)
             .child(key_bar)
             .child(status_bar);
@@ -1582,6 +1667,28 @@ mod tests {
             is_held: false,
             prefer_character_input: false,
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn scroll_offset_for_thumb_maps_top_middle_and_bottom() {
+        // Track 100px, thumb 20px -> 80px of travel, 1000 lines of scrollback.
+        assert_eq!(scroll_offset_for_thumb(0.0, 100.0, 20.0, 1000), 0);
+        assert_eq!(scroll_offset_for_thumb(40.0, 100.0, 20.0, 1000), 500);
+        assert_eq!(scroll_offset_for_thumb(80.0, 100.0, 20.0, 1000), 1000);
+    }
+
+    #[::core::prelude::v1::test]
+    fn scroll_offset_for_thumb_clamps_out_of_range_y() {
+        assert_eq!(scroll_offset_for_thumb(-10.0, 100.0, 20.0, 1000), 0);
+        assert_eq!(scroll_offset_for_thumb(500.0, 100.0, 20.0, 1000), 1000);
+    }
+
+    #[::core::prelude::v1::test]
+    fn scroll_offset_for_thumb_handles_degenerate_tracks() {
+        assert_eq!(scroll_offset_for_thumb(10.0, 0.0, 0.0, 1000), 0);
+        assert_eq!(scroll_offset_for_thumb(10.0, 100.0, 100.0, 1000), 0);
+        assert_eq!(scroll_offset_for_thumb(10.0, 100.0, 120.0, 1000), 0);
+        assert_eq!(scroll_offset_for_thumb(10.0, 100.0, 20.0, 0), 0);
     }
 
     #[::core::prelude::v1::test]
