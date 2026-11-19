@@ -14,6 +14,6 @@ Consequences:
 - Every terminal is started with `RUNTIME_TERMINAL_ID`, `RUNTIME_SOCKET` and `RUNTIME_CLI` in its environment, so a terminal knows its parent and can reach the CLI.
 - The runtime enforces the limits itself — chain depth, children per parent, terminals per session, and the rule that a child runs inside its parent's directory — so a client cannot ask for more than the session allows.
 - The agent-facing surface is the `orion-rt` command, and the guide it prints is `docs/agent-runtime.md`, embedded by the CLI so the two cannot drift apart.
-- The workspace panes stay agent-only. The runtime's registry is a lower layer, and a terminal there may run any program.
+- Agent panes stay agent-only. The user can also open a dedicated shell terminal pane through `POST /api/pane/shell`, which runs a shell from an explicit allow-list (Windows PowerShell, PowerShell 7, Bash, Command Prompt) discovered on `PATH`. Shell panes never run agent status detection. The runtime's registry is a lower layer and a terminal there may run any program.
 - The runtime crate is part of `orion-core` (`crates/orion-core/src/runtime/`), not a new set of crates: `orion-core` already held the PTY and the emulator, and a parallel crate would have produced two terminal implementations.
 - The emulator was `vt100` when this decision was made. It has since been replaced by vendored `libghostty-vt`, built from pinned source at compile time.

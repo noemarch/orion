@@ -6,7 +6,7 @@
 
 ## 1. Core Architecture & Philosophy
 
-1. **Agent-Only Orchestration (No Generic Shells):** Orion orchestrates AI agent CLIs exclusively (`claude`, `codex`, `opencode`, `cursor`, `grok`, `omp`, `omo`, `pi`, `agy`, `hermes`, `devin`). Orion does **not** provide generic bash/zsh/PowerShell terminal tabs. Every workspace pane is strictly a dedicated AI agent instance. The terminal lens in Orion is the live, inspectable PTY of that *agent's* interactive CLI, not an empty shell prompt.
+1. **Agent-Only Orchestration (With One Shell Exception):** Orion orchestrates AI agent CLIs (`claude`, `codex`, `opencode`, `cursor`, `grok`, `omp`, `omo`, `pi`, `agy`, `hermes`, `devin`). Agent panes are strictly dedicated AI agent instances and their terminal lens is that agent's live, inspectable PTY. The one deliberate exception is the user-invoked shell terminal pane: it runs a shell chosen in the UI (Windows PowerShell, PowerShell 7, Bash, or Command Prompt) in the same native libghostty-backed view, and is created only through `POST /api/pane/shell`. Shell panes are the only panes allowed a generic shell; they never run agent status detection.
 2. **No External Multiplexer:** Orion is an independent orchestrator. It does not wrap, bridge, or depend on any external terminal multiplexer. Orion directly allocates PTYs, supervises agent subprocesses, manages workspaces/worktrees, and serves remote clients.
 3. **Dual Delivery:**
    - **Native GPUI Desktop App:** Runs locally on Windows, macOS, and Linux with native OS window management and system tray integration.
@@ -19,7 +19,7 @@
 ## 2. Technical Invariants & Traps
 
 ### 2.1 PTY Engine & Process Control (`orion-core::pty`, `orion-core::agents`)
-- **Agent CLI Target Exclusivity:** Never spawn a generic `sh`, `bash`, `cmd`, or `powershell` as a top-level pane. Every spawned PTY must execute an identified AI agent CLI binary discovered on `PATH`.
+- **Agent CLI Target Exclusivity:** Agent panes must execute an identified AI agent CLI binary discovered on `PATH`; never spawn a generic shell for them. The exception is `POST /api/pane/shell`, which spawns a shell selected by the user from an allow-list and discovered on `PATH`.
 - **PTY Threading Invariant:** PTY reads are blocking. Never perform blocking PTY reads directly on a Tokio async worker thread. Always spawn a dedicated background thread or use `tokio::task::spawn_blocking` with bounded `mpsc` channels.
 - **ConPTY Windows Parity:** On Windows, use `portable-pty` with ConPTY enabled (`CreatePseudoConsole`). Ensure terminal resize events send accurate character and pixel dimensions to prevent text clipping in full-screen TUIs.
 - **Process Group Termination:** When terminating an agent, terminate the entire process tree.
