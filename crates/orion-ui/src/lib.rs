@@ -19,6 +19,7 @@ pub mod prompt_card;
 pub mod review_pane;
 pub mod settings;
 pub mod shell_model;
+pub mod shell_picker;
 pub mod sidebar;
 pub mod terminal;
 pub mod terminal_font;

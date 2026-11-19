@@ -216,6 +216,34 @@ pub fn review_column_visible(
     review_open && !collapse_review && has_workspaces && !split_second
 }
 
+/// Whether the right-hand review column is shown while a shell terminal is
+/// active. A shell terminal owns the full window width, so the review column
+/// is always hidden in that case; otherwise the ordinary rule applies.
+pub fn review_column_visible_for_terminal(
+    review_open: bool,
+    collapse_review: bool,
+    has_workspaces: bool,
+    split_second: bool,
+    shell_terminal_active: bool,
+) -> bool {
+    if shell_terminal_active {
+        false
+    } else {
+        review_column_visible(review_open, collapse_review, has_workspaces, split_second)
+    }
+}
+
+/// The conversation column's effective width. A shell terminal takes the
+/// review column's room as well, so it spans both columns; otherwise it keeps
+/// the reference conversation width.
+pub fn effective_conversation_width(reference: &ReferenceLayout, full_width: bool) -> f32 {
+    if full_width {
+        reference.conversation_w + reference.review_w
+    } else {
+        reference.conversation_w
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +458,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn shell_terminal_hides_the_review_column() {
+        // Every ordinary condition is met, yet an active shell terminal wins.
+        assert!(!review_column_visible_for_terminal(
+            true, false, true, false, true
+        ));
+        // Without a shell terminal the ordinary rule still applies.
+        assert!(review_column_visible_for_terminal(
+            true, false, true, false, false
+        ));
+        assert!(!review_column_visible_for_terminal(
+            false, false, true, false, false
+        ));
+    }
+
+    #[::core::prelude::v1::test]
+    fn shell_terminal_expands_the_conversation_width() {
+        let reference = reference_layout(1600.0);
+        assert_eq!(effective_conversation_width(&reference, false), 670.0);
+        assert_eq!(
+            effective_conversation_width(&reference, true),
+            670.0 + 630.0
+        );
+        // A collapsed review contributes no extra width.
+        let narrow = reference_layout(1100.0);
+        assert_eq!(
+            effective_conversation_width(&narrow, true),
+            narrow.conversation_w
+        );
     }
 }
