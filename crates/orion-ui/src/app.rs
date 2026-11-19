@@ -1581,7 +1581,17 @@ impl Render for OrionApp {
         // a lens choice alive.
         self.lens_book.retain_panes(&self.cached_live_panes);
         if let Some(pane_id) = self.focused_pane.clone() {
-            self.attach_pane(cx, &pane_id);
+            // Attaching does blocking socket round-trips (pane_by_id,
+            // pane.attach, status poller). Never run those inside render:
+            // defer to a one-shot foreground task. The guard keeps this to a
+            // single task per focus change; attach_pane also no-ops when the
+            // pane is already attached.
+            if self.attached_pane.as_deref() != Some(pane_id.as_str()) {
+                cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                    let _ = this.update(cx, |this, cx| this.attach_pane(cx, &pane_id));
+                })
+                .detach();
+            }
             // The terminal's placeholder names the agent: "Starting Claude
             // Code… (2.4s)" says far more than a blank grid.
             let agent_label = self.cached_agent_label.clone();
