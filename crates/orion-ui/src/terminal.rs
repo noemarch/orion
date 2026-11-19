@@ -212,6 +212,9 @@ pub struct TerminalPane {
     /// The size the agent still has to be told about: the final size of a
     /// resize must reach it, even when the drag has already quieted down.
     pending_resize: Option<(u16, u16)>,
+    /// Bumped on every held-back resize so only the newest one-shot flush
+    /// timer sends the final size.
+    resize_flush_generation: u64,
     /// Whether this view only watches the pane. An observing view follows its
     /// own box but never resizes the PTY: the pane's size belongs to the view
     /// that owns it, and the split canvas shares that PTY with the main one.
@@ -298,6 +301,7 @@ impl TerminalPane {
             font: None,
             font_setting: String::new(),
             pending_resize: None,
+            resize_flush_generation: 0,
             observe: false,
             touch: false,
             focus_wanted: false,
@@ -406,17 +410,43 @@ impl TerminalPane {
     /// quieted down.
     ///
     /// The render is the only caller: the observing rule lives there, where
-    /// the view decides whether the agent's size is its business.
-    fn request_resize(&mut self, cols: u16, rows: u16) {
+    /// the view decides whether the agent's size is its business. A held-back
+    /// size also arms a one-shot timer so the final size reaches the agent
+    /// even when nothing else repaints.
+    fn request_resize(&mut self, cols: u16, rows: u16, cx: &mut Context<Self>) {
         if self.last_resize.elapsed() >= Duration::from_millis(RESIZE_DEBOUNCE_MS) {
             self.last_resize = Instant::now();
             self.pending_resize = None;
             self.send_resize(cols, rows);
             return;
         }
-        // The final size must still reach the agent: the next frame sends it
-        // when the window has been quiet for the debounce.
         self.pending_resize = Some((cols, rows));
+        self.resize_flush_generation = self.resize_flush_generation.wrapping_add(1);
+        let generation = self.resize_flush_generation;
+        cx.spawn(async move |view, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(RESIZE_DEBOUNCE_MS))
+                .await;
+            let _ = view.update(cx, |view, _cx| {
+                if view.resize_flush_generation != generation {
+                    return;
+                }
+                view.flush_pending_resize();
+            });
+        })
+        .detach();
+    }
+
+    /// Send a held-back resize, if any. Both the render path and the one-shot
+    /// timer call this; taking the pending size first means only one sends it.
+    fn flush_pending_resize(&mut self) {
+        if self.observe {
+            return;
+        }
+        if let Some((cols, rows)) = self.pending_resize.take() {
+            self.last_resize = Instant::now();
+            self.send_resize(cols, rows);
+        }
     }
 
     /// Send a size to the agent's PTY.
@@ -1171,19 +1201,18 @@ impl Render for TerminalPane {
             // An observing view follows its own box but never resizes the PTY
             // it shares: the agent keeps the size the owning view gave it.
             if !self.observe {
-                self.request_resize(cols, rows);
+                self.request_resize(cols, rows, cx);
             }
         }
-        // A resize that was held back while the drag was still moving goes out
-        // now: the final size must reach the agent.
-        if let Some((cols, rows)) = self.pending_resize {
-            if !self.observe
-                && self.last_resize.elapsed() >= Duration::from_millis(RESIZE_DEBOUNCE_MS)
-            {
-                self.pending_resize = None;
-                self.last_resize = Instant::now();
-                self.send_resize(cols, rows);
-            }
+        // A resize held back while the drag was moving goes out once the
+        // debounce has elapsed. The one-shot timer does the same when no
+        // further render happens; taking the pending size makes it a no-op
+        // if this render already sent it.
+        if !self.observe
+            && self.pending_resize.is_some()
+            && self.last_resize.elapsed() >= Duration::from_millis(RESIZE_DEBOUNCE_MS)
+        {
+            self.flush_pending_resize();
         }
         if let Some(cell) = cell {
             self.char_w = cell.width;
