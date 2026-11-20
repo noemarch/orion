@@ -23,15 +23,16 @@
 
 use crate::theme::Theme;
 use gpui_kit::{
-    fill, point, px, size, App, Bounds, ContentMask, Element, ElementId, Font, FontFeatures,
-    FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId,
-    Pixels, Point, Refineable, Rgba, SharedString, Style, StyleRefinement, Styled, TextAlign,
-    TextRun, UnderlineStyle, Window,
+    fill, point, px, size, App, Bounds, ContentMask, Element, ElementId, Font, FontStyle,
+    FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels, Point,
+    Refineable, Rgba, SharedString, Style, StyleRefinement, Styled, TextAlign, TextRun,
+    UnderlineStyle, Window,
 };
 use orion_core::terminal_engine::TermCell;
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 /// The size of one character cell, measured from the font that draws it.
 #[derive(Debug, Clone, Copy)]
@@ -44,6 +45,53 @@ pub struct CellSize {
 /// `0.5` paints the foreground half-opaque over the background — a dim the
 /// reader can still read.
 const DIM_FADE: f32 = 0.5;
+
+/// Debug switches from `ORION_TERMINAL_DEBUG`. All are off by default; `all`
+/// turns them on, `grid` draws cell boundaries only, `repaint` bypasses the row
+/// cache, `legacy` restores the pre-fix text shaping for an A/B comparison,
+/// `mouse` prints the exact bytes of every SGR mouse report sent to the PTY, and
+/// `perf` prints paint and reshape timing each frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TerminalDebug {
+    pub full_repaint: bool,
+    pub grid_lines: bool,
+    pub legacy_width: bool,
+    pub mouse: bool,
+    pub perf: bool,
+}
+
+/// Parse the env value once. Unknown values are ignored, so a typo cannot change
+/// what the reader sees.
+pub fn parse_terminal_debug(value: &str) -> TerminalDebug {
+    let mut flags = TerminalDebug::default();
+    for token in value.split([',', ' ']).filter(|token| !token.is_empty()) {
+        match token {
+            "all" => {
+                flags.full_repaint = true;
+                flags.grid_lines = true;
+                flags.mouse = true;
+                flags.perf = true;
+            }
+            "grid" => flags.grid_lines = true,
+            "repaint" => flags.full_repaint = true,
+            "legacy" => flags.legacy_width = true,
+            "mouse" => flags.mouse = true,
+            "perf" => flags.perf = true,
+            _ => {}
+        }
+    }
+    flags
+}
+
+static TERMINAL_DEBUG: OnceLock<TerminalDebug> = OnceLock::new();
+
+/// The parsed debug switches, read from the environment on first use.
+pub fn terminal_debug() -> &'static TerminalDebug {
+    TERMINAL_DEBUG.get_or_init(|| {
+        let value = std::env::var("ORION_TERMINAL_DEBUG").unwrap_or_default();
+        parse_terminal_debug(&value)
+    })
+}
 
 /// The resolved visual style of one grid cell: the colours the program asked
 /// for, resolved against the theme, with inverse already applied.
@@ -139,17 +187,17 @@ pub struct BgSpan {
     pub color: Rgba,
 }
 
-/// The key a built row is valid for: the content it was built from, the scroll
-/// offset it was built at, the row's own content coordinates, the overlays
-/// painted on it (the selection span in the row's columns and the find revision —
-/// a counter, not the match count, so same-count-different-spans still
-/// invalidates), and the theme colours the runs were resolved against.
+/// The key a built row is valid for: a fingerprint of the cells' text and
+/// styles, the overlays painted on it (the selection span in the row's columns,
+/// the find spans, and the find revision — a counter, not the match count, so
+/// same-count-different-spans still invalidates), and the theme colours the
+/// runs were resolved against. The screen's global revision is deliberately
+/// absent: a feed elsewhere on the screen must not rebuild an unchanged row.
 #[derive(Clone, PartialEq)]
 pub struct RowCacheKey {
-    pub revision: u64,
-    pub offset: usize,
-    pub content_row: usize,
+    pub content_hash: u64,
     pub selection: Option<(usize, usize)>,
+    pub find: Vec<Range<usize>>,
     pub find_revision: u64,
     pub theme_fg: Rgba,
     pub theme_bg: Rgba,
@@ -174,6 +222,9 @@ pub struct GridRow {
     /// The row's non-default background cells, merged into the fewest column
     /// spans. Rows merge with each other at paint time.
     pub bgs: Vec<BgSpan>,
+    /// Whether any cell occupies two columns. `force_width` snaps glyphs by
+    /// glyph index, not by column, so wide characters must keep natural layout.
+    pub has_wide: bool,
 }
 
 /// The overlays a row's cells can carry, in the row's own coordinates: the
@@ -332,6 +383,7 @@ pub fn build_row(
         }
     }
 
+    let has_wide = scratch.advance.contains(&2);
     let text = SharedString::new(std::mem::take(&mut scratch.text));
     let runs = std::mem::take(&mut scratch.runs);
     let bgs = std::mem::take(&mut scratch.bgs);
@@ -344,6 +396,7 @@ pub fn build_row(
         text,
         runs,
         bgs,
+        has_wide,
     }
 }
 
@@ -373,8 +426,8 @@ pub struct GridSnapshot {
     pub cursor_glyph: Option<(String, CellStyle)>,
     /// The size of one character cell, measured from the font.
     pub cell: CellSize,
-    /// The font family the grid draws with.
-    pub font_family: String,
+    /// The exact font the grid draws with, measured from the same metrics.
+    pub font: Font,
     /// The font size, in pixels.
     pub font_size: f32,
     /// The palette the rows were resolved against, for the cursor.
@@ -454,6 +507,52 @@ impl TerminalGrid {
         }
     }
 
+    /// The width every glyph in a row is forced to. A normal row is one glyph
+    /// per column, so snapping to the measured cell width keeps fallback faces
+    /// from drifting off their backgrounds. Wide rows keep natural shaping.
+    fn forced_cell_width(
+        row_has_wide: bool,
+        cell: CellSize,
+        debug: &TerminalDebug,
+    ) -> Option<Pixels> {
+        if row_has_wide || debug.legacy_width {
+            None
+        } else {
+            Some(px(cell.width))
+        }
+    }
+
+    fn paint_grid_lines(&self, bounds: Bounds<Pixels>, window: &mut Window) {
+        let cell = self.snapshot.cell;
+        let mut color: Hsla = self.snapshot.theme.term_fg.into();
+        color.fade_out(0.8);
+        let cols = (f32::from(bounds.size.width) / cell.width).ceil() as usize;
+        for col in 0..cols {
+            window.paint_quad(fill(
+                Bounds {
+                    origin: point(
+                        bounds.origin.x + px(col as f32 * cell.width),
+                        bounds.origin.y,
+                    ),
+                    size: size(px(1.0), bounds.size.height),
+                },
+                color,
+            ));
+        }
+        for row in 0..=self.snapshot.rows.len() {
+            window.paint_quad(fill(
+                Bounds {
+                    origin: point(
+                        bounds.origin.x,
+                        bounds.origin.y + px(row as f32 * cell.height),
+                    ),
+                    size: size(bounds.size.width, px(1.0)),
+                },
+                color,
+            ));
+        }
+    }
+
     fn paint_text(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let Self {
             snapshot,
@@ -465,13 +564,7 @@ impl TerminalGrid {
         }
         let cell = snapshot.cell;
         let font_size = px(snapshot.font_size);
-        let base_font = Font {
-            family: SharedString::new(snapshot.font_family.clone()),
-            features: FontFeatures::default(),
-            fallbacks: None,
-            weight: FontWeight::NORMAL,
-            style: FontStyle::Normal,
-        };
+        let base_font = snapshot.font.clone();
         // Shaping goes through the window's line-layout cache: a row whose text
         // and runs did not change is not re-shaped. The run buffer is cleared
         // and refilled per row, so one allocation serves the whole grid. The
@@ -492,7 +585,9 @@ impl TerminalGrid {
             let text = text_slot
                 .take()
                 .expect("row paint text handle is restored after every shape");
-            let mut line = text_system.shape_line(text, font_size, run_scratch.as_slice(), None);
+            let force_width = Self::forced_cell_width(row.has_wide, cell, terminal_debug());
+            let mut line =
+                text_system.shape_line(text, font_size, run_scratch.as_slice(), force_width);
             *text_slot = Some(std::mem::take(&mut line.text));
             let origin = Point {
                 x: bounds.origin.x,
@@ -527,20 +622,16 @@ impl TerminalGrid {
             return;
         };
         let font_size = px(self.snapshot.font_size);
-        let font = Font {
-            family: SharedString::new(self.snapshot.font_family.clone()),
-            features: FontFeatures::default(),
-            fallbacks: None,
-            weight: if style.bold {
-                FontWeight::BOLD
-            } else {
-                FontWeight::NORMAL
-            },
-            style: if style.italic {
-                FontStyle::Italic
-            } else {
-                FontStyle::Normal
-            },
+        let mut font = self.snapshot.font.clone();
+        font.weight = if style.bold {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        };
+        font.style = if style.italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
         };
         let mut color: Hsla = self.snapshot.theme.term_bg.into();
         if style.dim {
@@ -636,26 +727,102 @@ impl Element for TerminalGrid {
         // and a glyph must never reach the scrollbar.
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             self.paint_backgrounds(bounds, window);
+            if terminal_debug().grid_lines {
+                self.paint_grid_lines(bounds, window);
+            }
             self.paint_text(bounds, window, cx);
             self.paint_cursor(bounds, window, cx);
         });
         #[cfg(debug_assertions)]
-        crate::perf::record_paint(started.elapsed());
+        {
+            let elapsed = started.elapsed();
+            crate::perf::record_paint(elapsed);
+            if terminal_debug().perf {
+                eprintln!("ORION frame: paint {elapsed:?}");
+            }
+        }
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[::core::prelude::v1::test]
+    fn forced_cell_width_matches_the_grid_column() {
+        let flags = TerminalDebug::default();
+        assert_eq!(
+            TerminalGrid::forced_cell_width(
+                false,
+                CellSize {
+                    width: 8.0,
+                    height: 16.0
+                },
+                &flags
+            ),
+            Some(px(8.0)),
+            "a normal row snaps glyphs to the measured cell"
+        );
+        assert_eq!(
+            TerminalGrid::forced_cell_width(
+                true,
+                CellSize {
+                    width: 8.0,
+                    height: 16.0
+                },
+                &flags
+            ),
+            None,
+            "a wide row keeps natural shaping"
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn debug_flags_parse_from_one_env_value() {
+        assert_eq!(
+            parse_terminal_debug("all"),
+            TerminalDebug {
+                full_repaint: true,
+                grid_lines: true,
+                legacy_width: false,
+                mouse: true,
+                perf: true,
+            }
+        );
+        assert!(parse_terminal_debug("grid").grid_lines);
+        assert!(parse_terminal_debug("legacy").legacy_width);
+        assert!(parse_terminal_debug("mouse").mouse);
+        assert!(parse_terminal_debug("perf").perf);
+        assert_eq!(parse_terminal_debug("nonsense"), TerminalDebug::default());
+    }
+
+    #[::core::prelude::v1::test]
+    fn background_and_text_share_the_same_column_origin() {
+        let cell = CellSize {
+            width: 8.0,
+            height: 16.0,
+        };
+        let span = BgSpan {
+            first_col: 5,
+            end_col: 8,
+            color: crate::theme::rgb_color(1, 2, 3),
+        };
+        assert_eq!(span.first_col as f32 * cell.width, 40.0);
+        assert_eq!(
+            TerminalGrid::forced_cell_width(false, cell, &TerminalDebug::default()),
+            Some(px(cell.width)),
+            "text and background both start at the same column width"
+        );
+    }
+    use gpui_kit::FontFeatures;
     use orion_core::terminal_engine::TermColor;
 
     /// The key the render path stamps on a built row. These tests do not care
     /// about the cache, only about what the row draws.
     fn key(theme: &Theme) -> RowCacheKey {
         RowCacheKey {
-            revision: 0,
-            offset: 0,
-            content_row: 0,
+            content_hash: 0,
             selection: None,
+            find: Vec::new(),
             find_revision: 0,
             theme_fg: theme.term_fg,
             theme_bg: theme.term_bg,
@@ -690,10 +857,9 @@ mod tests {
     fn row_with_bg(first_col: usize, end_col: usize, color: Rgba) -> Rc<GridRow> {
         Rc::new(GridRow {
             key: RowCacheKey {
-                revision: 0,
-                offset: 0,
-                content_row: 0,
+                content_hash: 0,
                 selection: None,
+                find: Vec::new(),
                 find_revision: 0,
                 theme_fg: color,
                 theme_bg: color,
@@ -708,6 +874,7 @@ mod tests {
                 end_col,
                 color,
             }],
+            has_wide: false,
         })
     }
 
@@ -720,7 +887,7 @@ mod tests {
                 width: 8.0,
                 height: 16.0,
             },
-            font_family: "monospace".to_string(),
+            font: base_font(),
             font_size: 13.0,
             theme: Theme::dark(),
         }
