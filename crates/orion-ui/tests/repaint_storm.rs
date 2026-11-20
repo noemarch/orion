@@ -319,6 +319,12 @@ mod frame_times {
     fn report(label: &str, wall: Duration, stats: &orion_ui::perf::PerfStats) {
         let feed = orion_ui::perf::summarize(&stats.feeds);
         let frame = orion_ui::perf::summarize(&stats.frames);
+        let reshaped = if stats.rows_reshaped.is_empty() {
+            0
+        } else {
+            stats.rows_reshaped.iter().sum::<u64>() / stats.rows_reshaped.len() as u64
+        };
+        println!("{label}: rows reshaped per frame avg {reshaped}");
         match (feed, frame) {
             (Some((feed_p50, feed_p95, feed_total)), Some((frame_p50, frame_p95, frame_total))) => {
                 println!(
