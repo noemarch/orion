@@ -17,7 +17,8 @@ use crate::settings::KeyBarExtras;
 use crate::shell_model::ShellLayout;
 use crate::terminal_font::{is_symbol_family, terminal_font_families};
 use crate::terminal_grid::{
-    build_row, CellScratch, CellSize, GridRow, GridSnapshot, RowCacheKey, RowOverlays, TerminalGrid,
+    build_row, terminal_debug, CellScratch, CellSize, GridRow, GridSnapshot, RowCacheKey,
+    RowOverlays, TerminalGrid,
 };
 use crate::theme::Theme;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -26,15 +27,17 @@ use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::Selectable;
 use gpui_kit::*;
 use gpui_kit::{
-    div, px, rems, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollEvent,
-    StyledText, TextStyle, TextSystem, Window,
+    div, px, rems, white, Bounds, ClipboardItem, Context, FocusHandle, Font, FontFallbacks,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Render, ScrollEvent, SharedString, StyledText, TextRun, TextStyle, Window, WindowTextSystem,
 };
 use orion_core::runtime::PaneHandle;
 use orion_core::terminal_engine::{
-    encode_sgr_mouse, new_engine, sgr_mods, ActiveScreen, Key, TermCell, TerminalEngine,
+    encode_sgr_mouse, new_engine, sgr_mods, ActiveScreen, Key, TermCell, TermColor, TerminalEngine,
 };
 use std::cell::Cell;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -46,11 +49,11 @@ const TARGET_PX: f32 = 44.0;
 /// Resize requests are debounced this long before reaching the PTY.
 pub const RESIZE_DEBOUNCE_MS: u64 = 50;
 
-/// The terminal's font: the monospace family the grid draws with, and the cell
-/// it measures from that family's real metrics.
+/// The terminal's font: the exact font the grid paints with, and the cell
+/// measured from that same font's real, shaped metrics.
 #[derive(Debug, Clone)]
 struct TerminalFont {
-    family: String,
+    font: Font,
     cell: CellSize,
 }
 
@@ -81,6 +84,57 @@ pub fn face_carries_a_grid(
 /// half block.
 const GRID_GLYPHS: [char; 3] = ['\u{2500}', '\u{2588}', '\u{2580}'];
 
+/// Fallback faces used to paint terminal text. A face whose grid glyphs do not
+/// share the primary face's advance would shift later glyphs off their cells;
+/// only symbol faces are kept unconditionally, for icons `force_width` can snap.
+fn grid_fallback_families(
+    families: &[String],
+    installed: &[String],
+    cell_width: f32,
+    advance: impl Fn(&str, char) -> Option<f32>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for family in families {
+        if !installed
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(family))
+        {
+            continue;
+        }
+        if is_symbol_family(family) {
+            out.push(family.clone());
+            continue;
+        }
+        let Some(wide) = advance(family, 'W') else {
+            continue;
+        };
+        let glyphs: Vec<Option<f32>> = GRID_GLYPHS
+            .iter()
+            .map(|glyph| advance(family, *glyph))
+            .collect();
+        if face_carries_a_grid(cell_width, wide, &glyphs) {
+            out.push(family.clone());
+        }
+    }
+    out
+}
+
+/// A line that carries a plain letter, the grid's box glyphs and a Nerd icon,
+/// so shaping it exercises every face the painted font can fall back to.
+const CELL_PROBE_TEXT: &str = "i\u{2500}\u{2588}\u{2580}\u{E0B0}";
+
+/// A cell must be at least as tall as the line box it paints, or GPUI gives
+/// that line negative top padding and its glyphs spill into the row above.
+fn cell_height_from_metrics(ascent: f32, descent: f32) -> f32 {
+    (ascent + descent).ceil().max(1.0)
+}
+
+/// Whole cells that fit in an extent, shared by the grid's geometry and the
+/// size reported to the agent.
+fn rows_from_height(height: f32, cell_extent: f32) -> u16 {
+    (height / cell_extent.max(1.0)).floor().clamp(1.0, 10_000.0) as u16
+}
+
 /// Measure the terminal's font: the family the reader configured, or the first
 /// one that is installed AND can carry a grid.
 ///
@@ -88,7 +142,7 @@ const GRID_GLYPHS: [char; 3] = ['\u{2500}', '\u{2588}', '\u{2580}'];
 /// proportional: a grid drawn with it goes ragged, and the agent's menu stops
 /// lining up.
 fn measure_terminal_font(
-    text_system: &TextSystem,
+    text_system: &WindowTextSystem,
     families: &[String],
     font_size: Pixels,
 ) -> Option<TerminalFont> {
@@ -127,12 +181,42 @@ fn measure_terminal_font(
         if !face_carries_a_grid(cell_width, f32::from(wide.width), &glyph_advances) {
             continue;
         }
-        let height = text_system.ascent(id, font_size) + text_system.descent(id, font_size);
+        // The same font, with the whole fallback stack, is what paint shapes
+        // each row with. Measuring a plain id would miss the taller line box
+        // of a fallback face used for a box glyph or a Nerd icon.
+        let fallback_families =
+            grid_fallback_families(families, &installed, cell_width, |name, glyph| {
+                let id = text_system.resolve_font(&gpui_kit::font(name.to_string()));
+                text_system
+                    .advance(id, font_size, glyph)
+                    .ok()
+                    .map(|advance| f32::from(advance.width))
+            });
+        let shared_font = Font {
+            family: family.into(),
+            features: FontFeatures::default(),
+            fallbacks: Some(FontFallbacks::from_fonts(fallback_families.clone())),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+        };
+        let probe = text_system.shape_line(
+            SharedString::new(CELL_PROBE_TEXT),
+            font_size,
+            &[TextRun {
+                len: CELL_PROBE_TEXT.len(),
+                font: shared_font.clone(),
+                color: white(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
         return Some(TerminalFont {
-            family: family.clone(),
+            font: shared_font,
             cell: CellSize {
                 width: cell_width,
-                height: f32::from(height).max(1.0),
+                height: cell_height_from_metrics(f32::from(probe.ascent), f32::from(probe.descent)),
             },
         });
     }
@@ -240,13 +324,56 @@ pub enum TerminalPaneEvent {
 /// live prompt). Both `Lines` and `Pixels` deltas preserve the platform sign,
 /// so one formula serves both. On Windows, Shift redirects the vertical wheel
 /// into `delta.x`, so read that axis when Shift is held.
-fn wheel_rows_up(ev: &ScrollEvent, row_height: f32) -> i64 {
+fn wheel_rows_f64(ev: &ScrollEvent, row_height: f32) -> f64 {
     if row_height <= 0.0 {
-        return 0;
+        return 0.0;
     }
     let delta = ev.delta.pixel_delta(px(row_height));
     let value = f32::from(if ev.modifiers.shift { delta.x } else { delta.y });
-    (value / row_height).round() as i64
+    f64::from(value / row_height)
+}
+
+fn wheel_rows_up(ev: &ScrollEvent, row_height: f32) -> i64 {
+    wheel_rows_f64(ev, row_height).round() as i64
+}
+
+fn accumulate_wheel_rows(delta: f64, fraction: f64) -> (i64, f64) {
+    let total = delta + fraction;
+    let rows = total.trunc() as i64;
+    (rows, total - rows as f64)
+}
+
+fn hash_color(color: TermColor, hasher: &mut DefaultHasher) {
+    match color {
+        TermColor::Default => 0u8.hash(hasher),
+        TermColor::Indexed(index) => {
+            1u8.hash(hasher);
+            index.hash(hasher);
+        }
+        TermColor::Rgb(red, green, blue) => {
+            2u8.hash(hasher);
+            red.hash(hasher);
+            green.hash(hasher);
+            blue.hash(hasher);
+        }
+    }
+}
+
+fn row_content_hash(cells: &[TermCell]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for cell in cells {
+        cell.text.hash(&mut hasher);
+        hash_color(cell.fg, &mut hasher);
+        hash_color(cell.bg, &mut hasher);
+        cell.bold.hash(&mut hasher);
+        cell.dim.hash(&mut hasher);
+        cell.italic.hash(&mut hasher);
+        cell.underline.hash(&mut hasher);
+        cell.inverse.hash(&mut hasher);
+        cell.wide.hash(&mut hasher);
+        cell.wide_continuation.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// What one wheel event does, decided purely from the emulator's live mode
@@ -328,6 +455,9 @@ pub struct TerminalPane {
     /// Whether a mouse-tracking press was forwarded to the PTY, so a release is
     /// only sent when there was a matching press.
     mouse_forwarding_press: bool,
+    /// Fractional rows left over from a pixel wheel delta, carried into the next
+    /// event so a slow touchpad gesture still moves the viewport.
+    wheel_fraction: f64,
     // Geometry measured at render time for mouse→cell mapping.
     char_w: f32,
     last_cols: u16,
@@ -375,11 +505,11 @@ pub struct TerminalPane {
     /// Bumped on every find-match refresh (and on the empty-query clear), so
     /// the row cache can tell "same match count, different spans" apart.
     find_revision: u64,
-    /// Per-row render cache, indexed by visible row. A row whose key matches
-    /// (content revision, offset, content row, selection span, find revision,
-    /// theme fingerprint) reuses its text, styled spans and background spans
-    /// instead of re-running `build_row`.
-    row_cache: Vec<Option<Rc<GridRow>>>,
+    /// Per-row render cache, addressed by content rather than visible-row slot:
+    /// output streaming shifts every visible row down by one, and slot indexing
+    /// would rebuild all of them. A row with a matching content and overlay key
+    /// reuses its text, styled spans and background spans.
+    row_cache: Vec<Rc<GridRow>>,
     /// How many rows were rebuilt during renders. Read by tests to prove the
     /// cache-hit path does not rebuild rows.
     rows_built: u64,
@@ -413,6 +543,8 @@ pub struct TerminalPane {
     started_at: Instant,
     /// Whether the placeholder's ticker is already running.
     placeholder_ticking: bool,
+    /// Whether the debug repaint ticker is already running.
+    repaint_ticking: bool,
     /// Whether the startup timeline already marked the first frame with
     /// content.
     nonempty_traced: bool,
@@ -445,6 +577,7 @@ impl TerminalPane {
             sel_cursor: None,
             selecting: false,
             mouse_forwarding_press: false,
+            wheel_fraction: 0.0,
             char_w: 7.81, // refined from the measured font on the first frame.
             last_cols: 120,
             last_rows: 32,
@@ -477,6 +610,7 @@ impl TerminalPane {
             agent_label: "the agent".to_string(),
             started_at: Instant::now(),
             placeholder_ticking: false,
+            repaint_ticking: false,
             resize_traced: false,
         }
     }
@@ -680,6 +814,32 @@ impl TerminalPane {
         self.focus_wanted = true;
     }
 
+    /// Debug-only repaint clock: `ORION_TERMINAL_DEBUG=repaint` asks for a frame
+    /// every 60ms so the bypassed row cache is exercised without starving the
+    /// machine.
+    fn keep_repainting(&mut self, cx: &mut Context<Self>) {
+        if !terminal_debug().full_repaint || self.repaint_ticking {
+            return;
+        }
+        self.repaint_ticking = true;
+        cx.spawn(async move |weak, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(60))
+                .await;
+            let alive = cx.update(|app| {
+                weak.update(app, |view, cx| {
+                    cx.notify();
+                    view.repaint_ticking
+                })
+                .unwrap_or(false)
+            });
+            if !alive {
+                break;
+            }
+        })
+        .detach();
+    }
+
     /// Keep the placeholder's clock moving.
     ///
     /// The elapsed seconds are drawn from the clock, so the frame has to come
@@ -781,17 +941,37 @@ impl TerminalPane {
         self.screen.mode(1000) || self.screen.mode(1002) || self.screen.mode(1003)
     }
 
-    fn forward_sgr(&self, button: u8, vis_row: usize, col: usize, press: bool, mods: u8) {
+    fn sgr_report(button: u8, vis_row: usize, col: usize, press: bool, mods: u8) -> Vec<u8> {
         let col = u32::try_from(col).unwrap_or(0).saturating_add(1);
         let row = u32::try_from(vis_row).unwrap_or(0).saturating_add(1);
         let mut out = Vec::with_capacity(24);
         encode_sgr_mouse(&mut out, button, col, row, press, mods);
+        out
+    }
+
+    /// A wheel event emits exactly one press report and no release: a TUI can
+    /// read a release as a button event and select something under the pointer.
+    fn wheel_sgr_reports(rows_up: i64) -> [(u8, bool); 1] {
+        [(if rows_up > 0 { 64 } else { 65 }, true)]
+    }
+
+    fn debug_mouse_bytes(label: &str, button: u8, out: &[u8]) {
+        if !terminal_debug().mouse {
+            return;
+        }
+        let hex: String = out.iter().map(|byte| format!("{byte:02x} ")).collect();
+        let text = String::from_utf8_lossy(out);
+        eprintln!("ORION mouse {label}: button={button} hex=[{hex}] text={text:?}");
+    }
+
+    fn forward_sgr(&self, button: u8, vis_row: usize, col: usize, press: bool, mods: u8) {
+        let out = Self::sgr_report(button, vis_row, col, press, mods);
+        Self::debug_mouse_bytes(if press { "press" } else { "release" }, button, &out);
         let text = String::from_utf8_lossy(&out);
         self.send_text(text.as_ref());
     }
 
     fn handle_scroll(&mut self, ev: &ScrollEvent, row_height: f32, cx: &mut Context<Self>) {
-        let rows_up = wheel_rows_up(ev, row_height);
         let action = wheel_action(
             ev.modifiers.shift,
             self.screen.active_screen(),
@@ -800,6 +980,12 @@ impl TerminalPane {
         );
         match action {
             WheelAction::Scrollback => {
+                let (rows_up, fraction) =
+                    accumulate_wheel_rows(wheel_rows_f64(ev, row_height), self.wheel_fraction);
+                self.wheel_fraction = fraction;
+                if rows_up == 0 {
+                    return;
+                }
                 let max = self.screen.scrollback_len();
                 let next = (self.screen.offset_from_bottom() as i64 + rows_up).clamp(0, max as i64)
                     as usize;
@@ -809,16 +995,18 @@ impl TerminalPane {
                 }
             }
             WheelAction::Sgr => {
+                let rows_up = wheel_rows_up(ev, row_height);
                 if rows_up == 0 {
                     return;
                 }
                 let (vis_row, col) = self.pos_to_cell(ev.position);
-                let button = if rows_up > 0 { 64 } else { 65 };
                 let mods = sgr_modifier_bits(&ev.modifiers);
-                self.forward_sgr(button, vis_row, col, true, mods);
-                self.forward_sgr(button, vis_row, col, false, mods);
+                for (button, press) in Self::wheel_sgr_reports(rows_up) {
+                    self.forward_sgr(button, vis_row, col, press, mods);
+                }
             }
             WheelAction::Arrow => {
+                let rows_up = wheel_rows_up(ev, row_height);
                 if rows_up == 0 {
                     return;
                 }
@@ -1110,12 +1298,12 @@ impl TerminalPane {
         // Taken out of `self` so the rows can be built while the scratch is
         // reused across rows; put back after the grid is built.
         let mut scratch = std::mem::take(&mut self.cell_scratch);
-        let mut row_cache = std::mem::take(&mut self.row_cache);
-        let revision = self.screen.revision();
+        let row_cache = std::mem::take(&mut self.row_cache);
         let find_revision = self.find_revision;
         let mut rows_built = 0u64;
         let mut grid_rows: Vec<Rc<GridRow>> = Vec::with_capacity(rows_v.len());
-        for (vis_row, (content_row, cells)) in rows_v.iter().enumerate() {
+        let mut next_cache: Vec<Rc<GridRow>> = Vec::with_capacity(rows_v.len());
+        for (content_row, cells) in rows_v.iter() {
             let mut overlays = RowOverlays::default();
             if let Some((a, b)) = sel {
                 if *content_row >= a.0 && *content_row <= b.0 {
@@ -1134,38 +1322,38 @@ impl TerminalPane {
                 }
             }
             let key = RowCacheKey {
-                revision,
-                offset,
-                content_row: *content_row,
+                content_hash: row_content_hash(cells),
                 selection: overlays.selection,
+                find: overlays.find.clone(),
                 find_revision,
                 theme_fg: theme.term_fg,
                 theme_bg: theme.term_bg,
                 theme_selection: theme.term_selection,
                 theme_accent: theme.accent,
             };
-            let cached = row_cache
-                .get(vis_row)
-                .and_then(|slot| slot.as_ref())
-                .filter(|row| row.key == key)
-                .cloned();
+            let cached = if terminal_debug().full_repaint {
+                None
+            } else {
+                row_cache.iter().find(|row| row.key == key).cloned()
+            };
             let row = match cached {
                 Some(row) => row,
                 None => {
                     rows_built += 1;
-                    let row = Rc::new(build_row(cells, &theme, &overlays, key, &mut scratch));
-                    if row_cache.len() <= vis_row {
-                        row_cache.resize_with(vis_row + 1, || None);
-                    }
-                    row_cache[vis_row] = Some(Rc::clone(&row));
-                    row
+                    Rc::new(build_row(cells, &theme, &overlays, key, &mut scratch))
                 }
             };
-            grid_rows.push(row);
+            grid_rows.push(Rc::clone(&row));
+            next_cache.push(row);
         }
         self.cell_scratch = scratch;
-        self.row_cache = row_cache;
+        self.row_cache = next_cache;
         self.rows_built += rows_built;
+        #[cfg(debug_assertions)]
+        crate::perf::record_rows_reshaped(rows_built);
+        if terminal_debug().perf {
+            eprintln!("ORION frame: {rows_built} rows reshaped");
+        }
         self.grid_has_content = grid_has_content;
 
         let cursor = match cell {
@@ -1195,10 +1383,10 @@ impl TerminalPane {
                 width: self.char_w,
                 height: self.font_size,
             }),
-            font_family: self
+            font: self
                 .font
                 .as_ref()
-                .map(|font| font.family.clone())
+                .map(|font| font.font.clone())
                 .unwrap_or_default(),
             font_size: self.font_size,
             theme,
@@ -1443,8 +1631,8 @@ impl Render for TerminalPane {
         let cell = self.cell();
         let (cols, rows) = match (bounds, cell) {
             (Some(bounds), Some(cell)) => (
-                ((f32::from(bounds.size.width) / cell.width).floor() as u16).clamp(1, 10_000),
-                ((f32::from(bounds.size.height) / cell.height).floor() as u16).clamp(1, 10_000),
+                rows_from_height(f32::from(bounds.size.width), cell.width),
+                rows_from_height(f32::from(bounds.size.height), cell.height),
             ),
             _ => (self.last_cols, self.last_rows),
         };
@@ -1739,6 +1927,7 @@ impl Render for TerminalPane {
         if starting {
             self.keep_placeholder_ticking(cx);
         }
+        self.keep_repainting(cx);
 
         // The scrollbar track's box, learned from its layout so a drag can map
         // the pointer's y to a scroll offset. Mirrors `grid_bounds`.
@@ -1783,14 +1972,24 @@ impl Render for TerminalPane {
                     if ev.button != MouseButton::Left {
                         return;
                     }
+                    let (vis_row, col) = this.pos_to_cell(ev.position);
+                    if terminal_debug().mouse {
+                        eprintln!(
+                            "ORION mouse down: tracking={} shift={} mode1000={} mode1002={} mode1003={} mode1006={} cell=({vis_row},{col})",
+                            this.mouse_tracking(),
+                            ev.modifiers.shift,
+                            this.screen.mode(1000),
+                            this.screen.mode(1002),
+                            this.screen.mode(1003),
+                            this.screen.mode(1006),
+                        );
+                    }
                     if this.mouse_tracking() && !ev.modifiers.shift {
-                        let (vis_row, col) = this.pos_to_cell(ev.position);
                         let mods = sgr_modifier_bits(&ev.modifiers);
                         this.forward_sgr(0, vis_row, col, true, mods);
                         this.mouse_forwarding_press = true;
                         return;
                     }
-                    let (vis_row, col) = this.pos_to_cell(ev.position);
                     this.sel_anchor = Some(this.cell_to_content(vis_row, col));
                     this.sel_cursor = this.sel_anchor;
                     this.selecting = true;
@@ -1921,6 +2120,34 @@ impl Render for TerminalPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[::core::prelude::v1::test]
+    fn fallback_faces_must_carry_the_same_grid_advance() {
+        let families = vec![
+            "Mono".to_string(),
+            "Bad Mono".to_string(),
+            "Symbols Nerd Font Mono".to_string(),
+            "Not Installed".to_string(),
+        ];
+        let installed = vec![
+            "Mono".to_string(),
+            "Bad Mono".to_string(),
+            "Symbols Nerd Font Mono".to_string(),
+        ];
+        let kept = grid_fallback_families(&families, &installed, 10.0, |name, glyph| {
+            if name == "Bad Mono" && glyph == '\u{2500}' {
+                Some(20.0)
+            } else {
+                Some(10.0)
+            }
+        });
+        assert_eq!(
+            kept,
+            vec!["Mono".to_string(), "Symbols Nerd Font Mono".to_string()],
+            "a face with a wrong grid glyph cannot paint terminal text"
+        );
+    }
+
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::Entity;
     use gpui_kit::{Keystroke, Modifiers};
@@ -2028,6 +2255,7 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn wheel_rows_up_lines_delta_up_is_positive() {
+        // 3 lines at 16px/line = 48px up => +3 rows into history.
         let ev = scroll_ev(
             gpui_kit::ScrollDelta::Lines(gpui_kit::point(0.0, 3.0)),
             false,
@@ -2037,6 +2265,7 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn wheel_rows_up_lines_delta_down_is_negative() {
+        // -2 lines at 16px/line = -32px => -2 rows toward the live prompt.
         let ev = scroll_ev(
             gpui_kit::ScrollDelta::Lines(gpui_kit::point(0.0, -2.0)),
             false,
@@ -2046,6 +2275,7 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn wheel_rows_up_pixel_delta_up_is_positive() {
+        // 48px up at 16px/line => +3 rows into history.
         let ev = scroll_ev(
             gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(48.))),
             false,
@@ -2055,6 +2285,7 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn wheel_rows_up_pixel_delta_down_is_negative() {
+        // -32px at 16px/line => -2 rows toward the live prompt.
         let ev = scroll_ev(
             gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-32.))),
             false,
@@ -2064,6 +2295,8 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn wheel_rows_up_shift_reads_x_not_y() {
+        // Shift redirects the wheel into x. y is a large decoy: using it would
+        // give 99 (Lines) / 999px (Pixels) instead of the x-derived value.
         let lines = scroll_ev(
             gpui_kit::ScrollDelta::Lines(gpui_kit::point(4.0, 99.0)),
             true,
@@ -2092,6 +2325,51 @@ mod tests {
         assert_eq!(arrow_bytes(true, false), "\x1b[A", "up + normal");
         assert_eq!(arrow_bytes(false, true), "\x1bOB", "down + DECCKM");
         assert_eq!(arrow_bytes(false, false), "\x1b[B", "down + normal");
+    }
+
+    #[::core::prelude::v1::test]
+    fn sub_line_pixel_deltas_accumulate_into_whole_rows() {
+        let ev = scroll_ev(
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(6.))),
+            false,
+        );
+        let mut fraction = 0.0;
+        let mut rows = 0;
+        for _ in 0..8 {
+            let (whole, rest) = accumulate_wheel_rows(wheel_rows_f64(&ev, 16.0), fraction);
+            fraction = rest;
+            rows += whole;
+        }
+        assert_eq!(rows, 3, "8 events of 6px at 16px/line span three rows");
+        assert!((fraction - 0.0).abs() < 1e-6, "the remainder is 48 - 48px");
+    }
+
+    #[::core::prelude::v1::test]
+    fn row_content_hash_changes_with_text_and_style() {
+        let base = [TermCell {
+            text: "x".to_string(),
+            fg: TermColor::Default,
+            bg: TermColor::Default,
+            bold: false,
+            dim: false,
+            italic: false,
+            underline: false,
+            inverse: false,
+            wide: false,
+            wide_continuation: false,
+        }];
+        let mut styled = base.clone();
+        styled[0].bold = true;
+        let mut other_text = base.clone();
+        other_text[0].text = "y".to_string();
+        let unchanged = row_content_hash(&base);
+        assert_eq!(unchanged, row_content_hash(&base));
+        assert_ne!(unchanged, row_content_hash(&styled), "style is in the key");
+        assert_ne!(
+            unchanged,
+            row_content_hash(&other_text),
+            "text is in the key"
+        );
     }
 
     #[::core::prelude::v1::test]
@@ -2130,6 +2408,64 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
+    fn wheel_sgr_reports_are_press_only_and_never_button_zero() {
+        let up = TerminalPane::wheel_sgr_reports(3);
+        assert_eq!(up, [(64, true)]);
+        let down = TerminalPane::wheel_sgr_reports(-2);
+        assert_eq!(down, [(65, true)]);
+        assert_eq!(
+            TerminalPane::sgr_report(up[0].0, 4, 7, up[0].1, 0),
+            b"\x1b[<64;8;5M"
+        );
+        for (button, press) in up.into_iter().chain(down) {
+            assert_ne!(button, 0, "a wheel event must never encode a left click");
+            assert!(press, "a wheel event must not send a release");
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn cell_height_ceil_covers_ascent_plus_descent() {
+        // A fractional line box must be rounded UP: a few tenths short makes
+        // GPUI's baseline padding negative and neighbouring rows overlap.
+        let height = cell_height_from_metrics(10.2, 3.4);
+        assert!(
+            height >= 10.2 + 3.4,
+            "the cell encloses the painted line box"
+        );
+        assert_eq!(height, 14.0, "the line box is rounded up to a whole pixel");
+    }
+
+    #[::core::prelude::v1::test]
+    fn cell_height_never_collapses_to_zero() {
+        assert_eq!(cell_height_from_metrics(12.01, 2.99), 15.0);
+        assert_eq!(cell_height_from_metrics(11.0001, 2.0), 14.0);
+        assert_eq!(cell_height_from_metrics(0.1, 0.2), 1.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn rows_from_height_matches_floor_including_fractional_case() {
+        assert_eq!(rows_from_height(800.0, 16.0), 50);
+        assert_eq!(
+            rows_from_height(807.9, 16.0),
+            50,
+            "a partial row is not drawn"
+        );
+        assert_eq!(
+            rows_from_height(15.9, 16.0),
+            1,
+            "a short grid still has a row"
+        );
+        assert_eq!(rows_from_height(100_000.0, 1.0), 10_000, "the clamp holds");
+    }
+
+    #[::core::prelude::v1::test]
+    fn rows_match_the_painted_cell_grid() {
+        // The same ceil'd cell height drives row origins on paint and the
+        // row count sent to the PTY: 1000px / 14px = 71 whole cells.
+        let cell_h = cell_height_from_metrics(10.2, 3.4);
+        assert_eq!(rows_from_height(1000.0, cell_h), 71);
+    }
+
     #[::core::prelude::v1::test]
     fn find_debounce_fires_at_most_twice_for_20_keystrokes_in_1s() {
         let mut debouncer = FindDebouncer::new(Duration::from_millis(FIND_DEBOUNCE_MS));
@@ -2624,7 +2960,7 @@ mod tests {
                     // A cell the test controls: the grid's size is then the box's
                     // size divided by this cell, whatever fonts the machine has.
                     view.font = Some(TerminalFont {
-                        family: String::new(),
+                        font: Font::default(),
                         cell: CellSize {
                             width: 8.0,
                             height: 16.0,
@@ -2698,8 +3034,9 @@ mod tests {
         fn the_terminal_font_measures_a_monospace_cell(cx: &mut gpui_kit::TestAppContext) {
             let cx = cx.add_empty_window();
             let families = terminal_font_families("");
+            let window_text_system = WindowTextSystem::new(cx.text_system().clone());
             let Some(font) =
-                measure_terminal_font(cx.text_system(), &families, px(DEFAULT_FONT_PX))
+                measure_terminal_font(&window_text_system, &families, px(DEFAULT_FONT_PX))
             else {
                 // A machine with no monospace font at all: the grid falls back to
                 // the system font. Nothing to measure here.
@@ -2709,7 +3046,7 @@ mod tests {
             assert!(font.cell.height > 0.0, "the cell has a height");
 
             let text_system = cx.text_system();
-            let id = text_system.resolve_font(&gpui_kit::font(font.family.clone()));
+            let id = text_system.resolve_font(&font.font);
             let narrow = text_system
                 .advance(id, px(DEFAULT_FONT_PX), 'i')
                 .expect("the advance of a narrow glyph");
@@ -2719,6 +3056,24 @@ mod tests {
             assert_eq!(
                 narrow.width, wide.width,
                 "every glyph sits on the same advance: the columns line up"
+            );
+
+            let painted = window_text_system.shape_line(
+                SharedString::new(CELL_PROBE_TEXT),
+                px(DEFAULT_FONT_PX),
+                &[TextRun {
+                    len: CELL_PROBE_TEXT.len(),
+                    font: font.font.clone(),
+                    color: white(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            );
+            assert!(
+                font.cell.height >= f32::from(painted.ascent) + f32::from(painted.descent),
+                "the cell encloses the line the grid actually paints"
             );
         }
     );
@@ -2891,6 +3246,54 @@ mod tests {
             assert!(
                 text.contains("line 39"),
                 "the cached frame paints the content"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn a_one_line_feed_reuses_the_rows_that_merely_shifted(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    for line in 0..80 {
+                        view.feed(&format!("line {line}\r\n"));
+                    }
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.update(|window, cx| window.render_frame(cx));
+
+            let mut before = 0;
+            let mut visible = 0;
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    before = view.rows_built();
+                    visible = view.viewport_cells().len();
+                });
+            });
+            assert!(before > 0, "the warm-up frames built the rows");
+
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, cx| {
+                    view.feed("one more line\r\n");
+                    cx.notify();
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            let mut after = 0;
+            cx.update(|_window, app| {
+                after = root.read(app).view.read(app).rows_built();
+            });
+            let rebuilt = after - before;
+            assert!(
+                rebuilt <= 2,
+                "a one-line shift rebuilds at most the new bottom row, got {rebuilt} of {visible}"
             );
         }
     );
