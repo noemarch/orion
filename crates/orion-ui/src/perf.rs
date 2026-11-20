@@ -17,6 +17,8 @@ pub struct PerfStats {
     /// The grid element's `paint()`, the first number that includes real paint
     /// work rather than only element construction.
     pub paints: Vec<Duration>,
+    /// Rows rebuilt by `build_row` in each rendered frame.
+    pub rows_reshaped: Vec<u64>,
 }
 
 impl PerfStats {
@@ -25,6 +27,7 @@ impl PerfStats {
             feeds: Vec::new(),
             frames: Vec::new(),
             paints: Vec::new(),
+            rows_reshaped: Vec::new(),
         }
     }
 }
@@ -55,6 +58,13 @@ pub fn record_paint(delta: Duration) {
     }
 }
 
+/// Record how many rows one rendered frame rebuilt.
+pub fn record_rows_reshaped(rows: u64) {
+    if let Ok(mut stats) = STATS.lock() {
+        stats.rows_reshaped.push(rows);
+    }
+}
+
 /// A copy of everything recorded so far.
 pub fn snapshot() -> PerfStats {
     STATS
@@ -63,6 +73,7 @@ pub fn snapshot() -> PerfStats {
             feeds: stats.feeds.clone(),
             frames: stats.frames.clone(),
             paints: stats.paints.clone(),
+            rows_reshaped: stats.rows_reshaped.clone(),
         })
         .unwrap_or_default()
 }
@@ -73,6 +84,7 @@ pub fn reset() {
         stats.feeds.clear();
         stats.frames.clear();
         stats.paints.clear();
+        stats.rows_reshaped.clear();
     }
 }
 
