@@ -111,6 +111,7 @@ fn measure(
             spec,
             args: Vec::new(),
             shell_path: None,
+            launch_command: None,
             size: TerminalSize {
                 rows: 32,
                 cols: 120,

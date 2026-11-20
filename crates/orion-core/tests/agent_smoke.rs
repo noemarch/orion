@@ -86,6 +86,7 @@ fn claude_draws_a_grid_and_its_tree_dies_with_the_pane() {
             spec,
             args: Vec::new(),
             shell_path: None,
+            launch_command: None,
             size: TerminalSize {
                 cols: 120,
                 rows: 32,
@@ -222,6 +223,7 @@ fn opencode_draws_a_grid_and_its_tree_dies_with_the_pane() {
             spec,
             args: Vec::new(),
             shell_path: None,
+            launch_command: None,
             size: TerminalSize {
                 cols: 120,
                 rows: 32,
@@ -285,6 +287,7 @@ fn omp_draws_a_grid_and_its_tree_dies_with_the_pane() {
             spec,
             args: Vec::new(),
             shell_path: None,
+            launch_command: None,
             size: TerminalSize {
                 cols: 120,
                 rows: 32,

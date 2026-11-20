@@ -514,6 +514,7 @@ mod tests {
                     },
                     args: Vec::new(),
                     shell_path: None,
+                    launch_command: None,
                     size: crate::TerminalSize {
                         rows: 32,
                         cols: 120,

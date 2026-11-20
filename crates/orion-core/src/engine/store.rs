@@ -223,15 +223,17 @@ fn predecessor_config_dir() -> Option<PathBuf> {
 /// The saved pane as a runnable launch: a saved session id wins, else the directory's latest
 /// conversation (`--continue`), matching what a user would type after a restart.
 pub fn spec_for_saved_pane(pane: &SavedPane) -> Result<LaunchSpec> {
-    if let Some(path) = pane.shell_path.as_deref().filter(|path| !path.is_empty()) {
-        return LaunchSpec::for_shell_path(Path::new(path), &pane.args);
-    }
     let kind = AgentKind::from_wire(&pane.agent).ok_or_else(|| {
         OrionError::AgentNotFound(format!("'{}' is not an agent Orion starts", pane.agent))
     })?;
     if let Some(shell) = kind.as_shell() {
+        if let Some(path) = pane.shell_path.as_deref().filter(|path| !path.is_empty()) {
+            return LaunchSpec::for_shell_path(Path::new(path), &pane.args);
+        }
         return LaunchSpec::for_shell(shell, &pane.args);
     }
+    // An agent pane's saved shell_path is the wrapper shell, not the program to run: the caller
+    // wraps this agent spec in that shell again.
     LaunchSpec::for_agent(
         kind,
         &pane.args,

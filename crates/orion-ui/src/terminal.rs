@@ -189,6 +189,52 @@ fn scroll_offset_for_thumb(y: f32, track_h: f32, thumb_h: f32, max_offset: usize
     (fraction * max_offset as f32).round() as usize
 }
 
+/// Whether the pane's process is running or has ended.
+///
+/// The exit code rides with the state, so "not exited" can never be mistaken
+/// for "exited with an unknown code": the engine's `pty-exit` frame carries a
+/// code that is sometimes absent, and the marker says so in words instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessExit {
+    Running,
+    Exited(Option<i32>),
+}
+
+/// The status bar's left text: the exit marker once the process ended,
+/// otherwise the polled agent status. The scroll suffix rides on either, so
+/// reading history never hides why the pane stopped.
+fn status_line_text(status: &str, exit: ProcessExit, offset: usize, max_offset: usize) -> String {
+    let mut line = match exit {
+        ProcessExit::Running => status.to_string(),
+        ProcessExit::Exited(Some(code)) => format!("[process exited with code {code}]"),
+        ProcessExit::Exited(None) => "[process exited]".to_string(),
+    };
+    if offset > 0 {
+        line.push_str(&format!("  scroll {offset}/{max_offset}"));
+    }
+    line
+}
+
+/// Whether the pane offers a Restart control: only a process that has ended
+/// can be brought back. A live pane has nothing to restart.
+fn restart_available(exit: ProcessExit) -> bool {
+    matches!(exit, ProcessExit::Exited(_))
+}
+
+/// Whether a click on Restart starts a restart. One request at a time: a
+/// second click while the first is in flight is ignored, not queued.
+fn restart_should_send(exit: ProcessExit, pending: bool) -> bool {
+    restart_available(exit) && !pending
+}
+
+/// What the terminal asks the app to do. The engine lives on the app, so a
+/// Restart click leaves the view as an event instead of a blocking call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalPaneEvent {
+    /// The reader clicked Restart on an exited pane.
+    RestartRequested { pane_id: String },
+}
+
 /// Map a GPUI scroll event to signed rows scrolled UP into history: positive
 /// means wheel up (toward older output), negative means wheel down (toward the
 /// live prompt). Both `Lines` and `Pixels` deltas preserve the platform sign,
@@ -342,6 +388,16 @@ pub struct TerminalPane {
     /// render never calls it: the status poller (app.rs) refreshes this
     /// cache off the UI thread and render reads only the cache.
     status_line: String,
+    /// The pane process's exit state, cached from the engine's `pty-exit`
+    /// push. Render draws the marker and the Restart control from this cache
+    /// and never asks the pane.
+    process_exit: ProcessExit,
+    /// A Restart request is in flight: the control waits instead of sending
+    /// a second request.
+    restart_pending: bool,
+    /// The last Restart failure, in plain words. Cleared by a fresh exit or a
+    /// successful restart.
+    restart_error: Option<String>,
     /// Per-row scratch for `build_row`, reused across rows and frames so a
     /// steady-state frame does not rebuild the column-span or run buffers.
     cell_scratch: CellScratch,
@@ -363,6 +419,8 @@ pub struct TerminalPane {
     /// Whether the startup timeline already marked the first resize.
     resize_traced: bool,
 }
+
+impl gpui_kit::EventEmitter<TerminalPaneEvent> for TerminalPane {}
 
 impl TerminalPane {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -410,6 +468,9 @@ impl TerminalPane {
             row_cache: Vec::new(),
             rows_built: 0,
             status_line: "starting agent…".to_string(),
+            process_exit: ProcessExit::Running,
+            restart_pending: false,
+            restart_error: None,
             cell_scratch: CellScratch::default(),
             grid_has_content: false,
             nonempty_traced: false,
@@ -429,21 +490,68 @@ impl TerminalPane {
             .as_ref()
             .is_none_or(|current| current.id() != pane.id());
         if changed {
-            self.screen = new_engine(self.last_cols, self.last_rows);
-            self.cached_viewport_revision = 0;
-            self.cached_viewport_offset = 0;
-            self.cached_viewport_cells = Rc::from(Vec::new());
-            self.row_cache.clear();
-            self.find_matches.clear();
-            self.find_current = None;
-            self.sel_anchor = None;
-            self.sel_cursor = None;
-            self.status_line = "starting agent…".to_string();
-            // A new pane is a new agent: the placeholder counts from here.
-            self.started_at = Instant::now();
-            self.grid_has_content = false;
+            self.reset_for_new_pane();
         }
         self.pane = Some(pane);
+    }
+
+    /// Attach the pane a Restart produced. The id is the same, but the
+    /// process is not: the old grid, status line and exit marker start over.
+    pub fn set_restarted_pane(&mut self, pane: Arc<dyn PaneHandle>) {
+        self.reset_for_new_pane();
+        self.pane = Some(pane);
+    }
+
+    fn reset_for_new_pane(&mut self) {
+        self.screen = new_engine(self.last_cols, self.last_rows);
+        self.cached_viewport_revision = 0;
+        self.cached_viewport_offset = 0;
+        self.cached_viewport_cells = Rc::from(Vec::new());
+        self.row_cache.clear();
+        self.find_matches.clear();
+        self.find_current = None;
+        self.sel_anchor = None;
+        self.sel_cursor = None;
+        self.status_line = "starting agent…".to_string();
+        self.process_exit = ProcessExit::Running;
+        self.restart_pending = false;
+        self.restart_error = None;
+        // A new pane is a new agent: the placeholder counts from here.
+        self.started_at = Instant::now();
+        self.grid_has_content = false;
+    }
+
+    /// Cache the exit state the engine pushed for `pane_id`. Only the pane on
+    /// screen takes a marker; a push for a pane this view left is ignored.
+    pub fn set_exit_code(&mut self, pane_id: &str, code: Option<i32>) -> bool {
+        if self.pane.as_ref().map(|pane| pane.id()) != Some(pane_id) {
+            return false;
+        }
+        let next = ProcessExit::Exited(code);
+        if self.process_exit == next && self.restart_error.is_none() {
+            return false;
+        }
+        self.process_exit = next;
+        self.restart_pending = false;
+        self.restart_error = None;
+        true
+    }
+
+    /// Show a Restart failure as one plain sentence and let the control try
+    /// again. There is no automatic retry.
+    pub fn set_restart_error(&mut self, message: String) -> bool {
+        self.restart_pending = false;
+        if self.restart_error.as_deref() == Some(message.as_str()) {
+            return false;
+        }
+        self.restart_error = Some(message);
+        true
+    }
+
+    /// The request that was in flight has been answered: the control is
+    /// clickable again even if the pane could not be re-attached.
+    pub fn clear_restart_pending(&mut self) {
+        self.restart_pending = false;
     }
 
     /// The agent's name, in the reader's words. The placeholder names it.
@@ -1555,12 +1663,37 @@ impl Render for TerminalPane {
         // synchronous socket round-trip on the daemon path and must never
         // run on the UI thread. The poller refreshes the cache; a stale
         // line is fine, a frozen UI is not.
-        let status_line = if offset > 0 {
-            format!("{}  scroll {offset}/{max_offset}", self.status_line)
-        } else {
-            self.status_line.clone()
-        };
-        let status_bar = StatusBar::new().left(status_line).h(px(TARGET_PX * 0.75));
+        let status_line =
+            status_line_text(&self.status_line, self.process_exit, offset, max_offset);
+        let mut status_bar = StatusBar::new().left(status_line).h(px(TARGET_PX * 0.75));
+        if let Some(error) = self.restart_error.clone() {
+            status_bar = status_bar.left(div().text_color(theme.danger_text).child(error));
+        }
+        if restart_available(self.process_exit) {
+            let pane_id = self.pane.as_ref().map(|pane| pane.id().to_string());
+            let pending = self.restart_pending;
+            status_bar = status_bar.right(
+                Button::new("terminal-restart")
+                    .label("Restart")
+                    .ghost()
+                    .h(px(TARGET_PX * 0.6))
+                    .min_w(px(TARGET_PX))
+                    .tab_stop(false)
+                    .loading(pending)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let Some(pane_id) = pane_id.clone() else {
+                            return;
+                        };
+                        if !restart_should_send(this.process_exit, this.restart_pending) {
+                            return;
+                        }
+                        this.restart_pending = true;
+                        this.restart_error = None;
+                        cx.emit(TerminalPaneEvent::RestartRequested { pane_id });
+                        cx.notify();
+                    })),
+            );
+        }
 
         // The grid: one custom element paints the rows; it takes its own
         // snapshot from the engine and draws it, cell for cell.
@@ -1832,6 +1965,54 @@ mod tests {
         assert_eq!(scroll_offset_for_thumb(10.0, 100.0, 20.0, 0), 0);
     }
 
+    #[::core::prelude::v1::test]
+    fn status_line_text_shows_the_exit_marker() {
+        assert_eq!(
+            status_line_text("working", ProcessExit::Running, 0, 0),
+            "working",
+            "a live pane shows the polled status"
+        );
+        assert_eq!(
+            status_line_text("working", ProcessExit::Exited(Some(0)), 0, 0),
+            "[process exited with code 0]"
+        );
+        assert_eq!(
+            status_line_text("error", ProcessExit::Exited(Some(130)), 0, 0),
+            "[process exited with code 130]"
+        );
+        assert_eq!(
+            status_line_text("done", ProcessExit::Exited(None), 0, 0),
+            "[process exited]",
+            "an exit without a reported code still shows the marker"
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn status_line_text_keeps_the_scroll_suffix() {
+        assert_eq!(
+            status_line_text("working", ProcessExit::Running, 3, 10),
+            "working  scroll 3/10"
+        );
+        assert_eq!(
+            status_line_text("done", ProcessExit::Exited(Some(1)), 3, 10),
+            "[process exited with code 1]  scroll 3/10",
+            "reading history does not hide why the pane stopped"
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn restart_is_offered_only_for_an_exited_pane() {
+        assert!(!restart_available(ProcessExit::Running));
+        assert!(restart_available(ProcessExit::Exited(Some(0))));
+        assert!(restart_available(ProcessExit::Exited(None)));
+        assert!(!restart_should_send(ProcessExit::Running, false));
+        assert!(restart_should_send(ProcessExit::Exited(Some(0)), false));
+        assert!(
+            !restart_should_send(ProcessExit::Exited(Some(0)), true),
+            "a second click while the first request is in flight is ignored"
+        );
+    }
+
     fn scroll_ev(delta: gpui_kit::ScrollDelta, shift: bool) -> ScrollEvent {
         ScrollEvent {
             position: gpui_kit::point(px(0.), px(0.)),
@@ -1905,6 +2086,7 @@ mod tests {
         assert_eq!(wheel_rows_up(&ev, -1.0), 0);
     }
 
+    #[::core::prelude::v1::test]
     fn arrow_bytes_respect_application_cursor_mode() {
         assert_eq!(arrow_bytes(true, true), "\x1bOA", "up + DECCKM");
         assert_eq!(arrow_bytes(true, false), "\x1b[A", "up + normal");
@@ -2279,6 +2461,83 @@ mod tests {
                 let view = root.read(app).view.clone();
                 let status = view.read(app).status_line.clone();
                 assert_eq!(status, "working", "render drew the cached status line");
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn exit_code_is_cached_only_for_the_pane_on_screen(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    view.set_pane(Arc::new(StatusPanicsPane {
+                        cwd: std::path::PathBuf::from("."),
+                    }));
+                    assert!(view.set_exit_code("status-panics", Some(7)));
+                    assert_eq!(view.process_exit, ProcessExit::Exited(Some(7)));
+                    assert!(
+                        !view.set_exit_code("another-pane", Some(9)),
+                        "a push for a pane this view left is ignored"
+                    );
+                    assert_eq!(view.process_exit, ProcessExit::Exited(Some(7)));
+                });
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn a_restarted_pane_clears_the_exit_marker(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    view.set_pane(Arc::new(StatusPanicsPane {
+                        cwd: std::path::PathBuf::from("."),
+                    }));
+                    assert!(view.set_exit_code("status-panics", Some(1)));
+                    assert!(view.set_restart_error("no runtime".to_string()));
+                    view.set_restarted_pane(Arc::new(StatusPanicsPane {
+                        cwd: std::path::PathBuf::from("."),
+                    }));
+                    assert_eq!(view.process_exit, ProcessExit::Running);
+                    assert_eq!(view.status_line, "starting agent…");
+                    assert!(view.restart_error.is_none());
+                    assert!(!view.restart_pending);
+                });
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn render_draws_the_exit_marker_from_the_cache(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    view.set_pane(Arc::new(StatusPanicsPane {
+                        cwd: std::path::PathBuf::from("."),
+                    }));
+                    view.set_exit_code("status-panics", Some(3));
+                });
+            });
+            // If render called pane.status(), the panic would fail this draw.
+            cx.update(|window, cx| window.render_frame(cx));
+
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                let view = view.read(app);
+                assert_eq!(
+                    status_line_text(&view.status_line, view.process_exit, 0, 0),
+                    "[process exited with code 3]"
+                );
+                assert!(restart_available(view.process_exit));
             });
         }
     );

@@ -29,7 +29,7 @@ use crate::shell_model::{
 };
 use crate::shell_picker::{ShellPickerEvent, ShellPickerModal};
 use crate::sidebar::{SidebarEvent, TabEntry, WorkspaceEntry};
-use crate::terminal::TerminalPane;
+use crate::terminal::{TerminalPane, TerminalPaneEvent};
 use crate::theme::Theme;
 use crate::workspace::WorkspaceSidebar;
 
@@ -406,6 +406,66 @@ fn spawn_status_poller(
     .detach();
 }
 
+/// One `pty-exit` push, decoded on the engine's broadcast thread.
+struct ExitNotice {
+    pane_id: String,
+    code: Option<i32>,
+}
+
+/// One restart answer, carried from the request thread to the UI.
+struct RestartAnswer {
+    status: u16,
+    answer: Value,
+}
+
+/// Capacity of the exit-notice channel. A pane exits once, so a handful of
+/// slots covers several panes ending at the same moment.
+const EXIT_CHANNEL_CAPACITY: usize = 16;
+
+/// Watch the engine's pushed `pty-exit` frames and cache each pane's exit
+/// code on the terminal view.
+///
+/// The exit code is not in the session snapshot and `PaneHandle` has no exit
+/// accessor, so this push is the only exact source. The sink runs on the
+/// engine's broadcast thread and only pushes into a channel; the async task
+/// applies the notice on the UI thread. Render never asks the pane.
+fn spawn_exit_watcher(
+    engine: &Arc<dyn Runtime>,
+    terminal_pane: Entity<TerminalPane>,
+    cx: &mut App,
+) {
+    let (tx, rx) = flume::bounded::<ExitNotice>(EXIT_CHANNEL_CAPACITY);
+    let _connection = engine.connect(Arc::new(move |frame: Value| {
+        if frame.get("type").and_then(Value::as_str) != Some("pty-exit") {
+            return;
+        }
+        let Some(pane_id) = frame.get("pane_id").and_then(Value::as_str) else {
+            return;
+        };
+        let code = frame
+            .get("code")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok());
+        // The receiver is gone when the view is gone; the sink is then a no-op.
+        let _ = tx.send(ExitNotice {
+            pane_id: pane_id.to_string(),
+            code,
+        });
+    }));
+    cx.spawn(async move |cx| {
+        while let Ok(notice) = rx.recv_async().await {
+            cx.update(|cx| {
+                terminal_pane.update(cx, |view, cx| {
+                    if view.set_exit_code(&notice.pane_id, notice.code) {
+                        cx.notify();
+                    }
+                });
+            });
+        }
+    })
+    .detach();
+}
+
 fn pane_is_shell(pane: &Value) -> bool {
     if pane.get("pane_kind").and_then(Value::as_str) == Some("shell") {
         return true;
@@ -553,6 +613,16 @@ impl OrionApp {
             this.handle_chat_event(event, ChatPane::Split, cx);
             cx.notify();
         });
+        // A Restart click is a view event: the engine call belongs to the app,
+        // which can keep the blocking round-trip off the UI thread.
+        let terminal_events = app.terminal_pane.clone();
+        let terminal_sub = cx.subscribe(
+            &terminal_events,
+            |this, _, event: &TerminalPaneEvent, cx| {
+                let TerminalPaneEvent::RestartRequested { pane_id } = event;
+                this.restart_pane(pane_id.clone(), cx);
+            },
+        );
         let sidebar_observe = cx.observe(&app.workspace_sidebar, |this, view, cx| {
             // The sidebar notifies on every pulse tick while a status animates.
             // Its session data is unchanged on those ticks, so skip the costly
@@ -571,9 +641,13 @@ impl OrionApp {
             shell_picker_sub,
             chat_sub,
             split_chat_sub,
+            terminal_sub,
             sidebar_observe,
         ];
 
+        // Register before the first pane attaches: an exit that happens while
+        // the shell is starting must still reach the terminal view.
+        spawn_exit_watcher(&app.engine, app.terminal_pane.clone(), cx);
         app.start_session(cx);
         app
     }
@@ -646,8 +720,12 @@ impl OrionApp {
     /// Point every lens at one pane and start its PTY pump. Re-attaching is
     /// cheap and keeps workspace/tab switches showing the active pane.
     fn attach_pane(&mut self, cx: &mut App, pane_id: &str) {
+        self.attach_pane_inner(cx, pane_id, false);
+    }
+
+    fn attach_pane_inner(&mut self, cx: &mut App, pane_id: &str, restarted: bool) {
         let engine = Arc::clone(&self.engine);
-        if self.attached_pane.as_deref() == Some(pane_id) {
+        if !restarted && self.attached_pane.as_deref() == Some(pane_id) {
             return;
         }
         let Some(pane) = engine.pane_by_id(pane_id) else {
@@ -689,7 +767,11 @@ impl OrionApp {
         }
 
         self.terminal_pane.update(cx, |view, cx| {
-            view.set_pane(Arc::clone(&pane));
+            if restarted {
+                view.set_restarted_pane(Arc::clone(&pane));
+            } else {
+                view.set_pane(Arc::clone(&pane));
+            }
             cx.notify();
         });
         // The chat lens shares the same pane: conversation fetches go through
@@ -716,6 +798,50 @@ impl OrionApp {
         let terminal_pane = self.terminal_pane.clone();
         spawn_pty_pump(terminal_pane.clone(), pty_rx, Arc::clone(&generation), cx);
         spawn_status_poller(terminal_pane, pane, generation, cx);
+    }
+
+    /// POST /api/pane/restart for a pane whose process ended.
+    ///
+    /// The call is a blocking round-trip, so a thread owns it and the answer
+    /// returns through a channel; the UI thread never waits. A failure is one
+    /// plain sentence, never an automatic retry.
+    fn restart_pane(&mut self, pane_id: String, cx: &mut Context<Self>) {
+        let engine = Arc::clone(&self.engine);
+        let (tx, rx) = flume::bounded::<RestartAnswer>(1);
+        let requested = pane_id.clone();
+        std::thread::spawn(move || {
+            let body = json!({ "pane_id": requested });
+            let (status, answer) = engine.http("POST", "/api/pane/restart", &body);
+            let _ = tx.send(RestartAnswer { status, answer });
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(answer) = rx.recv_async().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.finish_restart(&pane_id, answer, cx));
+        })
+        .detach();
+    }
+
+    fn finish_restart(&mut self, pane_id: &str, answer: RestartAnswer, cx: &mut App) {
+        self.terminal_pane
+            .update(cx, |view, _cx| view.clear_restart_pending());
+        if answer.status == 200 {
+            // The core replaced the pane under the same id. Re-attach to the
+            // new handle with a fresh grid: the exited process's scrollback is
+            // not the new process's.
+            self.attached_pane = None;
+            self.attach_pane_inner(cx, pane_id, true);
+        } else {
+            let message = crate::new_workspace::error_message(
+                &answer.answer,
+                "The pane could not be restarted.",
+            );
+            self.terminal_pane.update(cx, |view, cx| {
+                view.set_restart_error(message);
+                cx.notify();
+            });
+        }
     }
 
     /// Point the split canvas at one pane and start its own PTY pump.
@@ -2550,6 +2676,7 @@ mod tests {
                 spec,
                 shell_path: None,
                 args: Vec::new(),
+                launch_command: None,
                 size: TerminalSize {
                     cols: 120,
                     rows: 32,

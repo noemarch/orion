@@ -73,6 +73,7 @@ fn a_shell_pane_runs_a_real_shell_and_reads_its_grid() {
             spec,
             args: Vec::new(),
             shell_path: None,
+            launch_command: None,
             size: TerminalSize {
                 cols: 120,
                 rows: 32,

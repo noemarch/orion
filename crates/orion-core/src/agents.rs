@@ -98,6 +98,58 @@ impl LaunchSpec {
             args: args.to_vec(),
         })
     }
+
+    /// Wraps an agent launch in a shell so the shell stays alive after the agent exits.
+    pub fn wrap_agent_in_shell(
+        agent: &Self,
+        shell: &ShellKind,
+        shell_path: Option<&Path>,
+    ) -> Result<(Self, String)> {
+        wrap_agent_in_shell(agent, shell, shell_path)
+    }
+
+    /// Builds a shell-rooted launch around an already-composed inner command.
+    ///
+    /// A restart has the command a pane was launched with, not the `LaunchSpec` it came from;
+    /// this keeps the shell flags in one place so a fresh spawn and a restart agree.
+    pub fn for_shell_command(
+        inner: &str,
+        shell: &ShellKind,
+        shell_path: Option<&Path>,
+    ) -> Result<Self> {
+        reject_control_chars(inner)?;
+        let program = match shell_path {
+            Some(path) => {
+                if !path.is_file() {
+                    return Err(OrionError::AgentNotFound(format!(
+                        "'{}' is not a file on this PC",
+                        path.display()
+                    )));
+                }
+                path.to_path_buf()
+            }
+            None => find_in_path(shell.default_command()).ok_or_else(|| {
+                OrionError::AgentNotFound(format!(
+                    "'{}' is not on this PC's PATH",
+                    shell.default_command()
+                ))
+            })?,
+        };
+        let args = match shell {
+            ShellKind::PowerShell | ShellKind::Pwsh => vec![
+                "-NoLogo".to_string(),
+                "-NoExit".to_string(),
+                "-Command".to_string(),
+                inner.to_string(),
+            ],
+            ShellKind::Cmd => vec!["/D".to_string(), "/K".to_string(), inner.to_string()],
+            ShellKind::Bash | ShellKind::Zsh => vec![
+                "-c".to_string(),
+                format!("{}; exec {}", inner, shell.default_command()),
+            ],
+        };
+        Ok(Self { program, args })
+    }
 }
 
 /// Reads a batch shim's JavaScript entry point and resolves the node that runs it.
@@ -276,6 +328,72 @@ pub fn find_in_path(binary: &str) -> Option<PathBuf> {
     None
 }
 
+/// Wraps an agent launch in a shell so the shell stays alive after the agent exits.
+///
+/// Returns the shell launch spec (the PTY root) and the composed inner agent command string.
+pub fn wrap_agent_in_shell(
+    agent: &LaunchSpec,
+    shell: &ShellKind,
+    shell_path: Option<&Path>,
+) -> Result<(LaunchSpec, String)> {
+    let inner = compose_inner_command(agent, shell)?;
+    let spec = LaunchSpec::for_shell_command(&inner, shell, shell_path)?;
+    Ok((spec, inner))
+}
+
+fn compose_inner_command(agent: &LaunchSpec, shell: &ShellKind) -> Result<String> {
+    let program = agent.program.to_string_lossy();
+    reject_control_chars(&program)?;
+    for arg in &agent.args {
+        reject_control_chars(arg)?;
+    }
+    match shell {
+        ShellKind::PowerShell | ShellKind::Pwsh => {
+            let mut out = String::from("& ");
+            out.push_str(&quote_powershell(&program));
+            for arg in &agent.args {
+                out.push(' ');
+                out.push_str(&quote_powershell(arg));
+            }
+            Ok(out)
+        }
+        ShellKind::Cmd => {
+            let mut parts = vec![quote_cmd(&program)];
+            for arg in &agent.args {
+                parts.push(quote_cmd(arg));
+            }
+            Ok(parts.join(" "))
+        }
+        ShellKind::Bash | ShellKind::Zsh => {
+            let mut parts = vec![quote_bash(&program)];
+            for arg in &agent.args {
+                parts.push(quote_bash(arg));
+            }
+            Ok(parts.join(" "))
+        }
+    }
+}
+
+fn reject_control_chars(value: &str) -> Result<()> {
+    if value.chars().any(char::is_control) {
+        return Err(OrionError::Process(
+            "control characters are not allowed in a shell command".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn quote_powershell(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn quote_cmd(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn quote_bash(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +453,91 @@ mod tests {
     fn for_shell_path_rejects_a_missing_file() {
         let missing = std::env::temp_dir().join(format!("orion-no-shell-{}", uuid::Uuid::new_v4()));
         assert!(LaunchSpec::for_shell_path(&missing, &[]).is_err());
+    }
+
+    #[test]
+    fn wrapping_puts_the_shell_first_and_keeps_it_alive() {
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let agent = LaunchSpec {
+            program: PathBuf::from("C:\\agents\\orion-fake-agent.exe"),
+            args: vec!["--resume".to_string(), "session-42".to_string()],
+        };
+        let (spec, inner) = wrap_agent_in_shell(&agent, &ShellKind::Cmd, Some(&exe))
+            .expect("the agent wraps in the shell");
+        assert_eq!(
+            spec.program, exe,
+            "the PTY root is the shell, not the agent"
+        );
+        assert_eq!(spec.args[0], "/D");
+        assert_eq!(spec.args[1], "/K", "the shell stays after the agent exits");
+        assert_eq!(spec.args[2], inner);
+        assert!(
+            inner.contains("orion-fake-agent"),
+            "the inner command runs the agent: {inner}"
+        );
+        assert!(
+            inner.contains("--resume") && inner.contains("session-42"),
+            "the inner command keeps the resume flags: {inner}"
+        );
+    }
+
+    #[test]
+    fn powershell_wrapping_doubles_single_quotes() {
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let agent = LaunchSpec {
+            program: PathBuf::from("C:\\agents\\claude.exe"),
+            args: vec!["it's fine".to_string()],
+        };
+        let (spec, inner) = wrap_agent_in_shell(&agent, &ShellKind::PowerShell, Some(&exe))
+            .expect("the agent wraps in PowerShell");
+        assert!(
+            inner.starts_with("& '"),
+            "the call operator is present: {inner}"
+        );
+        assert!(
+            inner.contains("it''s fine"),
+            "single quotes are doubled: {inner}"
+        );
+        assert!(spec.args.iter().any(|arg| arg == "-NoExit"));
+        assert_eq!(spec.args.last(), Some(&inner));
+    }
+
+    #[test]
+    fn cmd_wrapping_doubles_double_quotes() {
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let agent = LaunchSpec {
+            program: PathBuf::from("C:\\agents\\claude.cmd"),
+            args: vec!["say \"hi\"".to_string()],
+        };
+        let (_, inner) = wrap_agent_in_shell(&agent, &ShellKind::Cmd, Some(&exe))
+            .expect("the agent wraps in cmd");
+        assert!(
+            inner.contains("say \"\"hi\"\""),
+            "double quotes are doubled: {inner}"
+        );
+    }
+
+    #[test]
+    fn a_command_with_control_characters_is_refused() {
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let agent = LaunchSpec {
+            program: PathBuf::from("claude\n.exe"),
+            args: Vec::new(),
+        };
+        assert!(wrap_agent_in_shell(&agent, &ShellKind::Cmd, Some(&exe)).is_err());
+    }
+
+    #[test]
+    fn a_stored_command_rebuilds_the_same_shell_spec() {
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let agent = LaunchSpec {
+            program: PathBuf::from("claude"),
+            args: vec!["--continue".to_string()],
+        };
+        let (original, inner) = wrap_agent_in_shell(&agent, &ShellKind::Cmd, Some(&exe))
+            .expect("the agent wraps in cmd");
+        let rebuilt = LaunchSpec::for_shell_command(&inner, &ShellKind::Cmd, Some(&exe))
+            .expect("the stored command rebuilds");
+        assert_eq!(rebuilt, original, "a restart matches the original launch");
     }
 }

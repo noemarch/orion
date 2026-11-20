@@ -50,6 +50,7 @@ fn the_seam_reaches_a_real_agent() {
             spec,
             args: Vec::new(),
             shell_path: None,
+            launch_command: None,
             size: TerminalSize {
                 cols: 120,
                 rows: 32,
@@ -109,6 +110,7 @@ fn the_seam_writes_the_readers_words_to_the_process() {
             spec,
             args: Vec::new(),
             shell_path: None,
+            launch_command: None,
             size: TerminalSize {
                 cols: 120,
                 rows: 32,

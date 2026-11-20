@@ -144,6 +144,7 @@ impl RouteTable {
             ("POST", "/api/tab/close") => self.close_tab(body),
             ("POST", "/api/tab/move") => self.move_tab(body),
             ("POST", "/api/pane/close") => self.close_pane(body),
+            ("POST", "/api/pane/restart") => self.restart_pane(body),
             ("POST", "/api/pane/split") => self.split_pane(body),
             ("POST", "/api/pane/shell") => self.create_shell_pane(body),
             ("POST", "/api/pane/zoom") => self.zoom_pane(body),
@@ -1279,6 +1280,7 @@ impl RouteTable {
             spec,
             args: Vec::new(),
             shell_path,
+            launch_command: None,
             size: TerminalSize {
                 rows: DEFAULT_SIZE.rows,
                 cols: DEFAULT_SIZE.cols,
@@ -1420,7 +1422,7 @@ impl RouteTable {
         };
 
         // Take the source pane's identity out of the session before we mutate it.
-        let (agent, workspace_id, tab_id, cwd, args) = {
+        let (agent, workspace_id, tab_id, cwd, args, source_shell_path) = {
             let session = self.session.read();
             let pane = session
                 .panes
@@ -1432,16 +1434,26 @@ impl RouteTable {
                 pane.tab_id.clone(),
                 pane.cwd.clone(),
                 pane.args.clone(),
+                pane.shell_path.clone(),
             )
         };
 
         let new_pane_id = Uuid::new_v4().to_string();
-        let spec = if let Some(shell) = agent.as_shell() {
-            LaunchSpec::for_shell(shell, &args)
+        let (spec, shell_path, launch_command) = if let Some(shell) = agent.as_shell() {
+            let spec = match source_shell_path.as_deref() {
+                Some(path) => LaunchSpec::for_shell_path(Path::new(path), &args),
+                None => LaunchSpec::for_shell(shell, &args),
+            }
+            .map_err(|error| api_error(400, "agent_failed", &format!("{error}")))?;
+            (spec, source_shell_path, None)
         } else {
-            LaunchSpec::for_agent(agent, &args, None, false)
-        }
-        .map_err(|error| api_error(400, "agent_failed", &format!("{error}")))?;
+            let agent_spec = LaunchSpec::for_agent(agent, &args, None, false)
+                .map_err(|error| api_error(400, "agent_failed", &format!("{error}")))?;
+            let (spec, shell_path, inner) = self
+                .wrap_agent(&agent_spec)
+                .map_err(|error| api_error(400, "agent_failed", &format!("{error}")))?;
+            (spec, shell_path, Some(inner))
+        };
         let on_event = self.on_event();
         let new_pane = Pane::spawn(
             PaneConfig {
@@ -1453,7 +1465,8 @@ impl RouteTable {
                 cwd,
                 spec,
                 args,
-                shell_path: None,
+                shell_path,
+                launch_command,
                 size: DEFAULT_SIZE,
             },
             on_event,
@@ -2296,6 +2309,45 @@ impl RouteTable {
         }
     }
 
+    fn platform_default_shell() -> ShellKind {
+        if cfg!(windows) {
+            ShellKind::PowerShell
+        } else {
+            ShellKind::Bash
+        }
+    }
+
+    /// A custom shell path is used only when it names a file; an unknown or empty preference
+    /// falls back to the platform shell.
+    fn shell_preference(&self) -> (ShellKind, Option<PathBuf>) {
+        let preferences = self.preferences.lock();
+        let settings = preferences.get("settings");
+        let raw = settings
+            .and_then(|settings| settings.get("defaultShell"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let kind = ShellKind::from_wire(raw).unwrap_or_else(Self::platform_default_shell);
+        let path = settings
+            .and_then(|settings| settings.get("shellPath"))
+            .and_then(Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from)
+            .filter(|path| path.is_file());
+        (kind, path)
+    }
+
+    /// Returns the shell-rooted spec, the resolved shell path, and the inner agent command that
+    /// a later restart rebuilds from.
+    fn wrap_agent(&self, agent: &LaunchSpec) -> Result<(LaunchSpec, Option<String>, String)> {
+        let (shell, path) = self.shell_preference();
+        let (spec, inner) = LaunchSpec::wrap_agent_in_shell(agent, &shell, path.as_deref())?;
+        Ok((
+            spec,
+            path.map(|path| path.to_string_lossy().to_string()),
+            inner,
+        ))
+    }
+
     /// Spawns a pane for a direct caller (the native shell) and registers it in the session.
     ///
     /// `create_workspace` and `create_tab` are the structured routes; this is the same promise
@@ -2323,13 +2375,13 @@ impl RouteTable {
     }
 
     fn spawn_pane_request(&self, request: PaneRequest) -> Result<Arc<Pane>> {
-        use crate::agents::LaunchSpec;
-        let spec = LaunchSpec::for_agent(
+        let agent_spec = LaunchSpec::for_agent(
             request.agent,
             &request.args,
             request.session.as_deref(),
             request.session.is_none() && request.resume_last,
         )?;
+        let (spec, shell_path, launch_command) = self.wrap_agent(&agent_spec)?;
         let size = TerminalSize {
             rows: DEFAULT_SIZE.rows,
             cols: DEFAULT_SIZE.cols,
@@ -2347,12 +2399,91 @@ impl RouteTable {
                 cwd: request.cwd,
                 spec,
                 args: request.args,
-                shell_path: None,
+                shell_path,
+                launch_command: Some(launch_command),
                 size,
             },
             on_event,
         )?;
         Ok(Arc::new(pane))
+    }
+
+    /// Brings an exited pane back under the same id. The stored command is wrapped in the
+    /// current shell preference; no prompt is dispatched to the agent on the way up.
+    fn restart_pane(&self, body: &Value) -> std::result::Result<(u16, Value), (u16, Value)> {
+        let pane_id = body
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| api_error(400, "invalid_request", "pane_id is required."))?;
+        let old = self.pane(pane_id)?;
+        if old.exited().is_none() {
+            return Err(api_error(409, "pane_alive", "The pane is still running."));
+        }
+        let (workspace_id, tab_id, label, cwd, agent, args, shell_path, launch_command) = (
+            old.workspace_id.clone(),
+            old.tab_id.clone(),
+            old.label(),
+            old.cwd.clone(),
+            old.agent,
+            old.args.clone(),
+            old.shell_path.clone(),
+            old.launch_command.clone(),
+        );
+        let focused_before = self.session.read().focused_pane.clone();
+        let (shell, preference_path) = self.shell_preference();
+        let spec = if let Some(shell_kind) = agent.as_shell() {
+            match shell_path.as_deref().map(Path::new) {
+                Some(path) => LaunchSpec::for_shell_path(path, &args),
+                None => LaunchSpec::for_shell(shell_kind, &args),
+            }
+        } else {
+            let path = preference_path
+                .as_deref()
+                .or_else(|| shell_path.as_deref().map(Path::new));
+            match launch_command.as_deref() {
+                Some(inner) => LaunchSpec::for_shell_command(inner, &shell, path),
+                None => LaunchSpec::for_agent(agent, &args, None, false).and_then(|agent_spec| {
+                    LaunchSpec::wrap_agent_in_shell(&agent_spec, &shell, path).map(|(spec, _)| spec)
+                }),
+            }
+        }
+        .map_err(|error| api_error(400, "restart_failed", &format!("{error}")))?;
+        let new_pane = Arc::new(
+            Pane::spawn(
+                PaneConfig {
+                    id: pane_id.to_string(),
+                    workspace_id: workspace_id.clone(),
+                    tab_id: tab_id.clone(),
+                    agent,
+                    label,
+                    cwd,
+                    spec,
+                    args,
+                    shell_path,
+                    launch_command,
+                    size: DEFAULT_SIZE,
+                },
+                self.on_event(),
+            )
+            .map_err(|error| api_error(400, "restart_failed", &format!("{error}")))?,
+        );
+        {
+            let mut session = self.session.write();
+            session.panes.insert(pane_id.to_string(), new_pane);
+            session.focused_pane = focused_before;
+        }
+        self.save();
+        self.connections
+            .broadcast(json!({ "type": "session-changed" }));
+        Ok((
+            200,
+            json!({
+                "pane_id": pane_id,
+                "workspace_id": workspace_id,
+                "tab_id": tab_id,
+                "restarted": true,
+            }),
+        ))
     }
 
     /// Restores the workspaces saved by the last run. Each pane resumes its agent (`--continue`
@@ -2390,11 +2521,22 @@ impl RouteTable {
                 .find(|tab| tab.pane_ids.iter().any(|id| id == &pane.id))
                 .map(|tab| tab.id.clone())
                 .unwrap_or_default();
-            let spec = match spec_for_saved_pane(pane) {
+            let agent_spec = match spec_for_saved_pane(pane) {
                 Ok(spec) => spec,
                 Err(error) => {
                     warn!("not restoring pane {}: {error}", pane.id);
                     continue;
+                }
+            };
+            let (spec, shell_path, launch_command) = if agent.as_shell().is_some() {
+                (agent_spec, pane.shell_path.clone(), None)
+            } else {
+                match self.wrap_agent(&agent_spec) {
+                    Ok((spec, shell_path, inner)) => (spec, shell_path, Some(inner)),
+                    Err(error) => {
+                        warn!("not restoring pane {}: {error}", pane.id);
+                        continue;
+                    }
                 }
             };
             let on_event = self.on_event();
@@ -2408,7 +2550,8 @@ impl RouteTable {
                     cwd,
                     spec,
                     args: pane.args.clone(),
-                    shell_path: pane.shell_path.clone(),
+                    shell_path,
+                    launch_command,
                     size: DEFAULT_SIZE,
                 },
                 on_event,
@@ -2782,5 +2925,174 @@ mod tests {
             assert_eq!(status, 400);
             assert_eq!(body["error"]["code"], "unknown_agent");
         }
+    }
+
+    fn exiting_spec() -> LaunchSpec {
+        #[cfg(windows)]
+        let args = vec!["/D".to_string(), "/C".to_string(), "exit 0".to_string()];
+        #[cfg(not(windows))]
+        let args = vec!["-c".to_string(), "exit 0".to_string()];
+        LaunchSpec {
+            program: harmless_executable(),
+            args,
+        }
+    }
+
+    fn wait_for_exit(pane: &Arc<Pane>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
+            if pane.exited().is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the pane did not exit");
+    }
+
+    #[test]
+    fn agent_spawn_wraps_the_agent_in_the_configured_shell() {
+        let routes = test_routes();
+        let shell = harmless_executable();
+        *routes.preferences.lock() = json!({
+            "settings": {
+                "defaultShell": "cmd",
+                "shellPath": shell.to_string_lossy().to_string()
+            }
+        });
+        let agent = LaunchSpec {
+            program: PathBuf::from("C:\\agents\\orion-fake-agent.exe"),
+            args: vec!["--resume".to_string(), "session-42".to_string()],
+        };
+        let (spec, shell_path, inner) = routes.wrap_agent(&agent).expect("the agent wraps");
+        assert_eq!(spec.program, shell, "the PTY root is the configured shell");
+        assert_eq!(spec.args[0], "/D");
+        assert_eq!(spec.args[1], "/K", "the shell stays after the agent exits");
+        assert_eq!(spec.args[2], inner);
+        assert!(
+            inner.contains("orion-fake-agent"),
+            "the inner command runs the agent: {inner}"
+        );
+        assert_eq!(
+            shell_path.as_deref(),
+            Some(shell.to_string_lossy().as_ref()),
+            "the resolved shell path is saved on the pane"
+        );
+    }
+
+    #[test]
+    fn shell_preference_falls_back_for_unknown_values() {
+        let routes = test_routes();
+        *routes.preferences.lock() = json!({
+            "settings": { "defaultShell": "not-a-shell", "shellPath": "" }
+        });
+        let (kind, path) = routes.shell_preference();
+        assert_eq!(kind, RouteTable::platform_default_shell());
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn shell_preference_ignores_a_custom_path_that_is_not_a_file() {
+        let routes = test_routes();
+        let missing = std::env::temp_dir().join(format!("orion-no-shell-{}", Uuid::new_v4()));
+        *routes.preferences.lock() = json!({
+            "settings": {
+                "defaultShell": "cmd",
+                "shellPath": missing.to_string_lossy().to_string()
+            }
+        });
+        let (_, path) = routes.shell_preference();
+        assert!(path.is_none(), "a path that is not a file is ignored");
+    }
+
+    #[test]
+    fn restart_keeps_the_pane_id_after_exit() {
+        let routes = test_routes();
+        let shell = harmless_executable();
+        *routes.preferences.lock() = json!({
+            "settings": {
+                "defaultShell": "cmd",
+                "shellPath": shell.to_string_lossy().to_string()
+            }
+        });
+        let pane = routes
+            .spawn_pane(PaneConfig {
+                id: "p-restart".into(),
+                workspace_id: "w1".into(),
+                tab_id: "t1".into(),
+                agent: AgentKind::Claude,
+                label: "Claude".into(),
+                cwd: std::env::temp_dir(),
+                spec: exiting_spec(),
+                args: vec!["--resume".to_string(), "abc".to_string()],
+                shell_path: None,
+                launch_command: Some("fake-agent --resume abc".into()),
+                size: DEFAULT_SIZE,
+            })
+            .expect("the pane starts");
+        wait_for_exit(&pane);
+
+        let (status, body) = routes.http(
+            "POST",
+            "/api/pane/restart",
+            &json!({ "pane_id": "p-restart" }),
+        );
+        assert_eq!(status, 200, "restart failed: {body}");
+        assert_eq!(body["pane_id"], "p-restart");
+        assert_eq!(body["restarted"], true);
+
+        let restarted = routes
+            .session
+            .pane("p-restart")
+            .expect("the pane is still open");
+        assert!(
+            !Arc::ptr_eq(&pane, &restarted),
+            "a new process backs the same id"
+        );
+        assert_eq!(restarted.id, "p-restart");
+        assert_eq!(restarted.workspace_id, "w1");
+        assert_eq!(restarted.tab_id, "t1");
+        assert_eq!(restarted.label(), "Claude");
+        assert_eq!(restarted.cwd, std::env::temp_dir());
+        assert_eq!(
+            restarted.launch_command.as_deref(),
+            Some("fake-agent --resume abc")
+        );
+    }
+
+    #[test]
+    fn restart_refuses_a_live_pane() {
+        let routes = test_routes();
+        let pane = routes
+            .spawn_pane(PaneConfig {
+                id: "p-live".into(),
+                workspace_id: "w1".into(),
+                tab_id: "t1".into(),
+                agent: AgentKind::from(ShellKind::Cmd),
+                label: "shell".into(),
+                cwd: std::env::temp_dir(),
+                spec: LaunchSpec {
+                    program: harmless_executable(),
+                    args: Vec::new(),
+                },
+                args: Vec::new(),
+                shell_path: None,
+                launch_command: None,
+                size: DEFAULT_SIZE,
+            })
+            .expect("the pane starts");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && pane.visible_text().trim().is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            !pane.visible_text().trim().is_empty(),
+            "the shell drew a prompt"
+        );
+        assert!(pane.exited().is_none(), "the shell is still running");
+
+        let (status, body) =
+            routes.http("POST", "/api/pane/restart", &json!({ "pane_id": "p-live" }));
+        assert_eq!(status, 409, "a live pane cannot be restarted: {body}");
+        assert_eq!(body["error"]["code"], "pane_alive");
     }
 }

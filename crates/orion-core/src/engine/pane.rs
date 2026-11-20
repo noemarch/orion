@@ -78,6 +78,8 @@ pub struct PaneConfig {
     pub args: Vec<String>,
     /// The user-supplied shell executable, when the pane was opened from a custom path.
     pub shell_path: Option<String>,
+    /// The composed inner agent command when the pane runs an agent inside a shell.
+    pub launch_command: Option<String>,
     pub size: TerminalSize,
 }
 
@@ -108,6 +110,7 @@ pub struct Pane {
     pub cwd: PathBuf,
     pub args: Vec<String>,
     pub shell_path: Option<String>,
+    pub launch_command: Option<String>,
     pub started_at: DateTime<Utc>,
     session: Arc<PtySession>,
     state: Arc<Mutex<PaneState>>,
@@ -188,6 +191,7 @@ impl Pane {
             cwd: config.cwd,
             args: config.args,
             shell_path: config.shell_path,
+            launch_command: config.launch_command,
             started_at: Utc::now(),
             session: Arc::new(session),
             state,
