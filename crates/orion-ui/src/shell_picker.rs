@@ -309,6 +309,9 @@ impl Render for ShellPickerModal {
                             .child(
                                 Button::new("shell-picker-close")
                                     .label("✕")
+                                    .tooltip("Close")
+                                    .min_h(px(44.0))
+                                    .min_w(px(44.0))
                                     .text()
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.close();

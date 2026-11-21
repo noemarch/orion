@@ -374,6 +374,8 @@ impl ReviewPane {
             .child(
                 Button::new("review-settings")
                     .tooltip("Review settings")
+                    .min_h(px(44.0))
+                    .min_w(px(44.0))
                     .secondary()
                     .compact()
                     .icon(IconName::Settings),

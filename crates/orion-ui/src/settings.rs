@@ -561,6 +561,9 @@ impl Render for SettingsModal {
                     .child(
                         Button::new("settings-close")
                             .label("✕")
+                            .tooltip("Close")
+                            .min_h(px(44.0))
+                            .min_w(px(44.0))
                             .text()
                             .on_click(cx.listener(|this, _, _, _cx| this.close())),
                     ),
