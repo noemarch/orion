@@ -1275,10 +1275,11 @@ impl OrionApp {
                     .min_w(px(44.0))
                     .tooltip("Settings")
                     .accessibility_label("Settings")
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let opener = window.focused(cx);
                         let settings = this.settings.clone();
                         settings.update(cx, |view, cx| {
-                            view.set_open(true);
+                            view.open_with_focus(opener);
                             cx.notify();
                         });
                         cx.notify();
@@ -1865,7 +1866,11 @@ impl Render for OrionApp {
         // preserved between lens switches (entities stay mounted above).
         let prefs = self.settings.update(cx, |view, _cx| view.prefs().clone());
         if self.last_render_prefs.as_ref() != Some(&prefs) {
-            Theme::set_current(Theme::for_mode(prefs.theme, prefs.density));
+            Theme::set_current(Theme::for_preferences(
+                prefs.theme,
+                prefs.density,
+                prefs.ui_font_size,
+            ));
             crate::theme::sync_gpui_kit(cx);
             self.last_render_prefs = Some(prefs.clone());
         }
