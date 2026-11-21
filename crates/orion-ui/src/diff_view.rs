@@ -32,6 +32,8 @@ use crate::theme::Theme;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::ThemeStyled;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_kit::{
     div, px, Context, FontWeight, HighlightStyle, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -247,6 +249,18 @@ fn patch_highlight(kind: PatchKind) -> HighlightStyle {
     }
 }
 
+/// The tab/list label for a file whose line counts are null. Never a bare dash.
+pub fn no_counts_label(file: &RepoDiffFile) -> &'static str {
+    if file.binary == Some(true) {
+        "binary"
+    } else {
+        match file.status {
+            RepoDiffStatus::Untracked | RepoDiffStatus::Added => "new file",
+            _ => "no counts",
+        }
+    }
+}
+
 pub struct ChangesView {
     engine: Option<Arc<dyn Runtime>>,
     pane_id: String,
@@ -259,6 +273,7 @@ pub struct ChangesView {
     selected_old_path: Option<String>,
     patch: Option<RepoDiffFilePatch>,
     error: Option<String>,
+    patch_error: Option<String>,
     visible: bool,
     focus_handle: gpui_kit::FocusHandle,
     list_scroll: ScrollHandle,
@@ -269,6 +284,8 @@ pub struct ChangesView {
     // Set by callers with no Context to spawn on; render spawns the fetch.
     list_pending: bool,
     patch_pending: bool,
+    /// A patch fetch has been spawned and its answer has not arrived yet.
+    patch_loading: bool,
     /// The list column width the reader dragged; None until then.
     list_width: Option<f32>,
     /// A splitter drag is in progress: the reader has the handle down.
@@ -295,6 +312,7 @@ impl ChangesView {
             selected_old_path: None,
             patch: None,
             error: None,
+            patch_error: None,
             visible: false,
             focus_handle: cx.focus_handle(),
             list_scroll: ScrollHandle::new(),
@@ -304,6 +322,7 @@ impl ChangesView {
             last_patch_body: None,
             list_pending: false,
             patch_pending: false,
+            patch_loading: false,
             list_width: None,
             resizing: false,
             resize_start_x: 0.0,
@@ -426,10 +445,11 @@ impl ChangesView {
 
     /// Spawn the patch fetch off the UI thread and apply its answer in one batch.
     fn spawn_patch_refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.engine.clone() else {
+        let Some(path) = self.selected_path.clone() else {
             return;
         };
-        let Some(path) = self.selected_path.clone() else {
+        self.patch_loading = true;
+        let Some(engine) = self.engine.clone() else {
             return;
         };
         let mut query = format!("{}&path={}", self.query(), url_encode(&path));
@@ -443,9 +463,14 @@ impl ChangesView {
                 .spawn(async move { engine.http("GET", &full, &Value::Null) })
                 .await;
             let _ = view.update(cx, |view, cx| {
+                if view.selected_path.as_deref() != Some(path.as_str()) {
+                    return;
+                }
+                view.patch_loading = false;
                 let (status, body) = answer;
                 if status != 200 {
                     view.error = Some(PATCH_ERROR_MESSAGE.to_string());
+                    view.patch_error = Some(PATCH_ERROR_MESSAGE.to_string());
                     cx.notify();
                     return;
                 }
@@ -458,8 +483,12 @@ impl ChangesView {
                     Ok(patch) => {
                         view.patch = Some(patch);
                         view.error = None;
+                        view.patch_error = None;
                     }
-                    Err(_) => view.error = Some(PATCH_ERROR_MESSAGE.to_string()),
+                    Err(_) => {
+                        view.error = Some(PATCH_ERROR_MESSAGE.to_string());
+                        view.patch_error = Some(PATCH_ERROR_MESSAGE.to_string());
+                    }
                 }
                 cx.notify();
             });
@@ -485,7 +514,17 @@ impl ChangesView {
         self.selected_old_path = file.old_path.clone();
         self.patch = None;
         self.last_patch_body = None;
+        self.error = None;
+        self.patch_error = None;
         self.refresh_patch();
+    }
+
+    /// Select a changed file and dispatch its patch fetch in this interaction
+    /// step. Callers without a `Context` use [`Self::select_file_at`] and let
+    /// `render` pump the pending flag instead.
+    pub fn select_file_now(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.select_file_at(index);
+        self.pump_refresh(cx);
     }
 
     /// The width the parent gave this view (px); `app.rs` pushes it in during
@@ -535,6 +574,17 @@ impl ChangesView {
     /// The current failure, if any (plain language; tests read this).
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// Whether a patch fetch is requested or in flight: the review column
+    /// shows its spinner while this holds.
+    pub fn patch_pending(&self) -> bool {
+        self.patch_pending || self.patch_loading
+    }
+
+    /// The patch fetch's failure, if any, in plain language.
+    pub fn patch_error(&self) -> Option<&str> {
+        self.patch_error.as_deref()
     }
 
     /// The last changed-file list a fetch answered (read-only; the review pane
@@ -606,14 +656,32 @@ impl ChangesView {
 
     /// A patch fetch answered (test seam).
     pub fn apply_patch(&mut self, patch: RepoDiffFilePatch) {
+        let path = patch.file.path.clone();
+        self.apply_patch_for(&path, patch);
+    }
+
+    /// A patch fetch for `path` answered (test seam). A response for a file
+    /// that is no longer selected is dropped, just as the live handler does.
+    pub fn apply_patch_for(&mut self, path: &str, patch: RepoDiffFilePatch) {
+        if self
+            .selected_path
+            .as_deref()
+            .is_some_and(|selected| selected != path)
+        {
+            return;
+        }
         self.patch = Some(patch);
         self.last_patch_body = None;
         self.error = None;
+        self.patch_error = None;
+        self.patch_loading = false;
     }
 
     /// A patch fetch failed (test seam); same plain-language rule as `fail_list`.
     pub fn fail_patch(&mut self, _raw: String) {
         self.error = Some(PATCH_ERROR_MESSAGE.to_string());
+        self.patch_error = Some(PATCH_ERROR_MESSAGE.to_string());
+        self.patch_loading = false;
     }
 
     /// The reader asked for the data again: forget the cached bodies so the
@@ -621,10 +689,18 @@ impl ChangesView {
     /// fetches.
     pub fn retry(&mut self) {
         self.error = None;
+        self.patch_error = None;
         self.last_list_body = None;
         self.last_patch_body = None;
         self.refresh();
         self.refresh_patch();
+    }
+
+    /// Retry and dispatch the fetches in this interaction step, for callers
+    /// whose view is not on screen and cannot rely on `render` to pump them.
+    pub fn retry_now(&mut self, cx: &mut Context<Self>) {
+        self.retry();
+        self.pump_refresh(cx);
     }
 
     fn start_poll(&self, cx: &mut Context<Self>) {
@@ -773,13 +849,16 @@ impl ChangesView {
 }
 
 impl Render for ChangesView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.row_seq = 0;
         self.pump_refresh(cx);
         let theme = Theme::current();
         let mut root = div()
             .id("changes-view")
             .debug_selector(|| "changes-view".to_string())
+            .when(self.focus_handle.is_focused(window), |el| {
+                el.focus_ring_style(window, cx)
+            })
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
@@ -909,13 +988,7 @@ impl Render for ChangesView {
                 };
                 let counts = match (file.additions, file.deletions) {
                     (Some(a), Some(d)) => format!("+{a} -{d}"),
-                    _ => {
-                        if file.binary == Some(true) {
-                            "binary".to_string()
-                        } else {
-                            "—".to_string()
-                        }
-                    }
+                    _ => no_counts_label(file).to_string(),
                 };
                 let path = file.path.clone();
                 let label = if let Some(old) = &file.old_path {
@@ -1366,6 +1439,134 @@ mod tests {
             "total": 2, "truncated": false,
         })
     }
+
+    fn patch_json(path: &str, patch: Option<&str>, unavailable: Option<&str>) -> serde_json::Value {
+        json!({
+            "repository": {
+                "root": "/r", "branch": "main", "head": "abc",
+                "detached": false, "unborn": false,
+            },
+            "scope": "workspace",
+            "file": {
+                "path": path, "old_path": null, "status": "modified",
+                "additions": 3, "deletions": 1, "binary": null,
+            },
+            "patch": patch,
+            "unavailable": unavailable,
+            "truncated": false,
+        })
+    }
+
+    fn two_file_list() -> RepoDiffFileList {
+        RepoDiffFileList::parse(&file_list_json(json!([
+            {"path": "a.rs", "old_path": null, "status": "modified",
+             "additions": 3, "deletions": 1, "binary": null},
+            {"path": "b.rs", "old_path": null, "status": "modified",
+             "additions": 2, "deletions": 0, "binary": null},
+        ])))
+        .expect("parse")
+    }
+
+    crate::orion_test!(
+        fn patch_fetch_starts_on_select_before_render(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.update(|_window, app| {
+                view.update(app, |v, cx| {
+                    v.apply_list(two_file_list());
+                    v.select_file_now(0, cx);
+                });
+            });
+            cx.update(|_window, app| {
+                assert!(
+                    view.read(app).patch_pending(),
+                    "selecting a file starts the patch fetch before any render"
+                );
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn patch_fetch_discards_stale_response(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.update(|_window, app| {
+                view.update(app, |v, cx| {
+                    v.apply_list(two_file_list());
+                    v.select_file_now(0, cx);
+                    v.select_file_now(1, cx);
+                });
+            });
+            let patch_a = RepoDiffFilePatch::parse(&patch_json(
+                "a.rs",
+                Some("@@ -1 +1 @@\n-old\n+new\n"),
+                None,
+            ))
+            .expect("parse A");
+            let patch_b =
+                RepoDiffFilePatch::parse(&patch_json("b.rs", Some("@@ -1 +1 @@\n-x\n+y\n"), None))
+                    .expect("parse B");
+            cx.update(|_window, app| {
+                view.update(app, |v, _cx| {
+                    v.apply_patch_for("a.rs", patch_a);
+                    assert!(
+                        v.current_patch().is_none(),
+                        "a late response for A must not overwrite B's patch"
+                    );
+                    assert_eq!(
+                        v.selected_path.as_deref(),
+                        Some("b.rs"),
+                        "a late response must not move the selected tab"
+                    );
+                    v.apply_patch_for("b.rs", patch_b);
+                    assert_eq!(
+                        v.current_patch().map(|patch| patch.file.path.as_str()),
+                        Some("b.rs"),
+                        "B's own answer is applied"
+                    );
+                });
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn patch_fetch_retry_clears_error_and_refetches(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.update(|_window, app| {
+                view.update(app, |v, cx| {
+                    v.apply_list(two_file_list());
+                    v.select_file_now(0, cx);
+                    v.fail_patch("boom".to_string());
+                });
+            });
+            cx.update(|_window, app| {
+                assert_eq!(
+                    view.read(app).patch_error(),
+                    Some(PATCH_ERROR_MESSAGE),
+                    "the failure is recorded as a patch error"
+                );
+                assert!(
+                    !view.read(app).patch_pending(),
+                    "no fetch is outstanding after a failure"
+                );
+            });
+            cx.update(|_window, app| {
+                view.update(app, |v, _cx| v.retry());
+            });
+            cx.update(|_window, app| {
+                assert_eq!(
+                    view.read(app).patch_error(),
+                    None,
+                    "Retry cleared the error"
+                );
+                assert!(
+                    view.read(app).patch_pending(),
+                    "Retry requested a fresh patch fetch"
+                );
+            });
+        }
+    );
 
     crate::orion_test!(
         fn the_changes_lens_shows_the_file_list_and_diff_surface(

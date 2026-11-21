@@ -6,6 +6,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentRow {
     pub pane_id: String,
+    pub workspace_id: String,
+    pub agent_name: String,
     pub title: String,
     pub context: String,
     pub status: AgentStatus,
@@ -14,14 +16,7 @@ pub struct AgentRow {
 
 impl AgentRow {
     pub fn status_word(&self) -> &'static str {
-        match self.status {
-            AgentStatus::Working => "Working",
-            AgentStatus::Blocked => "Waiting",
-            AgentStatus::Done => "Done",
-            AgentStatus::Error => "Error",
-            AgentStatus::Idle => "Idle",
-            AgentStatus::Unknown => "Unknown",
-        }
+        crate::session_status::badge_word(crate::session_status::state_of(self.status))
     }
 }
 
@@ -61,6 +56,10 @@ pub fn agent_rows(snapshot: &Value) -> Vec<AgentRow> {
                 .and_then(|rows| rows.iter().find(|t| str_field(t, "tab_id") == tab_id))
                 .and_then(|t| str_field(t, "label"));
             let status = parse_status(pane.get("agent_status").and_then(Value::as_str));
+            let agent_name = str_field(pane, "display_agent")
+                .or_else(|| str_field(pane, "agent"))
+                .unwrap_or(&title)
+                .to_string();
             let context = [workspace_label, tab_label, str_field(pane, "cwd")]
                 .into_iter()
                 .flatten()
@@ -70,6 +69,8 @@ pub fn agent_rows(snapshot: &Value) -> Vec<AgentRow> {
                 selected: focused_pane_id == Some(pane_id.as_str()),
                 status,
                 pane_id,
+                workspace_id: workspace_id.unwrap_or_default().to_string(),
+                agent_name,
                 title,
                 context,
             })

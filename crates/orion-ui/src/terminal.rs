@@ -24,7 +24,8 @@ use crate::theme::Theme;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::Selectable;
+use gpui_kit::component::{Selectable, ThemeStyled};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_kit::{
     div, px, rems, white, Bounds, ClipboardItem, Context, FocusHandle, Font, FontFallbacks,
@@ -434,6 +435,7 @@ fn sgr_modifier_bits(mods: &gpui_kit::Modifiers) -> u8 {
 pub struct TerminalPane {
     screen: Box<dyn TerminalEngine>,
     focus_handle: FocusHandle,
+    has_focus: bool,
     pane: Option<Arc<dyn PaneHandle>>,
     // Sticky modifiers (web key-bar semantics: consumed by the next key press).
     sticky_ctrl: bool,
@@ -560,6 +562,7 @@ impl TerminalPane {
         Self {
             screen: new_engine(120, 32),
             focus_handle: cx.focus_handle(),
+            has_focus: false,
             pane: None,
             sticky_ctrl: false,
             sticky_alt: false,
@@ -653,6 +656,10 @@ impl TerminalPane {
         // A new pane is a new agent: the placeholder counts from here.
         self.started_at = Instant::now();
         self.grid_has_content = false;
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.process_exit, ProcessExit::Running)
     }
 
     /// Cache the exit state the engine pushed for `pane_id`. Only the pane on
@@ -1356,9 +1363,14 @@ impl TerminalPane {
         }
         self.grid_has_content = grid_has_content;
 
-        let cursor = match cell {
-            Some(_) => cursor_in_view(offset, self.screen.cursor_position(), rows),
-            None => None,
+        let cursor_visible = self.has_focus && self.screen.mode(25);
+        let cursor = if cursor_visible {
+            match cell {
+                Some(_) => cursor_in_view(offset, self.screen.cursor_position(), rows),
+                None => None,
+            }
+        } else {
+            None
         };
         // The cursor cell's text and style, for the paint pass: a block
         // cursor is a quad plus the glyph sitting on it, not a bare quad.
@@ -1378,6 +1390,7 @@ impl TerminalPane {
         GridSnapshot {
             rows: grid_rows,
             cursor,
+            cursor_visible,
             cursor_glyph,
             cell: cell.unwrap_or(CellSize {
                 width: self.char_w,
@@ -1715,6 +1728,7 @@ impl Render for TerminalPane {
                 .child(
                     Button::new("find-prev")
                         .label("↑")
+                        .tooltip("Previous match")
                         .ghost()
                         .h(px(TARGET_PX))
                         .w(px(TARGET_PX))
@@ -1727,6 +1741,7 @@ impl Render for TerminalPane {
                 .child(
                     Button::new("find-next")
                         .label("↓")
+                        .tooltip("Next match")
                         .ghost()
                         .h(px(TARGET_PX))
                         .w(px(TARGET_PX))
@@ -1739,6 +1754,7 @@ impl Render for TerminalPane {
                 .child(
                     Button::new("find-close")
                         .label("✕")
+                        .tooltip("Close find")
                         .ghost()
                         .h(px(TARGET_PX))
                         .w(px(TARGET_PX))
@@ -1863,8 +1879,9 @@ impl Render for TerminalPane {
             status_bar = status_bar.right(
                 Button::new("terminal-restart")
                     .label("Restart")
+                    .tooltip("Restart agent")
                     .ghost()
-                    .h(px(TARGET_PX * 0.6))
+                    .h(px(TARGET_PX))
                     .min_w(px(TARGET_PX))
                     .tab_stop(false)
                     .loading(pending)
@@ -1883,6 +1900,7 @@ impl Render for TerminalPane {
             );
         }
 
+        self.has_focus = self.focus_handle.is_focused(window);
         // The grid: one custom element paints the rows; it takes its own
         // snapshot from the engine and draws it, cell for cell.
         let snapshot = self.grid_snapshot(theme, cell, rows);
@@ -1936,6 +1954,7 @@ impl Render for TerminalPane {
 
         let pane = div()
             .id("terminal-pane")
+            .when(self.has_focus, |el| el.focus_ring_style(window, cx))
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
@@ -3446,7 +3465,8 @@ mod tests {
             cx.update(|_window, app| {
                 let view = root.read(app).view.clone();
                 view.update(app, |view, _cx| {
-                    view.feed("alpha[31m red[0m beta");
+                    view.has_focus = true;
+                    view.feed("alpha\x1b[31m red\x1b[0m beta");
                     view.sel_anchor = Some((0, 0));
                     view.sel_cursor = Some((0, 5));
                 });
@@ -3456,6 +3476,7 @@ mod tests {
             let (lines, cursor, selection_row) = cx.update(|_window, app| {
                 let view = root.read(app).view.clone();
                 view.update(app, |view, _cx| {
+                    view.has_focus = true;
                     let snapshot = view.grid_snapshot(
                         Theme::dark(),
                         Some(crate::terminal_grid::CellSize {
@@ -3492,6 +3513,99 @@ mod tests {
                     && span.color == Theme::dark().term_selection),
                 "the fed selection lands on the snapshot row: {selection_row:?}"
             );
+        }
+    );
+
+    crate::orion_test!(
+        fn cursor_visibility_hidden_mode_yields_no_cursor(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    view.has_focus = true;
+                    view.feed("abc\x1b[?25l");
+                });
+            });
+            let (cursor, visible) = cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    let snap = view.grid_snapshot(
+                        Theme::dark(),
+                        Some(crate::terminal_grid::CellSize {
+                            width: 8.0,
+                            height: 16.0,
+                        }),
+                        32,
+                    );
+                    (snap.cursor, snap.cursor_visible)
+                })
+            });
+            assert_eq!(cursor, None, "DEC mode 25 hidden means no cursor");
+            assert!(!visible, "the snapshot marks the cursor hidden");
+        }
+    );
+
+    crate::orion_test!(
+        fn cursor_visibility_unfocused_pane_yields_no_cursor(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    view.has_focus = false;
+                    view.feed("abc");
+                });
+            });
+            let (cursor, visible) = cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    let snap = view.grid_snapshot(
+                        Theme::dark(),
+                        Some(crate::terminal_grid::CellSize {
+                            width: 8.0,
+                            height: 16.0,
+                        }),
+                        32,
+                    );
+                    (snap.cursor, snap.cursor_visible)
+                })
+            });
+            assert_eq!(cursor, None, "an unfocused pane never paints a cursor");
+            assert!(!visible, "the snapshot marks the cursor hidden");
+        }
+    );
+
+    crate::orion_test!(
+        fn cursor_visibility_focused_visible_pane_yields_cursor(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| TerminalRoot {
+                view: cx.new(TerminalPane::new),
+            });
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    view.has_focus = true;
+                    view.feed("abc");
+                });
+            });
+            let (cursor, visible) = cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, _cx| {
+                    let snap = view.grid_snapshot(
+                        Theme::dark(),
+                        Some(crate::terminal_grid::CellSize {
+                            width: 8.0,
+                            height: 16.0,
+                        }),
+                        32,
+                    );
+                    (snap.cursor, snap.cursor_visible)
+                })
+            });
+            assert_eq!(cursor, Some((0, 3)), "the cursor sits after the fed text");
+            assert!(visible, "the snapshot marks the cursor visible");
         }
     );
 }

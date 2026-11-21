@@ -11,11 +11,12 @@
 //! and a deleted line on the old side. The renderer only styles what that
 //! function decides, so the row geometry is testable without a window.
 
-use crate::diff_view::{diff_line_numbers, ChangesView, DiffLine, PatchKind};
+use crate::diff_view::{diff_line_numbers, no_counts_label, ChangesView, DiffLine, PatchKind};
 use crate::files_entities::{RepoDiffFile, RepoDiffFileList, RepoDiffFilePatch, RepoDiffStatus};
 use crate::theme::Theme;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Icon, IconName, Sizable};
 use gpui_kit::*;
 use gpui_kit::{
@@ -53,6 +54,34 @@ const SPACE_4: f32 = 16.0; // --space-4: section padding
 /// Upper bound for one review tab: the review column's 320px minimum, so a
 /// single tab never outgrows the column at 1280x800 with the sidebar shown.
 const TAB_MAX_WIDTH: f32 = 320.0;
+
+/// Plain-language explanation for a patch the server could not supply.
+pub fn patch_unavailable_message(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("binary") => "Binary file",
+        Some("too_large") => "This file is too large to show a diff.",
+        Some("unmerged") => "This file has unresolved merge conflicts.",
+        Some("unsupported") => "This file type isn't supported for diffing.",
+        _ => "No changes",
+    }
+}
+
+/// The tab the body follows: the patch's own file when the Changes lens moved
+/// the selection, otherwise the tab the reader last chose.
+fn active_index(
+    patch: Option<&RepoDiffFilePatch>,
+    files: &[RepoDiffFile],
+    selected: usize,
+) -> Option<usize> {
+    patch
+        .and_then(|patch| files.iter().position(|file| file.path == patch.file.path))
+        .or_else(|| (selected < files.len()).then_some(selected))
+}
+
+struct PatchLoad<'a> {
+    pending: bool,
+    error: Option<&'a str>,
+}
 
 /// What one rendered row means to the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,7 +273,7 @@ impl ReviewPane {
     /// Ask the Changes view for fresh list and patch data.
     fn reanalyze(&mut self, cx: &mut Context<Self>) {
         self.changes.update(cx, |view, view_cx| {
-            view.reanalyze();
+            view.retry_now(view_cx);
             view_cx.notify();
         });
         cx.notify();
@@ -255,7 +284,7 @@ impl ReviewPane {
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         self.selected = index;
         self.changes.update(cx, |view, view_cx| {
-            view.select_file_at(index);
+            view.select_file_now(index, view_cx);
             view_cx.notify();
         });
         cx.notify();
@@ -314,7 +343,7 @@ impl ReviewPane {
             );
 
         if let Some((added, deleted)) = line_totals(files) {
-            let mut totals = div()
+            let totals = div()
                 .id("review-totals")
                 .flex()
                 .flex_row()
@@ -330,26 +359,6 @@ impl ReviewPane {
                         .text_color(theme.diff_remove_text())
                         .child(format!("-{deleted}")),
                 );
-            if let Some(total) = list.map(|list| list.total.unwrap_or(list.files.len() as u64)) {
-                totals = totals.child(
-                    div()
-                        .id("review-progress")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(SPACE_2 * scale))
-                        .text_color(theme.token_text_muted())
-                        .child(
-                            div()
-                                .w(px(11.0 * scale))
-                                .h(px(11.0 * scale))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(theme.token_text_dim()),
-                        )
-                        .child(format!("0/{total}")),
-                );
-            }
             row = row.child(totals);
         }
 
@@ -364,6 +373,7 @@ impl ReviewPane {
             )
             .child(
                 Button::new("review-settings")
+                    .tooltip("Review settings")
                     .secondary()
                     .compact()
                     .icon(IconName::Settings),
@@ -454,12 +464,7 @@ impl ReviewPane {
                         );
                 }
                 _ => {
-                    let label = if file.binary == Some(true) {
-                        "binary"
-                    } else {
-                        "—"
-                    };
-                    stats = stats.child(label);
+                    stats = stats.child(no_counts_label(file));
                 }
             }
             content = content.child(stats);
@@ -614,10 +619,12 @@ impl ReviewPane {
         list: Option<&RepoDiffFileList>,
         files: &[RepoDiffFile],
         patch: Option<&RepoDiffFilePatch>,
-        active: Option<usize>,
+        load: PatchLoad<'_>,
         theme: &Theme,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         let scale = theme.density_scale();
+        let active = active_index(patch, files, self.selected);
         let mut content = div()
             .id("review-body-content")
             .flex()
@@ -668,6 +675,53 @@ impl ReviewPane {
         }
 
         let Some(patch) = patch else {
+            if load.pending {
+                content = content.child(
+                    div()
+                        .id("review-loading")
+                        .debug_selector(|| "review-loading".to_string())
+                        .mt(px(theme.space_5()))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(SPACE_2 * scale))
+                        .child(Spinner::new().small())
+                        .child(
+                            div()
+                                .text_size(px(theme.font_ui_secondary()))
+                                .text_color(theme.token_text_muted())
+                                .child("Loading patch…"),
+                        ),
+                );
+                return content;
+            }
+            if let Some(message) = load.error {
+                content = content.child(
+                    div()
+                        .id("review-error")
+                        .debug_selector(|| "review-error".to_string())
+                        .mt(px(theme.space_5()))
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap(px(SPACE_2 * scale))
+                        .child(
+                            div()
+                                .text_size(px(theme.font_ui_secondary()))
+                                .text_color(theme.diff_remove_text())
+                                .child(message.to_string()),
+                        )
+                        .child(
+                            Button::new("review-retry")
+                                .debug_selector(|| "review-retry".to_string())
+                                .secondary()
+                                .compact()
+                                .label("Retry")
+                                .on_click(cx.listener(|this, _, _, cx| this.reanalyze(cx))),
+                        ),
+                );
+                return content;
+            }
             content = content.child(
                 div()
                     .id("review-no-patch")
@@ -675,7 +729,7 @@ impl ReviewPane {
                     .mt(px(theme.space_5()))
                     .text_size(px(theme.font_ui_secondary()))
                     .text_color(theme.token_text_muted())
-                    .child("No patch loaded for this file yet."),
+                    .child("No changes"),
             );
             return content;
         };
@@ -775,17 +829,16 @@ impl ReviewPane {
             }
             card = card.child(grid);
         } else {
-            let reason = patch
-                .unavailable
-                .clone()
-                .unwrap_or_else(|| "no patch".to_string());
+            let message = patch_unavailable_message(patch.unavailable.as_deref());
             card = card.child(
                 div()
+                    .id("review-unavailable")
+                    .debug_selector(|| "review-unavailable".to_string())
                     .px(px(theme.space_3()))
                     .py(px(10.0 * scale))
                     .text_size(px(theme.font_ui_secondary()))
                     .text_color(theme.token_text_muted())
-                    .child(format!("No patch ({reason}).")),
+                    .child(message),
             );
         }
 
@@ -859,12 +912,12 @@ impl Render for ReviewPane {
         let changes = self.changes.read(cx);
         let list = changes.file_list();
         let patch = changes.current_patch();
+        let pending = changes.patch_pending();
+        let error = changes.patch_error();
         let base = changes.base();
         let head = changes.head();
         let files: &[RepoDiffFile] = list.map(|list| list.files.as_slice()).unwrap_or(&[]);
-        let active = patch
-            .and_then(|patch| files.iter().position(|file| file.path == patch.file.path))
-            .or_else(|| (self.selected < files.len()).then_some(self.selected));
+        let active = active_index(patch, files, self.selected);
         let label = header_label(list, base, head);
 
         div()
@@ -889,7 +942,14 @@ impl Render for ReviewPane {
                     .min_h(px(0.0))
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .child(self.render_body(list, files, patch, active, &theme)),
+                    .child(self.render_body(
+                        list,
+                        files,
+                        patch,
+                        PatchLoad { pending, error },
+                        &theme,
+                        cx,
+                    )),
             )
     }
 }
@@ -1039,6 +1099,188 @@ mod tests {
         assert_eq!(line_totals(&list.files), Some((3, 1)));
         assert_eq!(scope_label(Some(&list)), "All changes");
     }
+
+    fn one_file_list() -> RepoDiffFileList {
+        RepoDiffFileList::parse(&serde_json::json!({
+            "repository": {
+                "root": "/r", "branch": "main", "head": "abc",
+                "detached": false, "unborn": false,
+            },
+            "scope": "workspace",
+            "files": [
+                {"path": "lib.rs", "old_path": null, "status": "modified",
+                 "additions": 1, "deletions": 0, "binary": null},
+            ],
+            "total": 1, "truncated": false,
+        }))
+        .expect("parse")
+    }
+
+    fn binary_patch() -> RepoDiffFilePatch {
+        RepoDiffFilePatch::parse(&serde_json::json!({
+            "repository": {
+                "root": "/r", "branch": "main", "head": "abc",
+                "detached": false, "unborn": false,
+            },
+            "scope": "workspace",
+            "file": {
+                "path": "logo.png", "old_path": null, "status": "added",
+                "additions": null, "deletions": null, "binary": true,
+            },
+            "patch": null,
+            "unavailable": "binary",
+            "truncated": false,
+        }))
+        .expect("parse")
+    }
+
+    #[::core::prelude::v1::test]
+    fn review_states_unavailable_reasons_map_to_sentences() {
+        assert_eq!(patch_unavailable_message(Some("binary")), "Binary file");
+        assert_eq!(
+            patch_unavailable_message(Some("too_large")),
+            "This file is too large to show a diff."
+        );
+        assert_eq!(
+            patch_unavailable_message(Some("unmerged")),
+            "This file has unresolved merge conflicts."
+        );
+        assert_eq!(
+            patch_unavailable_message(Some("unsupported")),
+            "This file type isn't supported for diffing."
+        );
+        assert_eq!(patch_unavailable_message(None), "No changes");
+    }
+
+    #[::core::prelude::v1::test]
+    fn review_states_untracked_and_unknown_counts_have_labels() {
+        let untracked = RepoDiffFile {
+            path: "sprites.rs".to_string(),
+            old_path: None,
+            status: RepoDiffStatus::Untracked,
+            additions: None,
+            deletions: None,
+            binary: None,
+        };
+        assert_eq!(no_counts_label(&untracked), "new file");
+        let unknown = RepoDiffFile {
+            status: RepoDiffStatus::Unknown,
+            ..untracked.clone()
+        };
+        assert_eq!(no_counts_label(&unknown), "no counts");
+        let binary = RepoDiffFile {
+            binary: Some(true),
+            ..untracked
+        };
+        assert_eq!(no_counts_label(&binary), "binary");
+    }
+
+    crate::orion_test!(
+        fn review_states_tab_select_starts_fetch_before_render(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let changes = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.update(|_window, app| {
+                changes.update(app, |v, _cx| v.apply_list(one_file_list()));
+            });
+            let pane = cx.update(|_window, app| app.new(|cx| ReviewPane::new(changes.clone(), cx)));
+            cx.update(|_window, app| {
+                pane.update(app, |p, cx| p.select(0, cx));
+            });
+            cx.update(|_window, app| {
+                assert!(
+                    changes.read(app).patch_pending(),
+                    "selecting a tab starts the patch fetch before any render"
+                );
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn review_states_pending_shows_spinner(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::{point, size};
+            let cx = cx.add_empty_window();
+            let changes = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.update(|_window, app| {
+                changes.update(app, |v, cx| {
+                    v.apply_list(one_file_list());
+                    v.select_file_now(0, cx);
+                });
+            });
+            let pane = cx.update(|_window, app| app.new(|cx| ReviewPane::new(changes.clone(), cx)));
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(1280.), px(800.)),
+                |_, _cx| pane.clone().into_any_element(),
+            );
+            assert!(
+                cx.debug_bounds("review-loading").is_some(),
+                "a spinner is shown while the patch is pending"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn review_states_binary_patch_shows_explanation(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::{point, size};
+            let cx = cx.add_empty_window();
+            let changes = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.update(|_window, app| {
+                changes.update(app, |v, _cx| {
+                    v.apply_list(one_file_list());
+                    v.apply_patch(binary_patch());
+                });
+            });
+            let pane = cx.update(|_window, app| app.new(|cx| ReviewPane::new(changes.clone(), cx)));
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(1280.), px(800.)),
+                |_, _cx| pane.clone().into_any_element(),
+            );
+            assert!(
+                cx.debug_bounds("review-unavailable").is_some(),
+                "a binary patch explains itself instead of showing a bare dash"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn review_states_error_shows_retry(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::{point, size};
+            let cx = cx.add_empty_window();
+            let changes = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.update(|_window, app| {
+                changes.update(app, |v, cx| {
+                    v.apply_list(one_file_list());
+                    v.select_file_now(0, cx);
+                    v.fail_patch("boom".to_string());
+                });
+            });
+            let pane = cx.update(|_window, app| app.new(|cx| ReviewPane::new(changes.clone(), cx)));
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(1280.), px(800.)),
+                |_, _cx| pane.clone().into_any_element(),
+            );
+            assert!(
+                cx.debug_bounds("review-error").is_some(),
+                "the failure is on screen"
+            );
+            let bounds = cx.debug_bounds("review-retry").expect("the Retry");
+            assert!(bounds.size.width > px(0.), "the button has a real hitbox");
+            cx.update(|_window, app| {
+                pane.update(app, |pane, cx| pane.reanalyze(cx));
+                assert_eq!(
+                    changes.read(app).patch_error(),
+                    None,
+                    "Retry cleared the failure"
+                );
+                assert!(
+                    changes.read(app).patch_pending(),
+                    "Retry requested a fresh fetch"
+                );
+            });
+        }
+    );
 
     crate::orion_test!(
         fn eight_file_tabs_scroll_inside_the_review_column(cx: &mut gpui_kit::TestAppContext) {

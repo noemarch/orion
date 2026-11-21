@@ -22,18 +22,22 @@
 //! existing imports keep working.
 
 use crate::agents::{agent_rows, AgentRow};
+use crate::session_status;
 use crate::terminal_tree::{status_token, terminal_rows, TerminalRow, TerminalSource};
 use crate::theme::Theme;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     avatar::Avatar, button::Button, button::ButtonCustomVariant, button::ButtonVariants, Icon,
-    Sizable,
+    Sizable, ThemeStyled, WindowExt,
 };
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_kit::{div, px, Context, FocusHandle, Render, Styled, Window};
 use orion_core::protocol::AgentStatus;
 use orion_core::runtime::Runtime;
+use orion_core::session_state::SessionState;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -462,31 +466,7 @@ impl WorkspaceSidebar {
     /// emerald, ERROR the indicator ruby. Live statuses breathe between
     /// alpha 0.55 and 1.0 by `pulse` (DESIGN.md: RUN = blue/cyan pulse).
     fn status_color(status: AgentStatus, theme: &Theme, pulse: u32) -> gpui_kit::Rgba {
-        let base = match status {
-            AgentStatus::Idle => theme.status_idle,
-            AgentStatus::Working => theme.status_working,
-            AgentStatus::Blocked => theme.status_blocked,
-            AgentStatus::Done => theme.status_done,
-            AgentStatus::Error => theme.indicator_blocked,
-            AgentStatus::Unknown => theme.indicator_unknown,
-        };
-        match status {
-            AgentStatus::Working | AgentStatus::Blocked => {
-                let phase = (pulse % 16) as f32 / 16.0;
-                let wave = if phase < 0.5 {
-                    phase * 2.0
-                } else {
-                    2.0 - phase * 2.0
-                };
-                gpui_kit::Rgba {
-                    r: base.r,
-                    g: base.g,
-                    b: base.b,
-                    a: 0.55 + wave * 0.45,
-                }
-            }
-            _ => base,
-        }
+        session_status::badge_color(session_status::state_of(status), theme, pulse)
     }
 
     /// The 40px titlebar: the brand mark, the "Orion" wordmark and two trailing decorative glyphs.
@@ -591,6 +571,7 @@ impl WorkspaceSidebar {
                     )
                     .child(
                         Button::new("new-workspace-button")
+                            .tooltip("New workspace")
                             .ghost()
                             .icon(IconName::Plus)
                             .min_h(px(TOUCH_TARGET))
@@ -619,6 +600,9 @@ impl WorkspaceSidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_chosen = ws.focused;
+        let session_running = matches!(ws.status, AgentStatus::Working | AgentStatus::Blocked);
+        let sidebar_entity = cx.entity();
+        let session_label = ws.label.clone();
         let mark = ws
             .agent
             .chars()
@@ -697,12 +681,39 @@ impl WorkspaceSidebar {
                                             .text_color(theme.text_faint)
                                             .child("×"),
                                     )
-                                    // Wide-layout only: rail swaps this for an empty slot and keeps the 44px targets.
-                                    .min_h(px(28.0 * scale))
-                                    .min_w(px(28.0 * scale))
-                                    .on_click(cx.listener(move |_this, _, _, cx| {
+                                    .tooltip("Close session")
+                                    .min_h(px(TOUCH_TARGET))
+                                    .min_w(px(TOUCH_TARGET))
+                                    .on_click(cx.listener(move |_this, _, window, cx| {
                                         cx.stop_propagation();
-                                        cx.emit(SidebarEvent::CloseWorkspace(ws_id.clone()));
+                                        if session_running {
+                                            let pane_id = ws_id.clone();
+                                            let sidebar = sidebar_entity.clone();
+                                            let label = session_label.clone();
+                                            window.open_alert_dialog(cx, move |alert, _, _| {
+                                                let sidebar = sidebar.clone();
+                                                let pane_id = pane_id.clone();
+                                                alert
+                                                    .title("Close running session?")
+                                                    .description(format!(
+                                                        "{label} is still running. Closing it will terminate the agent."
+                                                    ))
+                                                    .confirm()
+                                                    .ok_text("Close")
+                                                    .on_ok(move |_, _, app| {
+                                                        sidebar.update(app, |_view, view_cx| {
+                                                            view_cx.emit(
+                                                                SidebarEvent::CloseWorkspace(
+                                                                    pane_id.clone(),
+                                                                ),
+                                                            );
+                                                        });
+                                                        true
+                                                    })
+                                            });
+                                        } else {
+                                            cx.emit(SidebarEvent::CloseWorkspace(ws_id.clone()));
+                                        }
                                         cx.notify();
                                     }))
                                     .into_any_element()
@@ -750,13 +761,18 @@ impl WorkspaceSidebar {
     fn render_agent_row(
         &mut self,
         agent: &AgentRow,
+        duplicates: &HashSet<(String, String)>,
         theme: &Theme,
         scale: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let pane_id = agent.pane_id.clone();
-        let mark = agent
-            .title
+        let label = session_status::row_label(
+            &agent.agent_name,
+            &agent.title,
+            duplicates.contains(&(agent.workspace_id.clone(), agent.agent_name.clone())),
+        );
+        let mark = label
             .chars()
             .next()
             .unwrap_or('?')
@@ -771,11 +787,7 @@ impl WorkspaceSidebar {
         } else {
             (project, sub)
         };
-        let title = if self.rail {
-            String::new()
-        } else {
-            agent.title.clone()
-        };
+        let title = if self.rail { String::new() } else { label };
         let status_area = Self::status_area(agent.status, self.rail, theme);
         Button::new(self.next_row_id())
             .custom(
@@ -869,8 +881,9 @@ impl WorkspaceSidebar {
     /// The trailing status of a session card: a tinted "Waiting" pill when the
     /// agent is blocked, otherwise the plain status word in dim text.
     fn status_area(status: AgentStatus, rail: bool, theme: &Theme) -> gpui_kit::AnyElement {
-        let word = status_word(status);
-        if status == AgentStatus::Blocked {
+        let state = session_status::state_of(status);
+        let word = session_status::badge_word(state);
+        if state == SessionState::NeedsInput {
             div()
                 .flex_none()
                 .px(px(theme.space_2()))
@@ -878,7 +891,7 @@ impl WorkspaceSidebar {
                 .rounded(px(theme.radius_control()))
                 .bg(theme.status_blocked_tint)
                 .text_size(px(theme.font_ui_secondary()))
-                .text_color(theme.state_attention())
+                .text_color(session_status::badge_color(state, theme, 0))
                 .child(if rail {
                     String::new()
                 } else {
@@ -936,14 +949,11 @@ impl WorkspaceSidebar {
             )
     }
 
-    /// The reference's bottom side-section: Working and Settled counts derived
-    /// from live agent statuses, with real agent titles in the side-item slots.
-    /// The screenshot's time labels are fabricated and are never reproduced.
     fn render_status_section(
         &self,
-        agents: &[AgentRow],
-        working: usize,
-        settled: usize,
+        working: &[&AgentRow],
+        settled: &[&AgentRow],
+        duplicates: &HashSet<(String, String)>,
         theme: &Theme,
         scale: f32,
     ) -> impl IntoElement {
@@ -951,67 +961,17 @@ impl WorkspaceSidebar {
             .id("sidebar-status-section")
             .flex()
             .flex_col()
-            .flex_shrink_0()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SPACE_2 * scale))
-                    .h(px(TOUCH_TARGET))
-                    .px(px(SPACE_4 * scale))
-                    .text_size(px(12.0 * scale))
-                    .text_color(theme.text_muted)
-                    .child(if self.rail {
-                        String::new()
-                    } else {
-                        "Working".to_string()
-                    })
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(12.0 * scale))
-                            .text_color(theme.token_text_dim())
-                            .child(working.to_string()),
-                    )
-                    .child(
-                        Icon::new(IconName::ChevronRight)
-                            .size(px(13.0 * scale))
-                            .text_color(theme.text_faint),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SPACE_2 * scale))
-                    .h(px(TOUCH_TARGET))
-                    .px(px(SPACE_4 * scale))
-                    .text_size(px(12.0 * scale))
-                    .text_color(theme.text_muted)
-                    .child(if self.rail {
-                        String::new()
-                    } else {
-                        "Settled".to_string()
-                    })
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(12.0 * scale))
-                            .text_color(theme.token_text_dim())
-                            .child(settled.to_string()),
-                    ),
-            );
+            .flex_shrink_0();
 
-        for agent in agents.iter().take(3) {
-            let mark = agent
-                .title
-                .chars()
-                .next()
-                .unwrap_or('?')
-                .to_ascii_uppercase()
-                .to_string();
+        for (name, rows, expandable) in [("Working", working, true), ("Settled", settled, false)] {
+            let chevron = if expandable {
+                Icon::new(IconName::ChevronRight)
+                    .size(px(13.0 * scale))
+                    .text_color(theme.text_faint)
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            };
             section = section.child(
                 div()
                     .flex()
@@ -1019,35 +979,74 @@ impl WorkspaceSidebar {
                     .items_center()
                     .gap(px(SPACE_2 * scale))
                     .h(px(TOUCH_TARGET))
-                    .pl(px(ROW_SUB_INDENT * scale))
-                    .pr(px(SPACE_4 * scale))
+                    .px(px(SPACE_4 * scale))
                     .text_size(px(12.0 * scale))
-                    .text_color(theme.text)
-                    .child(Self::avatar_chip(&mark, theme, scale))
+                    .text_color(theme.text_muted)
+                    .child(if self.rail {
+                        String::new()
+                    } else {
+                        name.to_string()
+                    })
+                    .child(div().flex_1())
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .truncate()
-                            .text_color(theme.token_text_muted())
-                            .child(if self.rail {
-                                String::new()
-                            } else {
-                                agent.title.clone()
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.0 * scale))
+                            .text_size(px(12.0 * scale))
                             .text_color(theme.token_text_dim())
-                            .child(if self.rail {
-                                String::new()
-                            } else {
-                                agent.status_word().to_string()
-                            }),
-                    ),
+                            .child(rows.len().to_string()),
+                    )
+                    .child(chevron),
             );
+
+            for agent in rows {
+                let state = session_status::state_of(agent.status);
+                let label = session_status::row_label(
+                    &agent.agent_name,
+                    &agent.title,
+                    duplicates.contains(&(agent.workspace_id.clone(), agent.agent_name.clone())),
+                );
+                let mark = label
+                    .chars()
+                    .next()
+                    .unwrap_or('?')
+                    .to_ascii_uppercase()
+                    .to_string();
+                section = section.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(SPACE_2 * scale))
+                        .h(px(TOUCH_TARGET))
+                        .pl(px(ROW_SUB_INDENT * scale))
+                        .pr(px(SPACE_4 * scale))
+                        .text_size(px(12.0 * scale))
+                        .text_color(theme.text)
+                        .child(Self::avatar_chip(&mark, theme, scale))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .text_color(theme.token_text_muted())
+                                .child(if self.rail { String::new() } else { label }),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.0 * scale))
+                                .text_color(session_status::badge_color(
+                                    state,
+                                    theme,
+                                    self.pulse_phase,
+                                ))
+                                .child(if self.rail {
+                                    String::new()
+                                } else {
+                                    session_status::badge_word(state).to_string()
+                                }),
+                        ),
+                );
+            }
         }
         section
     }
@@ -1078,20 +1077,7 @@ impl WorkspaceSidebar {
 
 fn parse_status(raw: Option<&str>) -> AgentStatus {
     raw.and_then(AgentStatus::from_wire)
-        .unwrap_or(AgentStatus::Idle)
-}
-
-/// The written status word for a protocol `AgentStatus`, matching the roster's
-/// `AgentRow::status_word` vocabulary ("Waiting" for blocked).
-fn status_word(status: AgentStatus) -> &'static str {
-    match status {
-        AgentStatus::Working => "Working",
-        AgentStatus::Blocked => "Waiting",
-        AgentStatus::Done => "Done",
-        AgentStatus::Error => "Error",
-        AgentStatus::Idle => "Idle",
-        AgentStatus::Unknown => "Unknown",
-    }
+        .unwrap_or(AgentStatus::Unknown)
 }
 
 /// The tab's pane ids in the engine's order. Snapshots carry `pane_ids`; older
@@ -1140,22 +1126,31 @@ fn terminal_label(row: &TerminalRow) -> String {
 }
 
 impl Render for WorkspaceSidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         let scale = theme.density_scale();
         let workspaces = self.workspaces();
         let agents = self.snapshot.as_ref().map(agent_rows).unwrap_or_default();
         let terminal_entries = self.runtime_terminals();
 
-        // Counts come from live agent statuses; no number here is invented.
-        let working = agents
+        let duplicates = session_status::duplicate_names(&agents);
+        let states: Vec<SessionState> = agents
             .iter()
-            .filter(|a| matches!(a.status, AgentStatus::Working | AgentStatus::Blocked))
-            .count();
-        let settled = agents
-            .iter()
-            .filter(|a| matches!(a.status, AgentStatus::Done | AgentStatus::Idle))
-            .count();
+            .map(|agent| session_status::state_of(agent.status))
+            .collect();
+        let (working, settled): (Vec<&AgentRow>, Vec<&AgentRow>) =
+            agents.iter().partition(|agent| {
+                session_status::group(session_status::state_of(agent.status))
+                    == session_status::StatusGroup::Working
+            });
+        debug_assert_eq!(
+            orion_core::session_state::working_count(&states),
+            working.len()
+        );
+        debug_assert_eq!(
+            orion_core::session_state::settled_count(&states),
+            settled.len()
+        );
 
         let mut sessions = div()
             .id("sidebar-sessions")
@@ -1171,7 +1166,7 @@ impl Render for WorkspaceSidebar {
             .children(
                 agents
                     .iter()
-                    .map(|agent| self.render_agent_row(agent, &theme, scale, cx)),
+                    .map(|agent| self.render_agent_row(agent, &duplicates, &theme, scale, cx)),
             );
 
         // The terminal section stays conditional on non-empty real data.
@@ -1200,6 +1195,9 @@ impl Render for WorkspaceSidebar {
 
         div()
             .id("workspace-sidebar")
+            .when(self.focus_handle.is_focused(window), |el| {
+                el.focus_ring_style(window, cx)
+            })
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
@@ -1209,7 +1207,7 @@ impl Render for WorkspaceSidebar {
             .child(self.render_titlebar(&theme, scale))
             .child(self.render_search_row(&theme, scale, cx))
             .child(sessions)
-            .child(self.render_status_section(&agents, working, settled, &theme, scale))
+            .child(self.render_status_section(&working, &settled, &duplicates, &theme, scale))
             .child(self.render_bottom_bar(&theme, scale))
     }
 }
@@ -1236,7 +1234,7 @@ mod tests {
         assert_eq!(parse_status(Some("done")), AgentStatus::Done);
         assert_eq!(parse_status(Some("error")), AgentStatus::Error);
         assert_eq!(parse_status(Some("idle")), AgentStatus::Idle);
-        assert_eq!(parse_status(None), AgentStatus::Idle);
+        assert_eq!(parse_status(None), AgentStatus::Unknown);
     }
 
     #[::core::prelude::v1::test]

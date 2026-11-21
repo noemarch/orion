@@ -105,7 +105,7 @@ pub struct Preferences {
     pub density: Density,
     pub key_bar_extras: Vec<String>,
     /// The terminal's font family: a comma-separated list in fallback order.
-    /// Empty means the built-in stack (see `crate::terminal_font`).
+    /// Defaults to the explicit monospace stack (see `crate::terminal_font`).
     pub terminal_font: String,
     /// The terminal's font size in pixels. 13 is the default (Orbit's default).
     pub terminal_font_size: u32,
@@ -125,7 +125,7 @@ impl Default for Preferences {
             theme: ThemeMode::Dark,
             density: Density::Comfortable,
             key_bar_extras: vec!["alt".to_string()],
-            terminal_font: String::new(),
+            terminal_font: crate::terminal_font::TERMINAL_FONT_STACK.to_string(),
             terminal_font_size: 13,
             alerts_on: true,
             alert_input: true,
@@ -205,7 +205,7 @@ impl Preferences {
             .get("terminalFont")
             .and_then(Value::as_str)
             .map(crate::terminal_font::sanitize_font_family)
-            .unwrap_or_default();
+            .unwrap_or_else(|| defaults.terminal_font.clone());
         let terminal_font_size = settings
             .get("terminalFontSize")
             .and_then(Value::as_u64)
@@ -793,5 +793,41 @@ mod tests {
         let settings = json!({ "shellPath": long });
         let prefs = Preferences::from_settings(&settings);
         assert_eq!(prefs.shell_path.chars().count(), 1024);
+    }
+
+    #[::core::prelude::v1::test]
+    fn terminal_font_defaults_are_non_empty_and_monospace() {
+        let prefs = Preferences::default();
+        assert_eq!(
+            prefs.terminal_font,
+            crate::terminal_font::TERMINAL_FONT_STACK,
+            "the default family is the explicit monospace stack"
+        );
+        assert!(!prefs.terminal_font.is_empty());
+        let families = crate::terminal_font::terminal_font_families(&prefs.terminal_font);
+        assert!(
+            families
+                .iter()
+                .any(|name| !crate::terminal_font::is_symbol_family(name)),
+            "a real monospace face is available for cell sizing: {families:?}"
+        );
+        assert!(
+            families
+                .iter()
+                .any(|name| crate::terminal_font::is_symbol_family(name)),
+            "the symbols-only face stays in the stack for glyph fallback"
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn terminal_font_defaults_keep_an_explicit_size() {
+        let prefs = Preferences::default();
+        assert_eq!(
+            prefs.terminal_font_size, 13,
+            "an explicit pixel size is carried"
+        );
+        let restored = Preferences::from_settings(&json!({}));
+        assert_eq!(restored.terminal_font, prefs.terminal_font);
+        assert_eq!(restored.terminal_font_size, prefs.terminal_font_size);
     }
 }

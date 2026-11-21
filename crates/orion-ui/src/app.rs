@@ -3,8 +3,9 @@
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::toolbar::Toolbar;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::Sizable;
-use gpui_kit::component::{Icon, IconName};
+use gpui_kit::component::{Icon, IconName, WindowExt};
 use gpui_kit::*;
 use gpui_kit::{
     div, px, App, Context, Entity, Render, Size, Subscription, Window, WindowBounds, WindowOptions,
@@ -22,6 +23,7 @@ use crate::files_view::FileTree;
 use crate::new_workspace::{recent_directory, NewWorkspaceEvent, NewWorkspaceModal};
 use crate::pane_seam::seam_of;
 use crate::review_pane::ReviewPane;
+use crate::session_status;
 use crate::settings::{KeyBarExtras, Preferences, SettingsModal};
 use crate::shell_model::{
     effective_conversation_width, reference_layout, review_column_visible_for_terminal,
@@ -1352,9 +1354,13 @@ impl OrionApp {
                     .label("Close")
                     .secondary()
                     .small()
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(pane_id) = focused_pane_id.clone() {
-                            this.call_route("/api/pane/close", &json!({ "pane_id": pane_id }));
+                            if this.terminal_pane.read(cx).is_running() {
+                                this.confirm_close_pane(pane_id, window, cx);
+                            } else {
+                                this.call_route("/api/pane/close", &json!({ "pane_id": pane_id }));
+                            }
                         }
                         this.workspace_sidebar
                             .update(cx, |view, _cx| view.refresh());
@@ -1363,9 +1369,39 @@ impl OrionApp {
             )
     }
 
-    /// The thin bar under the middle column. Every field comes from the live
-    /// sidebar snapshot: the focused workspace's path, label, agent and status,
-    /// plus the focused pane id. No token counts or other invented metrics.
+    fn confirm_close_pane(&self, pane_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let app_entity = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let app_entity = app_entity.clone();
+            let pane_id = pane_id.clone();
+            alert
+                .title("Close running agent?")
+                .description("The agent is still running. Closing it will terminate it.")
+                .confirm()
+                .ok_text("Close")
+                .on_ok(move |_, _, app| {
+                    app_entity.update(app, |this, app_cx| {
+                        this.call_route("/api/pane/close", &json!({ "pane_id": pane_id }));
+                        this.workspace_sidebar
+                            .update(app_cx, |view, _cx| view.refresh());
+                        app_cx.notify();
+                    });
+                    true
+                })
+        });
+    }
+
+    fn conversation_status_line(agent: &str, status: &str, cwd: &str) -> String {
+        [agent, status, cwd]
+            .iter()
+            .filter(|field| !field.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
+    /// The thin bar under the middle column: one `agent · state · cwd` line from
+    /// the live sidebar snapshot. The pane id is available on hover only.
     fn render_conversation_status(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         let workspaces = &self.cached_workspaces;
@@ -1377,36 +1413,12 @@ impl OrionApp {
         let cwd = focused.and_then(|ws| ws.cwd.clone()).unwrap_or_default();
         let agent = focused.map(|ws| ws.agent.clone()).unwrap_or_default();
         let status = focused
-            .map(|ws| ws.status.as_wire().to_string())
+            .map(|ws| session_status::badge_word(session_status::state_of(ws.status)).to_string())
             .unwrap_or_default();
-        let pane_id = self.focused_pane.clone();
         let location = if cwd.is_empty() { label } else { cwd };
-        let mut right_fields: Vec<String> = Vec::new();
-        if !agent.is_empty() {
-            right_fields.push(agent);
-        }
-        if !status.is_empty() {
-            right_fields.push(status);
-        }
-        if let Some(pane_id) = pane_id {
-            right_fields.push(pane_id);
-        }
-        let mut right = div()
-            .flex_1()
-            .min_w(px(0.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_end()
-            .overflow_hidden()
-            .whitespace_nowrap();
-        for (index, field) in right_fields.into_iter().enumerate() {
-            if index > 0 {
-                right = right.child(" · ");
-            }
-            right = right.child(field);
-        }
-        div()
+        let line = Self::conversation_status_line(&agent, &status, &location);
+        let pane_id = self.focused_pane.clone();
+        let mut bar = div()
             .id("conversation-status")
             .flex()
             .flex_row()
@@ -1423,14 +1435,18 @@ impl OrionApp {
             .overflow_hidden()
             .child(
                 div()
-                    .id("conversation-status-location")
+                    .id("conversation-status-line")
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_color(theme.token_text_muted())
-                    .child(location),
-            )
-            .child(right)
+                    .child(line),
+            );
+        if let Some(pane_id) = pane_id {
+            bar = bar.tooltip(move |window, cx| {
+                Tooltip::new(format!("Pane ID: {pane_id}")).build(window, cx)
+            });
+        }
+        bar
     }
 
     fn render_lens_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1509,9 +1525,13 @@ impl OrionApp {
                     .label("Close")
                     .secondary()
                     .small()
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(pane_id) = focused_pane_id.clone() {
-                            this.call_route("/api/pane/close", &json!({ "pane_id": pane_id }));
+                            if this.terminal_pane.read(cx).is_running() {
+                                this.confirm_close_pane(pane_id, window, cx);
+                            } else {
+                                this.call_route("/api/pane/close", &json!({ "pane_id": pane_id }));
+                            }
                         }
                         this.workspace_sidebar
                             .update(cx, |view, _cx| view.refresh());
@@ -1594,6 +1614,7 @@ impl OrionApp {
                         .gap_1()
                         .child(
                             Button::new(format!("tab-edit-{tab_id}"))
+                                .tooltip("Rename tab")
                                 .label("✎")
                                 .text()
                                 .xsmall()
@@ -1609,6 +1630,7 @@ impl OrionApp {
                         )
                         .child(
                             Button::new(format!("tab-split-{tab_id}"))
+                                .tooltip("Split pane")
                                 .label("◫")
                                 .text()
                                 .xsmall()
@@ -1632,6 +1654,7 @@ impl OrionApp {
                         )
                         .child(
                             Button::new(format!("tab-close-{tab_id}"))
+                                .tooltip("Close tab")
                                 .label("×")
                                 .text()
                                 .xsmall()
@@ -1658,6 +1681,7 @@ impl OrionApp {
             }))
             .suffix(
                 Button::new("tab-new")
+                    .tooltip("New tab")
                     .label("+")
                     .secondary()
                     .small()
@@ -2319,6 +2343,17 @@ mod tests {
     use orion_core::runtime::{FrameConnection, PROTOCOL_VERSION};
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
+
+    #[::core::prelude::v1::test]
+    fn footer_single_line_is_agent_state_cwd_without_uuid() {
+        let line = OrionApp::conversation_status_line("claude", "Working", "/work/orion");
+        assert_eq!(line, "claude · Working · /work/orion");
+        assert_eq!(
+            line.matches(" · ").count(),
+            2,
+            "exactly three fields, no pane id"
+        );
+    }
 
     crate::orion_test!(
         fn the_pump_feeds_chunks_and_notifies_only_on_revision_change(

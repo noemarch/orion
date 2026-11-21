@@ -326,9 +326,9 @@ pub fn build_row(
     let mut col = 0usize;
     for (index, cell) in cells.iter().enumerate() {
         let mut style = CellStyle::of_cell(cell, theme);
+        let (cell_start, cell_end) = scratch.col_bytes[index];
         if let Some(span) = &selection {
-            let start = scratch.col_bytes[index].0;
-            if start >= span.start && start < span.end {
+            if cell_start < span.end && cell_end > span.start {
                 style.bg = theme.term_selection;
             }
         }
@@ -337,8 +337,7 @@ pub fn build_row(
             let end = span.end.min(scratch.text.len());
             (span.start < end).then_some(span.start..end)
         }) {
-            let start = scratch.col_bytes[index].0;
-            if start >= span.start && start < span.end {
+            if cell_start < span.end && cell_end > span.start {
                 style.bg = theme.accent;
                 style.fg = theme.term_bg;
             }
@@ -419,8 +418,12 @@ pub struct GridSnapshot {
     /// The visible rows, in draw order.
     pub rows: Vec<Rc<GridRow>>,
     /// The cursor, when it sits inside the viewport: `(row, col)` in visible
-    /// cells. `None` when the reader has scrolled it off the top.
+    /// cells. `None` when the reader has scrolled it off the top, when the pane
+    /// is unfocused, or when the program hid it (DECTCEM, DEC mode 25).
     pub cursor: Option<(usize, usize)>,
+    /// Whether the focused pane is allowed to show its cursor. DECTCEM off and
+    /// an unfocused pane both clear this; paint consults it before drawing.
+    pub cursor_visible: bool,
     /// The cursor cell's text and resolved style, so paint can keep the glyph
     /// readable on the block cursor instead of hiding it under the quad.
     pub cursor_glyph: Option<(String, CellStyle)>,
@@ -432,6 +435,12 @@ pub struct GridSnapshot {
     pub font_size: f32,
     /// The palette the rows were resolved against, for the cursor.
     pub theme: Theme,
+}
+
+impl GridSnapshot {
+    pub fn should_paint_cursor(&self) -> bool {
+        self.cursor.is_some() && self.cursor_visible
+    }
 }
 
 /// The terminal grid: one element, painted directly.
@@ -602,6 +611,9 @@ impl TerminalGrid {
     }
 
     fn paint_cursor(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        if !self.snapshot.should_paint_cursor() {
+            return;
+        }
         let Some((row, col)) = self.snapshot.cursor else {
             return;
         };
@@ -882,6 +894,7 @@ mod tests {
         GridSnapshot {
             rows,
             cursor: None,
+            cursor_visible: false,
             cursor_glyph: None,
             cell: CellSize {
                 width: 8.0,
@@ -1409,5 +1422,91 @@ mod tests {
 
         assert!(grid.background_rects().is_empty());
         assert!(grid.snapshot.rows.is_empty());
+    }
+
+    #[::core::prelude::v1::test]
+    fn cursor_visibility_hidden_snapshot_paints_no_cursor() {
+        let mut snap = snapshot_of(Vec::new());
+        snap.cursor = Some((3, 7));
+        snap.cursor_visible = false;
+        assert!(
+            !snap.should_paint_cursor(),
+            "a hidden cursor (DECTCEM off) paints no quad"
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn cursor_visibility_unfocused_snapshot_paints_no_cursor() {
+        let snap = snapshot_of(Vec::new());
+        assert!(
+            !snap.should_paint_cursor(),
+            "a pane without a cursor position paints no quad"
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn cursor_visibility_focused_snapshot_paints_cursor_at_its_cell() {
+        let mut snap = snapshot_of(Vec::new());
+        snap.cursor = Some((3, 7));
+        snap.cursor_visible = true;
+        assert!(snap.should_paint_cursor());
+        let cell = snap.cell;
+        let (row, col) = snap.cursor.expect("cursor is present");
+        assert_eq!(col as f32 * cell.width, 56.0);
+        assert_eq!(row as f32 * cell.height, 48.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn background_spans_cover_exactly_the_cells_with_a_non_default_background() {
+        let theme = Theme::dark();
+        let cells = vec![
+            cell("a", TermColor::Default, TermColor::Default),
+            cell("b", TermColor::Default, TermColor::Indexed(1)),
+            cell("c", TermColor::Default, TermColor::Indexed(1)),
+            cell("d", TermColor::Default, TermColor::Default),
+        ];
+        let row = run_build_row(&cells, &theme, &RowOverlays::default());
+        assert_eq!(
+            row.bgs,
+            vec![BgSpan {
+                first_col: 1,
+                end_col: 3,
+                color: crate::theme::xterm_256(1),
+            }],
+            "only the two coloured cells carry a background: {:?}",
+            row.bgs
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn background_spans_snap_partial_find_overlaps_to_cell_boundaries() {
+        let theme = Theme::dark();
+        let mut wide = cell("漢", TermColor::Default, TermColor::Default);
+        wide.wide = true;
+        let continuation = TermCell {
+            text: String::new(),
+            wide_continuation: true,
+            ..cell("", TermColor::Default, TermColor::Default)
+        };
+        let cells = vec![
+            wide,
+            continuation,
+            cell("a", TermColor::Default, TermColor::Default),
+        ];
+        let overlays = RowOverlays {
+            selection: None,
+            find: vec![1..4],
+        };
+        let row = run_build_row(&cells, &theme, &overlays);
+        assert_eq!(
+            row.bgs,
+            vec![BgSpan {
+                first_col: 0,
+                end_col: 3,
+                color: theme.accent,
+            }],
+            "a partial byte overlap highlights whole cells: {:?}",
+            row.bgs
+        );
     }
 }

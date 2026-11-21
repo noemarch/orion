@@ -17,6 +17,7 @@ pub mod pane_seam;
 pub mod perf;
 pub mod prompt_card;
 pub mod review_pane;
+pub mod session_status;
 pub mod settings;
 pub mod shell_model;
 pub mod shell_picker;

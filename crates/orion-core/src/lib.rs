@@ -8,6 +8,7 @@ pub mod protocol;
 pub mod pty;
 pub mod runtime;
 pub mod screen;
+pub mod session_state;
 pub mod terminal_engine;
 pub mod trace;
 pub mod transcript;
