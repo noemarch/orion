@@ -69,6 +69,8 @@ impl Density {
 pub struct Theme {
     pub mode: ThemeMode,
     pub density: Density,
+    /// The chosen body size in px (`uiFontSize`), or `None` to follow density.
+    pub ui_font_size: Option<u8>,
     /// Surface/base `--bg`.
     pub surface_base: Rgba,
     /// Surface/panel `--bg-panel`.
@@ -295,6 +297,7 @@ impl Theme {
             ThemeMode::Dark => Theme {
                 mode,
                 density,
+                ui_font_size: None,
                 surface_base: rgb(0x0d1117),
                 surface_panel: rgb(0x10151d),
                 surface_elevated: rgb(0x151b24),
@@ -396,6 +399,7 @@ impl Theme {
             ThemeMode::Light => Theme {
                 mode,
                 density,
+                ui_font_size: None,
                 surface_base: rgb(0xfaf5fa),
                 surface_panel: rgb(0xffffff),
                 surface_elevated: rgb(0xf3ebf1),
@@ -497,6 +501,13 @@ impl Theme {
         }
     }
 
+    pub fn for_preferences(mode: ThemeMode, density: Density, ui_font_size: Option<u8>) -> Self {
+        Theme {
+            ui_font_size: ui_font_size.filter(|size| (11..=20).contains(size)),
+            ..Self::for_mode(mode, density)
+        }
+    }
+
     /// The live theme. Falls back to Quiet Slate dark with comfortable
     /// density before the app installs saved preferences.
     ///
@@ -516,7 +527,11 @@ impl Theme {
         } else {
             Density::Comfortable
         };
-        Theme::for_mode(mode, density)
+        let ui_font_size = match CURRENT_UI_FONT_SIZE.load(Ordering::Relaxed) {
+            0 => None,
+            size => Some(size),
+        };
+        Theme::for_preferences(mode, density, ui_font_size)
     }
 
     /// Install the theme every view reads via [`Theme::current()`].
@@ -532,6 +547,19 @@ impl Theme {
             key |= DENSITY_BIT;
         }
         CURRENT_KEY.store(key, Ordering::Relaxed);
+        CURRENT_UI_FONT_SIZE.store(theme.ui_font_size.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// The ratio between the chosen body size and the density's body size.
+    pub fn ui_scale(self) -> f32 {
+        self.text_size() / self.density_body_size()
+    }
+
+    fn density_body_size(self) -> f32 {
+        match self.density {
+            Density::Comfortable => 14.0,
+            Density::Compact => 13.0,
+        }
     }
 
     /// Spacing/text scale for the density (DESIGN.md §1: scales without
@@ -546,38 +574,38 @@ impl Theme {
     /// Body text size in px for the density (comfortable 14, compact 13 —
     /// `BODY_FONT` in `src/lib/settings.ts`).
     pub fn text_size(self) -> f32 {
-        match self.density {
-            Density::Comfortable => 14.0,
-            Density::Compact => 13.0,
-        }
+        self.ui_font_size
+            .map_or_else(|| self.density_body_size(), f32::from)
     }
 
     /// Chat prose size in px for the density (comfortable 15, compact 14 —
     /// `--fs-chat`, DESIGN.md §Scale).
     pub fn chat_prose_size(self) -> f32 {
-        match self.density {
-            Density::Comfortable => 15.0,
-            Density::Compact => 14.0,
-        }
+        self.ui_scale()
+            * match self.density {
+                Density::Comfortable => 15.0,
+                Density::Compact => 14.0,
+            }
     }
 
     /// Chat code size in px for the density (comfortable 13, compact 12 —
     /// `--fs-sm`).
     pub fn chat_code_size(self) -> f32 {
-        match self.density {
-            Density::Comfortable => 13.0,
-            Density::Compact => 12.0,
-        }
+        self.ui_scale()
+            * match self.density {
+                Density::Comfortable => 13.0,
+                Density::Compact => 12.0,
+            }
     }
 
     /// A markdown heading's size in px: h1 is `--fs-xl` (18/17), h2 `--fs-lg`
     /// (16/15), h3 and below the prose size (`--fs-chat`).
     pub fn chat_heading_size(self, level: u8) -> f32 {
         match (level, self.density) {
-            (1, Density::Comfortable) => 18.0,
-            (1, Density::Compact) => 17.0,
-            (2, Density::Comfortable) => 16.0,
-            (2, Density::Compact) => 15.0,
+            (1, Density::Comfortable) => 18.0 * self.ui_scale(),
+            (1, Density::Compact) => 17.0 * self.ui_scale(),
+            (2, Density::Comfortable) => 16.0 * self.ui_scale(),
+            (2, Density::Compact) => 15.0 * self.ui_scale(),
             _ => self.chat_prose_size(),
         }
     }
@@ -743,27 +771,27 @@ impl Theme {
 
     /// `font_ui_body` — body UI font size, scaled by density.
     pub fn font_ui_body(&self) -> f32 {
-        13.0 * self.density_scale()
+        13.0 * self.density_scale() * self.ui_scale()
     }
 
     /// `font_ui_secondary` — secondary UI font size, scaled by density.
     pub fn font_ui_secondary(&self) -> f32 {
-        12.0 * self.density_scale()
+        12.0 * self.density_scale() * self.ui_scale()
     }
 
     /// `font_title` — title font size, scaled by density.
     pub fn font_title(&self) -> f32 {
-        14.0 * self.density_scale()
+        14.0 * self.density_scale() * self.ui_scale()
     }
 
     /// `font_title_lg` — large title font size, scaled by density.
     pub fn font_title_lg(&self) -> f32 {
-        15.0 * self.density_scale()
+        15.0 * self.density_scale() * self.ui_scale()
     }
 
     /// `font_mono` — monospace font size, scaled by density.
     pub fn font_mono(&self) -> f32 {
-        12.5 * self.density_scale()
+        12.5 * self.density_scale() * self.ui_scale()
     }
 
     /// `mono_line_height` — monospace line-height ratio, scaled by density.
@@ -783,22 +811,31 @@ pub const CHAT_LINE_HEIGHT: f32 = 1.65;
 pub const CHAT_INLINE_CODE_RATIO: f32 = 0.87;
 
 // Packed key for the live theme: bit 0 = Light, bit 1 = Compact. Every
-// `set_current` caller passes `Theme::for_mode(mode, density)` (settings.rs,
-// app.rs) or its `dark()`/`light()` wrappers, so the full palette is a pure
-// function of these two bits and the key reconstructs it losslessly.
+// `set_current` caller passes `Theme::for_preferences(...)` or `for_mode`,
+// so the palette is a pure function of these two bits and the key
+// reconstructs it losslessly. Interface size is a separate axis because the
+// 11..=20 px choice does not fit in the two-bit palette key.
 const MODE_BIT: u8 = 1;
 const DENSITY_BIT: u8 = 2;
 static CURRENT_KEY: AtomicU8 = AtomicU8::new(0);
+static CURRENT_UI_FONT_SIZE: AtomicU8 = AtomicU8::new(0);
 
 /// Convert a theme color to the `Hsla` `TextStyle` expects.
 pub fn hsla(color: Rgba) -> Hsla {
     color.into()
 }
 
-// The last palette pushed into the gpui-kit global theme, as
-// (is dark, density scale). The kit theme is global mutable state; the app
-// re-syncs it only when this changes, so a per-frame call stays cheap.
-static KIT_SYNCED: LazyLock<Mutex<(Option<bool>, f32)>> = LazyLock::new(|| Mutex::new((None, 0.0)));
+// The last palette pushed into the gpui-kit global theme. The kit theme is
+// global mutable state; the app re-syncs it only when this key changes, so a
+// per-frame call stays cheap.
+#[derive(PartialEq)]
+struct KitSyncKey {
+    dark: bool,
+    density_scale: f32,
+    ui_font_size: Option<u8>,
+}
+
+static KIT_SYNCED: LazyLock<Mutex<Option<KitSyncKey>>> = LazyLock::new(|| Mutex::new(None));
 
 // Push the current Quiet Slate palette into gpui-kit's global theme.
 //
@@ -817,9 +854,12 @@ pub(crate) fn sync_gpui_kit(cx: &mut App) {
     };
     let is_dark = matches!(mode, KitThemeMode::Dark);
     let scale = t.density_scale();
+    let ui_font_size = t.ui_font_size;
 
     if let Ok(guard) = KIT_SYNCED.lock() {
-        if guard.0 == Some(is_dark) && guard.1 == scale {
+        if guard.as_ref().is_some_and(|key| {
+            key.dark == is_dark && key.density_scale == scale && key.ui_font_size == ui_font_size
+        }) {
             return;
         }
     }
@@ -888,8 +928,11 @@ pub(crate) fn sync_gpui_kit(cx: &mut App) {
     });
 
     if let Ok(mut guard) = KIT_SYNCED.lock() {
-        guard.0 = Some(is_dark);
-        guard.1 = scale;
+        *guard = Some(KitSyncKey {
+            dark: is_dark,
+            density_scale: scale,
+            ui_font_size,
+        });
     }
 }
 
@@ -1205,5 +1248,192 @@ mod tests {
         assert_eq!(compact.font_mono(), 12.5 * scale);
         assert_eq!(compact.mono_line_height(), 1.5 * scale);
         assert_eq!(compact.window_bg(), dark.window_bg());
+    }
+
+    fn parse_doc_color(cell: &str) -> Option<Rgba> {
+        let value = cell.trim().trim_matches('`').trim();
+        if let Some(hex) = value.strip_prefix('#') {
+            return u32::from_str_radix(hex, 16).ok().map(rgb);
+        }
+        let inner = value.strip_prefix("rgba(")?.strip_suffix(')')?;
+        let parts = inner.split(',').map(str::trim).collect::<Vec<_>>();
+        if parts.len() != 4 {
+            return None;
+        }
+        let r = u32::from(parts[0].parse::<u8>().ok()?);
+        let g = u32::from(parts[1].parse::<u8>().ok()?);
+        let b = u32::from(parts[2].parse::<u8>().ok()?);
+        let alpha = ((parts[3].parse::<f32>().ok()? * 255.0) + 0.5) as u32;
+        Some(rgba((r << 24) | (g << 16) | (b << 8) | alpha))
+    }
+
+    fn doc_token_color(theme: &Theme, token: &str) -> Option<Rgba> {
+        Some(match token {
+            "--bg" => theme.surface_base,
+            "--bg-panel" => theme.surface_panel,
+            "--bg-elevated" => theme.surface_elevated,
+            "--bg-hover" => theme.surface_hover,
+            "--bg-input" => theme.surface_input,
+            "--border" => theme.border,
+            "--border-strong" => theme.border_strong,
+            "--text" => theme.text,
+            "--text-dim" => theme.text_dim,
+            "--text-strong" => theme.text_strong,
+            "--accent" => theme.accent,
+            "--accent-tint" => theme.accent_tint,
+            "--primary" => theme.primary,
+            "--primary-hover" => theme.primary_hover,
+            "--primary-text" => theme.primary_text,
+            "--primary-tint" => theme.primary_tint,
+            "--status-idle" => theme.status_idle,
+            "--status-working" => theme.status_working,
+            "--status-blocked" => theme.status_blocked,
+            "--status-done" => theme.status_done,
+            "--status-working-tint" => theme.status_working_tint,
+            "--status-blocked-tint" => theme.status_blocked_tint,
+            "--status-done-tint" => theme.status_done_tint,
+            "--indicator-working" => theme.indicator_working,
+            "--indicator-blocked" => theme.indicator_blocked,
+            "--indicator-done" => theme.indicator_done,
+            "--indicator-idle" => theme.indicator_idle,
+            "--indicator-unknown" => theme.indicator_unknown,
+            "--danger-tint" => theme.danger_tint,
+            "--danger-text" => theme.danger_text,
+            "--notice" => theme.notice,
+            "--scrim" => theme.scrim,
+            "--term-bg" => theme.term_bg,
+            "--term-fg" => theme.term_fg,
+            "--term-cursor" => theme.term_cursor,
+            "--term-selection" => theme.term_selection,
+            "--syntax-keyword" => theme.syntax_keyword,
+            "--syntax-string" => theme.syntax_string,
+            "--syntax-number" => theme.syntax_number,
+            "--syntax-type" => theme.syntax_type,
+            "--syntax-variable" => theme.syntax_variable,
+            "--syntax-meta" => theme.syntax_meta,
+            "--surface-canvas" => theme.surface_canvas,
+            "--surface-subtle" => theme.surface_subtle,
+            "--surface-raised" => theme.surface_raised,
+            "--surface-raised-2" => theme.surface_raised_2,
+            "--surface-raised-3" => theme.surface_raised_3,
+            "--border-soft" => theme.border_soft,
+            "--text-muted" => theme.text_muted,
+            "--text-faint" => theme.text_faint,
+            "--accent-emphasis" => theme.accent_emphasis,
+            "--info-blue" => theme.info_blue,
+            "--diff-add" => theme.diff_add,
+            "--diff-del" => theme.diff_del,
+            "--warning-amber" => theme.warning_amber,
+            "--review-purple" => theme.review_purple,
+            "--diff-add-fill" => theme.diff_add_fill,
+            "--diff-del-fill" => theme.diff_del_fill,
+            "--diff-gutter" => theme.diff_gutter,
+            "--diff-hunk-bg" => theme.diff_hunk_bg,
+            "--diff-hunk-text" => theme.diff_hunk_text,
+            "--diff-code" => theme.diff_code,
+            "--diff-add-text" => theme.diff_add_text,
+            "--diff-del-text" => theme.diff_del_text,
+            "--composer-bg" => theme.composer_bg,
+            "--composer-border" => theme.composer_border,
+            "--status-link" => theme.status_link,
+            "--tab-active-bg" => theme.tab_active_bg,
+            "--tab-active-marker" => theme.tab_active_marker,
+            "--inline-code-bg" => theme.inline_code_bg,
+            "--inline-code-text" => theme.inline_code_text,
+            "--link-blue" => theme.link_blue,
+            "--scrollbar-thumb" => theme.scrollbar_thumb,
+            "--chip-border" => theme.chip_border,
+            "--badge-border" => theme.badge_border,
+            "--badge-bg" => theme.badge_bg,
+            "--code-comment" => theme.code_comment,
+            _ => return None,
+        })
+    }
+
+    #[::core::prelude::v1::test]
+    fn native_tokens_match_the_design_table() {
+        let doc = include_str!("../../../DESIGN.md");
+        let table = doc
+            .split("<!-- BEGIN GENERATED THEMES -->")
+            .nth(1)
+            .expect("the generated table has a begin marker")
+            .split("<!-- END GENERATED THEMES -->")
+            .next()
+            .expect("the generated table has an end marker");
+        let dark = Theme::dark();
+        let light = Theme::light();
+        let mut checked = 0usize;
+        for row in table.lines().filter(|line| line.starts_with('|')) {
+            let cells = row.split('|').map(str::trim).collect::<Vec<_>>();
+            if cells.len() < 6 {
+                continue;
+            }
+            let token = cells[2].trim_matches('`');
+            let (Some(expected_dark), Some(expected_light)) =
+                (parse_doc_color(cells[3]), parse_doc_color(cells[4]))
+            else {
+                continue;
+            };
+            let (Some(actual_dark), Some(actual_light)) = (
+                doc_token_color(&dark, token),
+                doc_token_color(&light, token),
+            ) else {
+                continue;
+            };
+            assert_eq!(actual_dark, expected_dark, "dark {token} matches DESIGN.md");
+            assert_eq!(
+                actual_light, expected_light,
+                "light {token} matches DESIGN.md"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 60,
+            "the drift test covered {checked} token pairs, not a token or two"
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn interface_size_follows_the_chosen_body_size() {
+        let base = Theme::dark();
+        assert_eq!(base.text_size(), 14.0);
+        assert_eq!(base.ui_scale(), 1.0);
+
+        let larger = Theme::for_preferences(ThemeMode::Dark, Density::Comfortable, Some(18));
+        assert_eq!(larger.ui_font_size, Some(18));
+        assert_eq!(larger.text_size(), 18.0);
+        let scale = 18.0 / 14.0;
+        assert_eq!(larger.ui_scale(), scale);
+        assert_eq!(larger.chat_prose_size(), 15.0 * scale);
+        assert_eq!(larger.chat_code_size(), 13.0 * scale);
+        assert_eq!(larger.chat_heading_size(1), 18.0 * scale);
+        assert_eq!(larger.font_ui_body(), 13.0 * 1.0 * scale);
+        assert_eq!(larger.font_mono(), 12.5 * 1.0 * scale);
+        // Spacing is a density concern, not an interface-size one.
+        assert_eq!(larger.row_height(), base.row_height());
+        assert_eq!(larger.space_4(), base.space_4());
+    }
+
+    #[::core::prelude::v1::test]
+    fn interface_size_multiplies_compact_density() {
+        let base = Theme::for_mode(ThemeMode::Dark, Density::Compact);
+        let chosen = Theme::for_preferences(ThemeMode::Dark, Density::Compact, Some(13));
+        assert_eq!(base.text_size(), 13.0);
+        assert_eq!(chosen.text_size(), 13.0);
+        assert_eq!(chosen.ui_scale(), 1.0);
+        assert_eq!(chosen.chat_prose_size(), base.chat_prose_size());
+
+        let smaller = Theme::for_preferences(ThemeMode::Dark, Density::Compact, Some(11));
+        let scale = 11.0 / 13.0;
+        assert_eq!(smaller.ui_scale(), scale);
+        assert_eq!(smaller.chat_prose_size(), 14.0 * scale);
+    }
+
+    #[::core::prelude::v1::test]
+    fn for_mode_keeps_following_density() {
+        let theme = Theme::for_mode(ThemeMode::Light, Density::Compact);
+        assert_eq!(theme.ui_font_size, None);
+        assert_eq!(theme.text_size(), 13.0);
+        assert_eq!(theme.ui_scale(), 1.0);
     }
 }
