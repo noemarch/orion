@@ -6,12 +6,12 @@
 //! `DEFAULT_SETTINGS` and `src/lib/keys.ts` `KeyBarExtra`/`KEY_BAR_EXTRAS`)
 //! through the in-process `Runtime::http` seam. Escape closes the modal.
 //!
-//! Deliberately NOT ported yet (follow-up): palettes beyond Quiet Slate,
-//! terminal/chat fonts, alerts, quick replies, language, etc. Those live in
-//! the web client's full `Settings` interface; this modal covers the four
-//! groups P4 scoped, with matching defaults (dark, comfortable, `["alt"]`).
+//! Palettes beyond Quiet Slate, quick replies, and language remain out of
+//! scope. The covered groups match the web defaults (dark, comfortable,
+//! `["alt"]`, alerts on, input alerts on, done alerts long).
 
 use crate::theme::{Density, Theme, ThemeMode};
+use gpui_kit::base::FocusTrapElement;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::group_box::GroupBox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -42,6 +42,15 @@ pub const KEY_BAR_EXTRAS: &[&str] = &[
     "slash",
 ];
 
+const UI_SIZE_CHOICES: [(Option<u8>, &str); 6] = [
+    (None, "Auto"),
+    (Some(12), "12"),
+    (Some(14), "14"),
+    (Some(16), "16"),
+    (Some(18), "18"),
+    (Some(20), "20"),
+];
+
 pub const SHELL_WIRE_KINDS: &[&str] = &["powershell", "pwsh", "bash", "cmd", "zsh"];
 
 #[cfg(windows)]
@@ -50,6 +59,14 @@ const DEFAULT_SHELL: &str = "powershell";
 const DEFAULT_SHELL: &str = "zsh";
 #[cfg(all(not(windows), not(target_os = "macos")))]
 const DEFAULT_SHELL: &str = "bash";
+
+fn about_text() -> String {
+    format!(
+        "Orion v{} · wire protocol {}",
+        env!("CARGO_PKG_VERSION"),
+        orion_core::runtime::PROTOCOL_VERSION
+    )
+}
 
 /// A user-supplied shell path: trimmed, control characters dropped, capped at
 /// 1024 chars. Existence is checked by the engine at launch time, not here.
@@ -103,6 +120,8 @@ fn extra_keys(extra: &str) -> &'static [(&'static str, &'static str)] {
 pub struct Preferences {
     pub theme: ThemeMode,
     pub density: Density,
+    /// Body size in px (11–20); `None` follows the density's body size.
+    pub ui_font_size: Option<u8>,
     pub key_bar_extras: Vec<String>,
     /// The terminal's font family: a comma-separated list in fallback order.
     /// Defaults to the explicit monospace stack (see `crate::terminal_font`).
@@ -124,6 +143,7 @@ impl Default for Preferences {
         Self {
             theme: ThemeMode::Dark,
             density: Density::Comfortable,
+            ui_font_size: None,
             key_bar_extras: vec!["alt".to_string()],
             terminal_font: crate::terminal_font::TERMINAL_FONT_STACK.to_string(),
             terminal_font_size: 13,
@@ -154,6 +174,7 @@ impl Preferences {
         json!({
             "theme": self.theme.as_wire(),
             "density": self.density.as_wire(),
+            "uiFontSize": self.ui_font_size,
             "keyBarExtras": self.key_bar_extras,
             "terminalFont": self.terminal_font,
             "terminalFontSize": self.terminal_font_size,
@@ -201,6 +222,11 @@ impl Preferences {
             "off" | "long" | "always" => get_str("alertDone").to_string(),
             _ => defaults.alert_done.clone(),
         };
+        let ui_font_size = settings
+            .get("uiFontSize")
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| (11..=20).contains(value));
         let terminal_font = settings
             .get("terminalFont")
             .and_then(Value::as_str)
@@ -223,6 +249,7 @@ impl Preferences {
         Self {
             theme,
             density,
+            ui_font_size,
             key_bar_extras: extras,
             terminal_font,
             terminal_font_size,
@@ -314,6 +341,7 @@ pub struct SettingsModal {
     prefs: Preferences,
     last_body: Option<String>,
     focus_handle: FocusHandle,
+    opener_focus: Option<FocusHandle>,
     open: bool,
     shell_path_input: Option<Entity<InputState>>,
     _shell_path_subscription: Option<Subscription>,
@@ -326,6 +354,7 @@ impl SettingsModal {
             prefs: Preferences::default(),
             last_body: None,
             focus_handle: cx.focus_handle(),
+            opener_focus: None,
             open: false,
             shell_path_input: None,
             _shell_path_subscription: None,
@@ -345,12 +374,16 @@ impl SettingsModal {
         self.open
     }
 
-    pub fn set_open(&mut self, open: bool) {
-        self.open = open;
+    pub fn open_with_focus(&mut self, opener: Option<FocusHandle>) {
+        self.opener_focus = opener;
+        self.open = true;
     }
 
-    fn close(&mut self) {
+    fn close(&mut self, window: &mut Window, cx: &mut App) {
         self.open = false;
+        if let Some(handle) = self.opener_focus.take() {
+            handle.focus(window, cx);
+        }
     }
 
     /// Load saved preferences through the wire seam. A 404 (nothing written
@@ -375,7 +408,11 @@ impl SettingsModal {
     }
 
     fn apply_theme(&self) {
-        Theme::set_current(Theme::for_mode(self.prefs.theme, self.prefs.density));
+        Theme::set_current(Theme::for_preferences(
+            self.prefs.theme,
+            self.prefs.density,
+            self.prefs.ui_font_size,
+        ));
     }
 
     fn save(&mut self) {
@@ -472,6 +509,30 @@ impl Render for SettingsModal {
                 cx.notify();
             }));
 
+        let ui_size_group = RadioGroup::horizontal("settings-ui-size")
+            .children(
+                UI_SIZE_CHOICES
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (_, label))| {
+                        Radio::new(format!("settings-ui-size-{index}"))
+                            .label(*label)
+                            .debug_selector(move || format!("settings-ui-size-{index}"))
+                    }),
+            )
+            .selected_index(
+                UI_SIZE_CHOICES
+                    .iter()
+                    .position(|(size, _)| *size == prefs.ui_font_size),
+            )
+            .on_change(cx.listener(|this, index: &usize, _, cx| {
+                if let Some((size, _)) = UI_SIZE_CHOICES.get(*index) {
+                    this.prefs.ui_font_size = *size;
+                    this.save();
+                    cx.notify();
+                }
+            }));
+
         // Key-bar extras are independent toggles: the kit's switch reports the
         // requested state, so the saved set follows the reader's click.
         let extra_switches = KEY_BAR_EXTRAS.iter().map(|extra| {
@@ -539,6 +600,7 @@ impl Render for SettingsModal {
 
         let body = div()
             .id("settings-panel")
+            .debug_selector(|| "settings-panel".to_string())
             .flex_col()
             .gap(px(12.0 * scale))
             .w(px(360.0))
@@ -565,10 +627,27 @@ impl Render for SettingsModal {
                             .min_h(px(44.0))
                             .min_w(px(44.0))
                             .text()
-                            .on_click(cx.listener(|this, _, _, _cx| this.close())),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close(window, cx);
+                            })),
                     ),
             )
-            .child(GroupBox::new().title("APPEARANCE").child(theme_group))
+            .child(
+                GroupBox::new().title("APPEARANCE").child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0 * scale))
+                        .child(theme_group)
+                        .child(
+                            div()
+                                .text_size(px(11.0 * scale))
+                                .text_color(theme.text_dim)
+                                .child("Interface size"),
+                        )
+                        .child(ui_size_group),
+                ),
+            )
             .child(GroupBox::new().title("DENSITY").child(density_group))
             .child(
                 GroupBox::new()
@@ -625,7 +704,7 @@ impl Render for SettingsModal {
                     div()
                         .text_size(px(12.0 * scale))
                         .text_color(theme.text_dim)
-                        .child("Orbit · native GPUI shell · Engine: live"),
+                        .child(about_text()),
                 ),
             )
             .child(
@@ -633,18 +712,25 @@ impl Render for SettingsModal {
                     Button::new("settings-done")
                         .label("Done")
                         .primary()
-                        .on_click(cx.listener(|this, _, _, _cx| this.close())),
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close(window, cx);
+                        })),
                 ),
             );
+
+        if self.open && !self.focus_handle.is_focused(window) {
+            self.focus_handle.focus(window, cx);
+        }
 
         div()
             .id("settings-overlay")
             .track_focus(&self.focus_handle)
+            .focus_trap("settings-modal", &self.focus_handle)
             .absolute()
             .inset_0()
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
-                    this.close();
+                    this.close(window, cx);
                     cx.notify();
                 }
             }))
@@ -656,9 +742,9 @@ impl Render for SettingsModal {
                     .bg(theme.scrim)
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, ev: &MouseDownEvent, _, _cx| {
+                        cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                             if ev.button == MouseButton::Left {
-                                this.close();
+                                this.close(window, cx);
                             }
                         }),
                     ),
@@ -679,6 +765,129 @@ impl Render for SettingsModal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::test::TestWindowExt;
+    use std::ops::Deref;
+
+    struct SettingsRoot {
+        view: Entity<SettingsModal>,
+        opener: FocusHandle,
+    }
+
+    impl Render for SettingsRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().track_focus(&self.opener).child(self.view.clone())
+        }
+    }
+
+    crate::orion_test!(
+        fn the_modal_traps_focus_and_restores_the_opener(cx: &mut gpui_kit::TestAppContext) {
+            let opener = cx.update(|app| app.focus_handle().tab_stop(true));
+            let (root, cx) = cx.add_window_view(|_, cx| SettingsRoot {
+                view: cx.new(SettingsModal::new),
+                opener: opener.clone(),
+            });
+            cx.update(|window, cx| opener.focus(window, cx));
+
+            cx.update(|_window, app| {
+                let view = root.read(app).view.clone();
+                view.update(app, |view, cx| {
+                    view.open_with_focus(Some(opener.clone()));
+                    cx.notify();
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            cx.update(|window, cx| {
+                let modal = root.read(cx).view.clone();
+                assert!(
+                    modal.read(cx).focus_handle.is_focused(window),
+                    "the modal owns the keyboard on open"
+                );
+            });
+
+            cx.simulate_keystrokes("tab");
+            cx.update(|window, cx| {
+                let modal = root.read(cx).view.clone();
+                assert!(
+                    modal.read(cx).focus_handle.contains_focused(window, cx),
+                    "Tab kept focus inside the modal"
+                );
+            });
+
+            cx.simulate_keystrokes("shift-tab");
+            cx.update(|window, cx| {
+                let modal = root.read(cx).view.clone();
+                assert!(
+                    modal.read(cx).focus_handle.contains_focused(window, cx),
+                    "Shift+Tab kept focus inside the modal"
+                );
+            });
+
+            cx.simulate_keystrokes("escape");
+            cx.update(|window, cx| {
+                let modal = root.read(cx).view.clone();
+                assert!(!modal.read(cx).is_open(), "Escape closed the modal");
+                assert!(opener.is_focused(window), "focus returned to the opener");
+            });
+        }
+    );
+
+    fn assert_panel_fits(cx: &mut gpui_kit::TestAppContext, width: f32) {
+        let window = cx.open_window(
+            Size {
+                width: px(width),
+                height: px(800.0),
+            },
+            |_window, cx| SettingsRoot {
+                view: cx.new(SettingsModal::new),
+                opener: cx.focus_handle(),
+            },
+        );
+        let root = window.root(cx).expect("the settings root");
+        let mut cx = gpui_kit::VisualTestContext::from_window(*window.deref(), cx);
+        cx.update(|_window, app| {
+            let view = root.read(app).view.clone();
+            view.update(app, |view, cx| {
+                view.open_with_focus(None);
+                cx.notify();
+            });
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+
+        let panel = cx
+            .debug_bounds("settings-panel")
+            .unwrap_or_else(|| panic!("the settings panel is drawn at {width}px"));
+        let window = cx.update(|window, _cx| window.bounds());
+        assert!(
+            f32::from(panel.size.width) > 0.0,
+            "the panel has width at {width}px"
+        );
+        assert!(
+            f32::from(panel.size.height) > 0.0,
+            "the panel has height at {width}px"
+        );
+        assert!(
+            f32::from(panel.origin.x) >= f32::from(window.origin.x),
+            "the panel is inside the left edge at {width}px: {panel:?}"
+        );
+        assert!(
+            f32::from(panel.origin.x) + f32::from(panel.size.width)
+                <= f32::from(window.origin.x) + f32::from(window.size.width),
+            "the panel is inside the right edge at {width}px: {panel:?}"
+        );
+    }
+
+    crate::orion_test!(
+        fn settings_panel_fits_at_desktop_width(cx: &mut gpui_kit::TestAppContext) {
+            assert_panel_fits(cx, 1280.0);
+        }
+    );
+
+    crate::orion_test!(
+        fn settings_panel_fits_at_narrow_width(cx: &mut gpui_kit::TestAppContext) {
+            assert_panel_fits(cx, 480.0);
+        }
+    );
 
     #[::core::prelude::v1::test]
     fn defaults_match_web_default_settings() {
@@ -819,6 +1028,56 @@ mod tests {
                 .iter()
                 .any(|name| crate::terminal_font::is_symbol_family(name)),
             "the symbols-only face stays in the stack for glyph fallback"
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn about_reports_the_running_version_and_protocol() {
+        let text = about_text();
+        assert!(
+            text.contains(env!("CARGO_PKG_VERSION")),
+            "About shows the binary version: {text}"
+        );
+        assert!(
+            text.contains(&orion_core::runtime::PROTOCOL_VERSION.to_string()),
+            "About shows the wire protocol: {text}"
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn interface_font_size_defaults_to_following_density() {
+        assert_eq!(Preferences::default().ui_font_size, None);
+        assert_eq!(
+            Preferences::from_settings(&json!({})).ui_font_size,
+            None,
+            "a record with no uiFontSize follows the density"
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn interface_font_size_round_trips_through_settings() {
+        let mut prefs = Preferences::default();
+        prefs.ui_font_size = Some(18);
+        let value = prefs.settings_value();
+        assert_eq!(value["uiFontSize"], 18);
+        assert_eq!(Preferences::from_settings(&value).ui_font_size, Some(18));
+    }
+
+    #[::core::prelude::v1::test]
+    fn interface_font_size_is_clamped_to_the_supported_range() {
+        let too_small = Preferences::from_settings(&json!({ "uiFontSize": 5 }));
+        let too_large = Preferences::from_settings(&json!({ "uiFontSize": 99 }));
+        let non_numeric = Preferences::from_settings(&json!({ "uiFontSize": "big" }));
+        assert_eq!(too_small.ui_font_size, None);
+        assert_eq!(too_large.ui_font_size, None);
+        assert_eq!(non_numeric.ui_font_size, None);
+        assert_eq!(
+            Preferences::from_settings(&json!({ "uiFontSize": 11 })).ui_font_size,
+            Some(11)
+        );
+        assert_eq!(
+            Preferences::from_settings(&json!({ "uiFontSize": 20 })).ui_font_size,
+            Some(20)
         );
     }
 
