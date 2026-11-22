@@ -1047,8 +1047,11 @@ impl OrionApp {
     }
 
     fn current_lens(&self) -> Lens {
-        if std::env::var("ORION_INITIAL_LENS").ok().as_deref() == Some("terminal") {
-            return Lens::Terminal;
+        #[cfg(debug_assertions)]
+        {
+            if std::env::var("ORION_INITIAL_LENS").ok().as_deref() == Some("terminal") {
+                return Lens::Terminal;
+            }
         }
         self.lens_book.lens_for(self.focused_pane.as_deref())
     }
