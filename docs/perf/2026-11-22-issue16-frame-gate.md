@@ -21,13 +21,24 @@ Result (this host, after the #16 changes):
 
 Both tests pass their assertions (frames and feeds are non-empty; the row-cache trace is printed). The tests are **regression traces, not a 60fps gate**: the harness uses GPUI's software test renderer and does not draw the app shell (see `docs/perf/ui-post-change-2026-11-17.md`). An earlier attempt asserted an absolute 16.7ms target and 25ms ceiling against this harness; it could never pass (p95 was 88ms under load) and was removed rather than loosened. A test that cannot pass is not evidence.
 
-## Designed but NOT independently measured: live 60fps
+## Measured: live 60fps resize
 
-The live app has application instrumentation behind `ORION_TERMINAL_DEBUG=perf` (`terminal_grid.rs:849-850` prints each grid paint; `terminal.rs:1379` prints rows reshaped), a 16ms repaint coalescing budget (`app.rs:222-224`) and a 50ms PTY resize debounce (`terminal.rs:51`). The documented target remains p95 frame time <= 16.7ms (`docs/perf/terminal-lag-baseline.md:295`).
+The live app has application instrumentation behind `ORION_TERMINAL_DEBUG=perf` (`terminal_grid.rs` prints each grid paint; `terminal.rs:1379` prints rows reshaped), a 16ms repaint coalescing budget (`app.rs:222-224`) and a 50ms PTY resize debounce (`terminal.rs:51`). The target is p95 frame time <= 16.7ms (`docs/perf/terminal-lag-baseline.md:295`).
 
-A live resize attempt was made: the freshly built app was launched with `ORION_TERMINAL_DEBUG=perf` in an isolated `ORION_DATA_DIR` and driven through 12 resize cycles between 1280x800 and 1400x880. **No `ORION frame: paint` lines were emitted**, because the isolated session had no active terminal pane to paint. Therefore this run does **not** prove 60fps. Claiming otherwise would be dishonest. The closest honest statement: the app's design bounds per-frame work to well under a 60fps budget (the ticket comment measured 239-344us for `viewport_rows` and 17.5us for `snapshot_value`, about 2% of a frame), and the headless trace above shows no row-cache blow-up, but no independent present-rate measurement was obtained on this host.
+A Windows GUI-subsystem binary does not expose stderr to the launching shell reliably, so two debug-only seams were added for the measurement: `ORION_INITIAL_LENS=terminal` forces the Terminal lens on startup, and `ORION_PERF_LOG=<path>` appends one `paint_us=<microseconds>` line per grid paint (both are `cfg(debug_assertions)` and env-gated, so they cost nothing in release).
 
-To complete a true live gate on a host with an active terminal pane: launch with `ORION_TERMINAL_DEBUG=perf`, resize repeatedly, collect stderr, and assert p95 of the `paint` durations <= 16.7ms.
+Procedure: start `orion daemon` in an isolated `ORION_DATA_DIR` and `ORION_RUNTIME_SESSION`, create a shell pane with `orion-rt spawn-agent --name perfshell -- cmd.exe /c ...`, launch `orion-ui.exe` with that session plus the two debug env vars, resize the window 12 times between 1280x800 and 1400x880, then read the log.
+
+Result (this host, 11 real paint samples captured in `2026-11-22-issue16-live-paint-samples.txt`):
+
+| Metric | Value | Budget | Verdict |
+|---|---|---|---|
+| p50 paint | 6.69 ms | 16.7 ms | PASS |
+| p95 paint | 7.08 ms | 16.7 ms | PASS |
+| max paint | 7.08 ms | 16.7 ms | PASS |
+| samples | 11 | >= 8 | PASS |
+
+This is app-instrumented terminal-grid paint time during a live resize, not an independent GPU present-rate measurement. GPUI has no Windows headless renderer, so a present-rate probe is not available on this host; the measured paint cost is the dominant app-side cost and is comfortably inside one 60fps frame.
 
 ## Gate that does pass: no WebView / no web assets
 

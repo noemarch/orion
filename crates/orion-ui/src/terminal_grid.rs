@@ -846,6 +846,16 @@ impl Element for TerminalGrid {
         {
             let elapsed = started.elapsed();
             crate::perf::record_paint(elapsed);
+            if let Ok(path) = std::env::var("ORION_PERF_LOG") {
+                use std::io::Write as _;
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&path)
+                {
+                    let _ = writeln!(file, "paint_us={}", elapsed.as_micros());
+                }
+            }
             if terminal_debug().perf {
                 eprintln!("ORION frame: paint {elapsed:?}");
             }
