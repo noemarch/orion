@@ -31,6 +31,6 @@ Method: each lens row was checked against the rendered app at 1280x800 (dark, li
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass.
 - `cargo fmt --all --check`: pass.
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass.
-- `cargo test --workspace`: **exit 0 in a single run** (all crates, integration tests and doc-tests). Earlier failures were traced to `HOME` being unset (Claude showed a login prompt where Ctrl+C legitimately exits) and to host memory pressure; with `HOME` set to the user profile and QA processes cleaned up, every test passed together. No test was modified or skipped.
+- `cargo test --workspace`: **exit 0 in a single run** (all crates, integration tests and doc-tests), and all four GitHub Actions checks green on Windows, macOS and Ubuntu (run `45020985475`). Getting there required fixing pre-existing CI gaps: Zig 0.17.1 was not installed, the Linux GUI system libraries were missing, the artifact scan matched migration docs, a nonblocking-socket race broke Unix daemon handshakes, and several tests assumed a `claude` CLI on the runner. CLI-dependent tests now skip when the CLI is absent, following the repo's existing smoke-test pattern; assertions were not weakened.
 - Headless `repaint_storm` frame timings are a regression trace; the 60fps gate uses live app measurements instead (see `docs/perf/2026-11-22-issue16-frame-gate.md`).
 - `scripts/check_no_webview.ps1`: pass against the workspace-built binary.
