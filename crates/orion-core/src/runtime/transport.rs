@@ -726,7 +726,12 @@ mod imp {
         /// Connects to the runtime socket for `session`.
         pub async fn connect(session: &str) -> io::Result<Self> {
             let stream = UnixStream::connect(super::socket_path(session)).await?;
-            Self::from_std(stream.into_std()?)
+            let stream = stream.into_std()?;
+            // The tokio socket is nonblocking; `FrameConnection` reads on the
+            // calling thread, so an EAGAIN here would surface as a failed
+            // handshake whenever the daemon answers a moment later.
+            stream.set_nonblocking(false)?;
+            Self::from_std(stream)
         }
     }
 
