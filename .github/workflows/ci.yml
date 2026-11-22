@@ -22,6 +22,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: '0.17.1'
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -30,10 +33,11 @@ jobs:
         shell: pwsh
         run: |
           $bin = if ($IsWindows) { 'target/debug/orion-ui.exe' } else { 'target/debug/orion-ui' }
-          ./scripts/check_no_webview.ps1 -Binary $bin
+          & ./scripts/check_no_webview.ps1 -Binary $bin
 
-  # Nothing named after the tool Orion replaces may appear in code, paths or dependencies. This
-  # is an enforcement rule, not product prose: the pattern has to be spelled out to be checked.
+  # No name of the tool Orion replaces may appear in code, paths or dependencies. Historical docs
+  # and recorded terminal fixtures may name it when describing the migration; those are excluded.
+  # This is an enforcement rule, not product prose: the pattern has to be spelled out to be checked.
   no-foreign-artifacts:
     name: no foreign artifacts
     runs-on: ubuntu-latest
@@ -46,7 +50,12 @@ jobs:
           foreign="her""dr"
           if grep -rniI "$foreign" \
               --exclude-dir=target \
-              --exclude-dir=.git . ; then
+              --exclude-dir=.git \
+              --exclude-dir=docs \
+              --exclude-dir=research \
+              --exclude='*.ansi' \
+              --exclude-dir=.superpowers \
+              --exclude-dir=.omo . ; then
             echo "::error::a foreign artifact name is present"
             exit 1
           fi

@@ -212,7 +212,7 @@ fn runtime_command() -> Result<std::process::Command, String> {
 /// message-count bound: 256 chunks. Chunks are PTY frames, typically a few
 /// KiB; even if every chunk were 64 KiB (the pump's per-tick feed cap), the
 /// queue holds at most ~16 MiB. The producer blocks when the channel is
-/// full (herdr-core rule: block, never drop) — that is intended backpressure
+/// full (bounded-channel rule: block, never drop) — that is intended backpressure
 /// on the PTY reader thread and never touches the UI thread.
 const PTY_CHANNEL_CAPACITY: usize = 256;
 
