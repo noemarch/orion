@@ -28,11 +28,12 @@ use crate::files_entities::{
     url_encode, RepoDiffFile, RepoDiffFileList, RepoDiffFilePatch, RepoDiffScope, RepoDiffStatus,
 };
 use crate::shell_model::{clamp_tree_width, SPLITTER_WIDTH_PX, TREE_WIDTH_DEFAULT};
-use crate::theme::Theme;
+use crate::theme::{scaled_icon_size, Theme, TOUCH_TARGET_PX};
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::ThemeStyled;
+use gpui_kit::component::{Icon, IconName};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_kit::{
@@ -314,7 +315,7 @@ impl ChangesView {
             error: None,
             patch_error: None,
             visible: false,
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             list_scroll: ScrollHandle::new(),
             patch_scroll: ScrollHandle::new(),
             row_seq: 0,
@@ -817,6 +818,25 @@ impl ChangesView {
 
     fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         if self.editing == EditTarget::None {
+            // The scope pills are kit Tabs with no focus of their own; the
+            // root's arrow keys give them a roving keyboard path.
+            let next = match event.keystroke.key.as_str() {
+                "left" => match self.scope {
+                    RepoDiffScope::Workspace => None,
+                    RepoDiffScope::Staged => Some(RepoDiffScope::Workspace),
+                    RepoDiffScope::Commit => Some(RepoDiffScope::Staged),
+                },
+                "right" => match self.scope {
+                    RepoDiffScope::Workspace => Some(RepoDiffScope::Staged),
+                    RepoDiffScope::Staged => Some(RepoDiffScope::Commit),
+                    RepoDiffScope::Commit => None,
+                },
+                _ => None,
+            };
+            if let Some(scope) = next {
+                self.set_scope(scope);
+                cx.notify();
+            }
             return;
         }
         let target = self.editing;
@@ -913,6 +933,8 @@ impl Render for ChangesView {
                             .debug_selector(|| "changes-retry".to_string())
                             .primary()
                             .label("Retry")
+                            .h(px(TOUCH_TARGET_PX))
+                            .min_w(px(TOUCH_TARGET_PX))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.retry();
                                 cx.notify();
@@ -979,22 +1001,28 @@ impl Render for ChangesView {
             for file in &list.files {
                 let selected = self.selected_path.as_deref() == Some(file.path.as_str());
                 let mark = file.status.mark();
-                let mark_color = match file.status {
-                    RepoDiffStatus::Added | RepoDiffStatus::Untracked => {
-                        Theme::current().status_done
-                    }
-                    RepoDiffStatus::Deleted => Theme::current().status_blocked,
-                    _ => Theme::current().notice,
-                };
+                let mark_color = file.status.mark_color(&theme);
                 let counts = match (file.additions, file.deletions) {
                     (Some(a), Some(d)) => format!("+{a} -{d}"),
                     _ => no_counts_label(file).to_string(),
                 };
                 let path = file.path.clone();
+                let icon_size = px(scaled_icon_size(theme.density_scale()));
                 let label = if let Some(old) = &file.old_path {
-                    format!("{old} → {path}")
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(old.clone())
+                        .child(
+                            Icon::new(IconName::ArrowRight)
+                                .size(icon_size)
+                                .text_color(theme.text_dim),
+                        )
+                        .child(path.clone())
                 } else {
-                    path.clone()
+                    div().child(path.clone())
                 };
                 let file_clone = file.clone();
                 // A changed file is a control, so it is the kit's text button:
@@ -1008,11 +1036,12 @@ impl Render for ChangesView {
                         .w_full()
                         .px_2()
                         .py_1()
+                        .min_h(px(TOUCH_TARGET_PX))
                         .rounded_md()
                         .bg(if selected {
-                            Theme::current().surface_elevated
+                            theme.surface_elevated
                         } else {
-                            Theme::current().surface_panel
+                            theme.surface_panel
                         })
                         .child(
                             div()
@@ -1021,7 +1050,7 @@ impl Render for ChangesView {
                                 .items_center()
                                 .gap_2()
                                 .w_full()
-                                .text_size(px(12.0 * Theme::current().density_scale()))
+                                .text_size(px(12.0 * theme.density_scale()))
                                 .child(
                                     div()
                                         .id(self.next_row_id())
@@ -1031,13 +1060,13 @@ impl Render for ChangesView {
                                 .child(
                                     div()
                                         .id(self.next_row_id())
-                                        .text_color(Theme::current().text)
+                                        .text_color(theme.text)
                                         .child(label),
                                 )
                                 .child(
                                     div()
                                         .id(self.next_row_id())
-                                        .text_color(Theme::current().text_dim)
+                                        .text_color(theme.text_dim)
                                         .child(counts),
                                 ),
                         )
@@ -1072,33 +1101,43 @@ impl Render for ChangesView {
         );
         panes = panes.child(list_column);
 
-        // The splitter is a column of its own, not an overlay on the list's
-        // edge: an element that overlaps a scroll container is hidden from
-        // gpui's hovered-hit test, and the handle would never see the drag.
+        // The splitter keeps its 8px layout column so the diff's minimum still
+        // holds; the drag handlers live on a 44px transparent hit area centred
+        // on the hairline. The visible line stays thin while the touch target
+        // meets TOUCH_TARGET_PX.
         panes = panes.child(
             div()
-                .id("changes-splitter")
-                .debug_selector(|| "changes-splitter".to_string())
+                .relative()
                 .w(px(SPLITTER_WIDTH_PX))
                 .flex_shrink_0()
-                .bg(theme.border)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                        this.begin_resize(f32::from(event.position.x));
-                        cx.notify();
-                    }),
-                )
-                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                    if event.dragging() {
-                        this.track_resize(f32::from(event.position.x), cx);
-                    }
-                }))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseUpEvent, _window, cx| {
-                        this.end_resize(cx);
-                    }),
+                .child(div().w_full().h_full().bg(theme.border))
+                .child(
+                    div()
+                        .id("changes-splitter")
+                        .debug_selector(|| "changes-splitter".to_string())
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(-(TOUCH_TARGET_PX - SPLITTER_WIDTH_PX) / 2.0))
+                        .w(px(TOUCH_TARGET_PX))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                                this.begin_resize(f32::from(event.position.x));
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                            if event.dragging() {
+                                this.track_resize(f32::from(event.position.x), cx);
+                            }
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseUpEvent, _window, cx| {
+                                this.end_resize(cx);
+                            }),
+                        ),
                 ),
         );
 
@@ -1796,6 +1835,56 @@ mod tests {
                 px(640.0 - (TREE_WIDTH_DEFAULT - 60.0) - SPLITTER_WIDTH_PX),
                 "the diff took the room"
             );
+        }
+    );
+
+    crate::orion_test!(
+        fn the_splitter_hit_area_is_a_44px_touch_target(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
+                view.update(cx, |v, _cx| v.set_available_width(640.0));
+                div().w(px(640.0)).h_full().child(view.clone())
+            });
+
+            let hit = cx
+                .debug_bounds("changes-splitter")
+                .expect("the splitter hit area");
+            assert!(
+                hit.size.width >= px(TOUCH_TARGET_PX),
+                "the splitter's hit box is at least 44px wide (got {})",
+                hit.size.width
+            );
+            let diff = cx.debug_bounds("changes-diff").expect("the diff column");
+            assert!(
+                diff.size.width >= px(READER_WIDTH_MIN),
+                "widening the hit box did not steal the diff's body"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn arrow_keys_switch_the_scope_without_a_focused_tab(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.update(|_window, app| {
+                view.update(app, |v, cx| {
+                    assert_eq!(v.scope, RepoDiffScope::Workspace);
+                    v.handle_key(
+                        &KeyDownEvent {
+                            keystroke: gpui_kit::Keystroke {
+                                key: "right".to_string(),
+                                key_char: None,
+                                modifiers: gpui_kit::Modifiers::none(),
+                            },
+                            is_held: false,
+                            prefer_character_input: false,
+                        },
+                        cx,
+                    );
+                    assert_eq!(v.scope, RepoDiffScope::Staged);
+                });
+            });
         }
     );
 

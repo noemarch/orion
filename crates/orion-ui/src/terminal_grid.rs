@@ -21,6 +21,7 @@
 //! Reading side, nothing changes: the same output, the same colours, the same
 //! cursor, the same selection. What changes is what a frame costs.
 
+use crate::sprites::{block_rects, classify_block_sprite, snap_rect, BlockSprite};
 use crate::theme::Theme;
 use gpui_kit::{
     fill, point, px, size, App, Bounds, ContentMask, Element, ElementId, Font, FontStyle,
@@ -45,6 +46,17 @@ pub struct CellSize {
 /// `0.5` paints the foreground half-opaque over the background — a dim the
 /// reader can still read.
 const DIM_FADE: f32 = 0.5;
+
+/// The alpha a block sprite paints with: shade blocks are dithered by the font,
+/// so a quad approximates them with partial opacity.
+fn sprite_alpha(kind: BlockSprite) -> f32 {
+    match kind {
+        BlockSprite::Shade(1) => 0.25,
+        BlockSprite::Shade(2) => 0.5,
+        BlockSprite::Shade(3) => 0.75,
+        _ => 1.0,
+    }
+}
 
 /// Debug switches from `ORION_TERMINAL_DEBUG`. All are off by default; `all`
 /// turns them on, `grid` draws cell boundaries only, `repaint` bypasses the row
@@ -205,6 +217,21 @@ pub struct RowCacheKey {
     pub theme_accent: Rgba,
 }
 
+/// One block-element cell painted as a device-pixel-snapped quad instead of a
+/// font glyph, so stacked block art fills its cell without seams.
+#[derive(Clone, Copy, Debug)]
+pub struct PaintedSprite {
+    /// The grid column the sprite's cell starts at.
+    pub column: usize,
+    /// Which block element fills the cell.
+    pub kind: BlockSprite,
+    /// The resolved foreground the sprite paints.
+    pub color: Hsla,
+    /// The opacity the sprite paints at: `1.0`, or `0.25`/`0.5`/`0.75` for a
+    /// shade.
+    pub alpha: f32,
+}
+
 /// One visible row, ready to paint: its column-aligned text, the styled spans
 /// that text is painted in, and the background rectangles its cells need.
 #[derive(Clone)]
@@ -222,6 +249,9 @@ pub struct GridRow {
     /// The row's non-default background cells, merged into the fewest column
     /// spans. Rows merge with each other at paint time.
     pub bgs: Vec<BgSpan>,
+    /// The row's block elements, painted as device-pixel-snapped quads. Each
+    /// one's column is a grid column; its cell's text is a space.
+    pub sprites: Vec<PaintedSprite>,
     /// Whether any cell occupies two columns. `force_width` snaps glyphs by
     /// glyph index, not by column, so wide characters must keep natural layout.
     pub has_wide: bool,
@@ -251,6 +281,7 @@ pub struct CellScratch {
     advance: Vec<usize>,
     runs: Vec<(Range<usize>, CellStyle)>,
     bgs: Vec<BgSpan>,
+    sprites: Vec<PaintedSprite>,
     text: String,
 }
 
@@ -281,6 +312,7 @@ pub fn build_row(
     scratch.advance.clear();
     scratch.runs.clear();
     scratch.bgs.clear();
+    scratch.sprites.clear();
 
     // The text, the byte span each column occupies in it, and how many columns
     // each cell takes.
@@ -303,10 +335,23 @@ pub fn build_row(
             continue;
         }
         let start = scratch.text.len();
-        if cell.text.is_empty() {
-            scratch.text.push(' ');
-        } else {
-            scratch.text.push_str(&cell.text);
+        match cell.text.chars().next().and_then(classify_block_sprite) {
+            Some(kind) => {
+                scratch.text.push(' ');
+                scratch.sprites.push(PaintedSprite {
+                    column: 0,
+                    kind,
+                    color: theme.term_fg.into(),
+                    alpha: sprite_alpha(kind),
+                });
+            }
+            None => {
+                if cell.text.is_empty() {
+                    scratch.text.push(' ');
+                } else {
+                    scratch.text.push_str(&cell.text);
+                }
+            }
         }
         scratch.col_bytes.push((start, scratch.text.len()));
         scratch.advance.push(if cell.wide { 2 } else { 1 });
@@ -324,6 +369,7 @@ pub fn build_row(
 
     // The style each cell draws with, and the column each one starts at.
     let mut col = 0usize;
+    let mut sprite_index = 0usize;
     for (index, cell) in cells.iter().enumerate() {
         let mut style = CellStyle::of_cell(cell, theme);
         let (cell_start, cell_end) = scratch.col_bytes[index];
@@ -341,6 +387,20 @@ pub fn build_row(
                 style.bg = theme.accent;
                 style.fg = theme.term_bg;
             }
+        }
+        if !cell.wide_continuation
+            && cell
+                .text
+                .chars()
+                .next()
+                .and_then(classify_block_sprite)
+                .is_some()
+        {
+            if let Some(sprite) = scratch.sprites.get_mut(sprite_index) {
+                sprite.column = col;
+                sprite.color = style.fg.into();
+            }
+            sprite_index += 1;
         }
         scratch.styles.push(style);
         scratch.cols.push(col);
@@ -386,15 +446,18 @@ pub fn build_row(
     let text = SharedString::new(std::mem::take(&mut scratch.text));
     let runs = std::mem::take(&mut scratch.runs);
     let bgs = std::mem::take(&mut scratch.bgs);
+    let sprites = std::mem::take(&mut scratch.sprites);
     scratch.text = String::with_capacity(cells.len());
     scratch.runs = Vec::with_capacity(4);
     scratch.bgs = Vec::with_capacity(2);
+    scratch.sprites = Vec::with_capacity(2);
     GridRow {
         key,
         paint_text: RefCell::new(Some(text.clone())),
         text,
         runs,
         bgs,
+        sprites,
         has_wide,
     }
 }
@@ -513,6 +576,39 @@ impl TerminalGrid {
                 },
                 span.color,
             ));
+        }
+    }
+
+    fn paint_sprites(&self, bounds: Bounds<Pixels>, window: &mut Window) {
+        let cell = self.snapshot.cell;
+        let scale = window.scale_factor();
+        for (row_index, row) in self.snapshot.rows.iter().enumerate() {
+            for sprite in &row.sprites {
+                let x = f32::from(bounds.origin.x) + sprite.column as f32 * cell.width;
+                let y = f32::from(bounds.origin.y) + row_index as f32 * cell.height;
+                let [cx0, cy0, cx1, cy1] = snap_rect(x, y, x + cell.width, y + cell.height, scale);
+                for &(left, top, right, bottom) in block_rects(sprite.kind) {
+                    let [x0, y0, x1, y1] = snap_rect(
+                        cx0 + left * (cx1 - cx0),
+                        cy0 + top * (cy1 - cy0),
+                        cx0 + right * (cx1 - cx0),
+                        cy0 + bottom * (cy1 - cy0),
+                        scale,
+                    );
+                    if x1 <= x0 || y1 <= y0 {
+                        continue;
+                    }
+                    let mut color = sprite.color;
+                    color.a *= sprite.alpha;
+                    window.paint_quad(fill(
+                        Bounds {
+                            origin: point(px(x0), px(y0)),
+                            size: size(px(x1 - x0), px(y1 - y0)),
+                        },
+                        color,
+                    ));
+                }
+            }
         }
     }
 
@@ -743,6 +839,7 @@ impl Element for TerminalGrid {
                 self.paint_grid_lines(bounds, window);
             }
             self.paint_text(bounds, window, cx);
+            self.paint_sprites(bounds, window);
             self.paint_cursor(bounds, window, cx);
         });
         #[cfg(debug_assertions)]
@@ -886,6 +983,7 @@ mod tests {
                 end_col,
                 color,
             }],
+            sprites: Vec::new(),
             has_wide: false,
         })
     }
@@ -1425,6 +1523,85 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
+    fn a_block_cell_becomes_a_sprite_and_leaves_a_space() {
+        let theme = Theme::dark();
+        let cells = vec![
+            cell("\u{2588}", TermColor::Default, TermColor::Default),
+            cell("x", TermColor::Default, TermColor::Default),
+        ];
+
+        let row = run_build_row(&cells, &theme, &RowOverlays::default());
+
+        assert_eq!(row.text.as_str(), " x", "the block leaves a space behind");
+        assert_eq!(row.sprites.len(), 1, "one sprite for the block cell");
+        assert_eq!(row.sprites[0].kind, crate::sprites::BlockSprite::Full);
+        assert_eq!(row.sprites[0].column, 0);
+        assert_eq!(row.sprites[0].alpha, 1.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn selection_and_find_do_not_shift_a_sprite() {
+        let theme = Theme::dark();
+        let cells = vec![
+            cell("\u{2588}", TermColor::Default, TermColor::Default),
+            cell("x", TermColor::Default, TermColor::Default),
+        ];
+        // The selection covers the block (column 0); the find match covers the
+        // 'x' (column 1), so column 0 keeps the selection background.
+        let overlays = RowOverlays {
+            selection: Some((0, 0)),
+            find: std::iter::once(1..2).collect(),
+        };
+
+        let row = run_build_row(&cells, &theme, &overlays);
+
+        assert_eq!(row.text.as_str(), " x", "the block still leaves a space");
+        assert_eq!(row.sprites.len(), 1);
+        assert_eq!(row.sprites[0].column, 0, "the sprite stays in column 0");
+        assert_eq!(
+            row.bgs,
+            vec![
+                BgSpan {
+                    first_col: 0,
+                    end_col: 1,
+                    color: theme.term_selection,
+                },
+                BgSpan {
+                    first_col: 1,
+                    end_col: 2,
+                    color: theme.accent,
+                },
+            ],
+            "column 0 keeps the selection background, column 1 the find accent: {:?}",
+            row.bgs
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_wide_row_with_a_block_sprite_keeps_columns() {
+        let theme = Theme::dark();
+        let mut wide = cell("界", TermColor::Default, TermColor::Default);
+        wide.wide = true;
+        let continuation = TermCell {
+            text: String::new(),
+            wide_continuation: true,
+            ..cell("", TermColor::Default, TermColor::Default)
+        };
+        let cells = vec![
+            cell("\u{2588}", TermColor::Default, TermColor::Default),
+            wide,
+            continuation,
+        ];
+
+        let row = run_build_row(&cells, &theme, &RowOverlays::default());
+
+        assert!(row.has_wide, "the wide character marks the row wide");
+        assert_eq!(row.sprites.len(), 1);
+        assert_eq!(row.sprites[0].column, 0, "the sprite keeps column 0");
+        assert_eq!(row.text.as_str(), " 界", "a space then the wide character");
+    }
+
+    #[::core::prelude::v1::test]
     fn cursor_visibility_hidden_snapshot_paints_no_cursor() {
         let mut snap = snapshot_of(Vec::new());
         snap.cursor = Some((3, 7));
@@ -1493,9 +1670,12 @@ mod tests {
             continuation,
             cell("a", TermColor::Default, TermColor::Default),
         ];
+        // The match's byte range starts inside the wide character (bytes 0..3)
+        // and ends inside 'a' (bytes 3..4). A partial overlap must still paint
+        // whole cells, so the highlight starts at column 0, not mid-word.
         let overlays = RowOverlays {
             selection: None,
-            find: vec![1..4],
+            find: std::iter::once(1..4).collect::<Vec<_>>(),
         };
         let row = run_build_row(&cells, &theme, &overlays);
         assert_eq!(

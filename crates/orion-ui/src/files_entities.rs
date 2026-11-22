@@ -17,6 +17,8 @@
 //!   `unsupported`, null when `patch` is set).
 //! - `FileInfo { path, name, size, modified, mime, kind: image|video|audio|pdf|text|binary }`
 
+use crate::theme::Theme;
+use gpui_kit::Rgba;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -154,6 +156,21 @@ impl RepoDiffStatus {
             RepoDiffStatus::TypeChanged => "T",
             RepoDiffStatus::Modified => "M",
             RepoDiffStatus::Unknown => "·",
+        }
+    }
+
+    /// The one shared color for this status's [`Self::mark`] letter, read from
+    /// theme tokens. The changes list and the review pane both use this so a
+    /// given status reads identically on every surface (issue #16) — no
+    /// per-site ad-hoc color match.
+    pub fn mark_color(self, theme: &Theme) -> Rgba {
+        match self {
+            RepoDiffStatus::Added | RepoDiffStatus::Untracked => theme.diff_add,
+            RepoDiffStatus::Deleted => theme.diff_del,
+            RepoDiffStatus::Unmerged => theme.status_blocked,
+            RepoDiffStatus::Modified | RepoDiffStatus::TypeChanged => theme.warning_amber,
+            RepoDiffStatus::Renamed | RepoDiffStatus::Copied => theme.status_working,
+            RepoDiffStatus::Unknown => theme.text_muted,
         }
     }
 }
@@ -488,6 +505,24 @@ mod tests {
         let file: RepoDiffFile = serde_json::from_value(value).expect("parse");
         assert_eq!(file.status, RepoDiffStatus::Unknown);
         assert_eq!(file.status.mark(), "·");
+    }
+
+    #[::core::prelude::v1::test]
+    fn status_marks_use_shared_token_colors() {
+        let theme = Theme::dark();
+        assert_eq!(RepoDiffStatus::Added.mark_color(&theme), theme.diff_add);
+        assert_eq!(RepoDiffStatus::Untracked.mark_color(&theme), theme.diff_add);
+        assert_eq!(RepoDiffStatus::Deleted.mark_color(&theme), theme.diff_del);
+        assert_eq!(
+            RepoDiffStatus::Modified.mark_color(&theme),
+            theme.warning_amber
+        );
+        assert_eq!(RepoDiffStatus::Unknown.mark_color(&theme), theme.text_muted);
+        assert_ne!(
+            RepoDiffStatus::Added.mark_color(&theme),
+            RepoDiffStatus::Deleted.mark_color(&theme),
+            "added and deleted must not share a color"
+        );
     }
 
     #[::core::prelude::v1::test]

@@ -6,6 +6,7 @@
 //! focus the returned pane and force its Terminal lens.
 
 use crate::theme::Theme;
+use gpui_kit::assets::IconName;
 use gpui_kit::base::component_traits::Disableable;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -308,11 +309,11 @@ impl Render for ShellPickerModal {
                             )
                             .child(
                                 Button::new("shell-picker-close")
-                                    .label("✕")
+                                    .icon(IconName::X)
                                     .tooltip("Close")
+                                    .accessibility_label("Close terminal picker")
                                     .min_h(px(44.0))
                                     .min_w(px(44.0))
-                                    .text()
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.close();
                                         cx.notify();

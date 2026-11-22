@@ -9,6 +9,7 @@
 use serde_json::Value;
 
 use crate::theme::Theme;
+use gpui_kit::assets::IconName;
 use gpui_kit::base::component_traits::Disableable;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -315,8 +316,8 @@ impl Render for NewWorkspaceModal {
                 let name_for_click = name.clone();
                 let row_id = self.next_row_id();
                 Button::new(format!("new-workspace-dir-{row_id}"))
-                    .label(format!("▸ {name}"))
-                    .text()
+                    .label(name.clone())
+                    .icon(IconName::ChevronRight)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.navigate(&name_for_click);
                         cx.notify();
@@ -385,11 +386,11 @@ impl Render for NewWorkspaceModal {
                             )
                             .child(
                                 Button::new("new-workspace-close")
-                                    .label("✕")
+                                    .icon(IconName::X)
                                     .tooltip("Close")
+                                    .accessibility_label("Close new workspace")
                                     .min_h(px(44.0))
                                     .min_w(px(44.0))
-                                    .text()
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.close();
                                         cx.notify();

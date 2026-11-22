@@ -1,6 +1,7 @@
 //! Pure shell layout model for the Orbit port.
 
 use crate::app::Lens;
+use crate::theme::TOUCH_TARGET_PX;
 
 pub struct ShellLayout {
     pub sidebar_width_px: f32,
@@ -23,13 +24,13 @@ impl ShellLayout {
             Self {
                 sidebar_width_px: 64.0,
                 rail: true,
-                touch_target_px: 44.0,
+                touch_target_px: TOUCH_TARGET_PX,
             }
         } else {
             Self {
                 sidebar_width_px: SIDEBAR_WIDTH_WIDE_PX,
                 rail: false,
-                touch_target_px: 44.0,
+                touch_target_px: TOUCH_TARGET_PX,
             }
         }
     }
@@ -75,6 +76,38 @@ pub fn lens_segment_state(lens: Lens) -> (bool, bool, bool) {
         Lens::Chat => (true, false, false),
         Lens::Terminal => (false, true, false),
         Lens::Changes => (false, false, true),
+    }
+}
+
+/// The three lenses in switcher order.
+pub const LENS_ORDER: [Lens; 3] = [Lens::Chat, Lens::Terminal, Lens::Changes];
+
+/// Position of a lens in [`LENS_ORDER`].
+pub fn lens_position(lens: Lens) -> usize {
+    match lens {
+        Lens::Chat => 0,
+        Lens::Terminal => 1,
+        Lens::Changes => 2,
+    }
+}
+
+/// Move through the three lenses with a roving arrow key, wrapping at the ends.
+pub fn cycle_lens(current: Lens, forward: bool) -> Lens {
+    let step = if forward {
+        1
+    } else {
+        LENS_ORDER.len() as i32 - 1
+    };
+    let next = (lens_position(current) as i32 + step).rem_euclid(LENS_ORDER.len() as i32) as usize;
+    LENS_ORDER[next]
+}
+
+/// The compact switcher has only Chat and Terminal; Changes keeps Chat selected.
+pub fn cycle_middle_lens(current: Lens) -> Lens {
+    if current == Lens::Terminal {
+        Lens::Chat
+    } else {
+        Lens::Terminal
     }
 }
 
@@ -285,6 +318,23 @@ mod tests {
             lens_segment_state(crate::app::Lens::Changes),
             (false, false, true)
         );
+    }
+
+    #[::core::prelude::v1::test]
+    fn cycle_lens_wraps_in_both_directions() {
+        assert_eq!(cycle_lens(Lens::Chat, true), Lens::Terminal);
+        assert_eq!(cycle_lens(Lens::Terminal, true), Lens::Changes);
+        assert_eq!(cycle_lens(Lens::Changes, true), Lens::Chat);
+        assert_eq!(cycle_lens(Lens::Chat, false), Lens::Changes);
+        assert_eq!(cycle_lens(Lens::Changes, false), Lens::Terminal);
+        assert_eq!(cycle_lens(Lens::Terminal, false), Lens::Chat);
+    }
+
+    #[::core::prelude::v1::test]
+    fn cycle_middle_lens_toggles_chat_and_terminal() {
+        assert_eq!(cycle_middle_lens(Lens::Chat), Lens::Terminal);
+        assert_eq!(cycle_middle_lens(Lens::Terminal), Lens::Chat);
+        assert_eq!(cycle_middle_lens(Lens::Changes), Lens::Terminal);
     }
 
     #[::core::prelude::v1::test]

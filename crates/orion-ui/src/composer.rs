@@ -9,10 +9,11 @@
 //! [`Composer`] draws them and talks to the [`PaneSeam`].
 
 use crate::pane_seam::{PaneSeam, AGENT_GONE};
-use crate::theme::Theme;
+use crate::theme::{Theme, TOUCH_TARGET_PX};
 use gpui_kit::base::component_traits::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{Icon, IconName, Sizable};
+use gpui_kit::component::{Icon, IconName, Sizable, ThemeStyled};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_kit::{
     div, px, App, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Render, Window,
@@ -21,7 +22,6 @@ use std::sync::Arc;
 
 // Spacing tokens (DESIGN.md §4), as in chat.rs and sidebar.rs.
 const SPACE_3: f32 = 12.0; // --space-3: control padding
-const TOUCH_TARGET: f32 = 44.0; // --touch-target: coarse-pointer minimum
 const CONTENT_W: f32 = 820.0; // --content-w: composer column width
 
 /// What the composer's send is doing.
@@ -325,7 +325,7 @@ impl Composer {
         Self {
             model: ComposerModel::new(),
             seam: None,
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             blocked: false,
             answer_hint: None,
             running: false,
@@ -551,8 +551,8 @@ impl Composer {
                             Button::new("composer-retry")
                                 .label("Try again")
                                 .primary()
-                                .min_h(px(TOUCH_TARGET))
-                                .min_w(px(TOUCH_TARGET))
+                                .min_h(px(TOUCH_TARGET_PX))
+                                .min_w(px(TOUCH_TARGET_PX))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.retry(cx);
                                     cx.notify();
@@ -591,7 +591,7 @@ impl Composer {
 }
 
 impl Render for Composer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         let draft = self.draft_text();
         let placeholder = if self.blocked {
@@ -605,6 +605,9 @@ impl Render for Composer {
         let input = div()
             .id("composer-input")
             .debug_selector(|| "composer-input".to_string())
+            .when(self.focus_handle.is_focused(window), |el| {
+                el.focus_ring_style(window, cx)
+            })
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
@@ -650,17 +653,17 @@ impl Render for Composer {
             .flex()
             .items_center()
             .justify_center()
-            .w(px(TOUCH_TARGET))
-            .h(px(TOUCH_TARGET));
+            .w(px(TOUCH_TARGET_PX))
+            .h(px(TOUCH_TARGET_PX));
         if can_send {
             send = send.child(
                 Button::new("composer-send")
-                    .icon(Icon::new(IconName::ArrowUp))
+                    .icon(Icon::new(IconName::ArrowUp).size(theme.scaled_icon_size()))
                     .small()
                     .primary()
-                    .h(px(TOUCH_TARGET))
-                    .min_h(px(TOUCH_TARGET))
-                    .min_w(px(TOUCH_TARGET))
+                    .h(px(TOUCH_TARGET_PX))
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
                     .accessibility_label("Send")
                     .tooltip("Send")
                     .disabled(!can_send)
@@ -677,17 +680,17 @@ impl Render for Composer {
             .flex()
             .items_center()
             .justify_center()
-            .w(px(TOUCH_TARGET))
-            .h(px(TOUCH_TARGET));
+            .w(px(TOUCH_TARGET_PX))
+            .h(px(TOUCH_TARGET_PX));
         if can_stop {
             stop = stop.child(
                 Button::new("composer-stop")
                     .icon(Icon::new(IconName::Square))
                     .small()
                     .secondary()
-                    .h(px(TOUCH_TARGET))
-                    .min_h(px(TOUCH_TARGET))
-                    .min_w(px(TOUCH_TARGET))
+                    .h(px(TOUCH_TARGET_PX))
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
                     .accessibility_label("Stop")
                     .tooltip("Stop")
                     .disabled(!can_stop)
@@ -923,4 +926,16 @@ mod tests {
         assert_eq!(model.draft(), "");
         assert!(!model.state().is_pending());
     }
+
+    crate::orion_test!(
+        fn the_composer_input_is_a_keyboard_tab_stop(cx: &mut gpui_kit::TestAppContext) {
+            let composer = cx.update(|app| app.new(Composer::new));
+            cx.update(|app| {
+                assert!(
+                    composer.read(app).focus_handle().tab_stop,
+                    "the composer input must be reachable by Tab"
+                );
+            });
+        }
+    );
 }

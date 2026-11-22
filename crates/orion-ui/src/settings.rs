@@ -10,7 +10,8 @@
 //! scope. The covered groups match the web defaults (dark, comfortable,
 //! `["alt"]`, alerts on, input alerts on, done alerts long).
 
-use crate::theme::{Density, Theme, ThemeMode};
+use crate::theme::{Density, Theme, ThemeMode, TOUCH_TARGET_PX};
+use gpui_kit::assets::IconName;
 use gpui_kit::base::FocusTrapElement;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::group_box::GroupBox;
@@ -622,10 +623,11 @@ impl Render for SettingsModal {
                     )
                     .child(
                         Button::new("settings-close")
-                            .label("✕")
+                            .icon(IconName::X)
                             .tooltip("Close")
-                            .min_h(px(44.0))
-                            .min_w(px(44.0))
+                            .accessibility_label("Close settings")
+                            .min_h(px(TOUCH_TARGET_PX))
+                            .min_w(px(TOUCH_TARGET_PX))
                             .text()
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.close(window, cx);
@@ -712,6 +714,7 @@ impl Render for SettingsModal {
                     Button::new("settings-done")
                         .label("Done")
                         .primary()
+                        .min_h(px(TOUCH_TARGET_PX))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.close(window, cx);
                         })),
@@ -961,8 +964,10 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn settings_value_carries_the_chosen_default_shell() {
-        let mut prefs = Preferences::default();
-        prefs.default_shell = "cmd".to_string();
+        let prefs = Preferences {
+            default_shell: "cmd".to_string(),
+            ..Preferences::default()
+        };
         assert_eq!(prefs.settings_value()["defaultShell"], "cmd");
     }
 
@@ -1056,8 +1061,10 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn interface_font_size_round_trips_through_settings() {
-        let mut prefs = Preferences::default();
-        prefs.ui_font_size = Some(18);
+        let prefs = Preferences {
+            ui_font_size: Some(18),
+            ..Preferences::default()
+        };
         let value = prefs.settings_value();
         assert_eq!(value["uiFontSize"], 18);
         assert_eq!(Preferences::from_settings(&value).ui_font_size, Some(18));

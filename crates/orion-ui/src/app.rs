@@ -1,11 +1,12 @@
 //! Main application view with engine integration.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::toolbar::Toolbar;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::Sizable;
-use gpui_kit::component::{Icon, IconName, WindowExt};
+use gpui_kit::component::{Icon, Sizable, ThemeStyled, WindowExt};
+use gpui_kit::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui_kit::*;
 use gpui_kit::{
     div, px, App, Context, Entity, Render, Size, Subscription, Window, WindowBounds, WindowOptions,
@@ -26,13 +27,14 @@ use crate::review_pane::ReviewPane;
 use crate::session_status;
 use crate::settings::{KeyBarExtras, Preferences, SettingsModal};
 use crate::shell_model::{
-    effective_conversation_width, reference_layout, review_column_visible_for_terminal,
-    sidebar_visible, HeaderModel, LensBook, ShellLayout, FILES_SURFACE_WIDTH_WIDE,
+    cycle_lens, cycle_middle_lens, effective_conversation_width, lens_position, reference_layout,
+    review_column_visible_for_terminal, sidebar_visible, HeaderModel, LensBook, ShellLayout,
+    FILES_SURFACE_WIDTH_WIDE,
 };
 use crate::shell_picker::{ShellPickerEvent, ShellPickerModal};
 use crate::sidebar::{SidebarEvent, TabEntry, WorkspaceEntry};
 use crate::terminal::{TerminalPane, TerminalPaneEvent};
-use crate::theme::Theme;
+use crate::theme::{Theme, ICON_SIZE_PX, MARK_SIZE_PX, TOUCH_TARGET_PX};
 use crate::workspace::WorkspaceSidebar;
 
 /// Which chat asked the shell for something: the focused pane's chat, or the
@@ -93,6 +95,11 @@ pub struct OrionApp {
     subscriptions: Vec<Subscription>,
     /// Keyboard focus for the shell chrome (tab rename).
     focus_handle: gpui_kit::FocusHandle,
+    /// Roving tab stop for the three-lens segmented switcher. Kit `TabBar`
+    /// has no focus of its own, so arrow keys on this handle drive it.
+    lens_switch_focus: gpui_kit::FocusHandle,
+    /// Roving tab stop for the compact Chat|Terminal switcher.
+    middle_switch_focus: gpui_kit::FocusHandle,
     /// The last lifecycle command that failed, shown as one plain sentence.
     notice: Option<String>,
     /// Shell state derived from the sidebar snapshot. Refreshed on session
@@ -538,7 +545,9 @@ impl OrionApp {
             split_file_tree,
             split_changes_view,
             subscriptions: Vec::new(),
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
+            lens_switch_focus: cx.focus_handle().tab_stop(true),
+            middle_switch_focus: cx.focus_handle().tab_stop(true),
             notice,
             last_render_prefs: None,
             cached_live_panes: Vec::new(),
@@ -1088,10 +1097,16 @@ impl OrionApp {
         let hover_fg = theme.text_primary();
         let close_hover_bg = theme.close_hover_bg();
         let close_hover_fg = theme.close_hover_fg();
-        let maximize_icon = if window.is_maximized() {
+        let maximized = window.is_maximized();
+        let maximize_icon = if maximized {
             IconName::WindowRestore
         } else {
             IconName::WindowMaximize
+        };
+        let maximize_label = if maximized {
+            "Restore window"
+        } else {
+            "Maximize window"
         };
 
         div()
@@ -1101,6 +1116,7 @@ impl OrionApp {
             .flex_shrink_0()
             .child(
                 div()
+                    .id("window-minimize")
                     .w(px(46.0))
                     .h_full()
                     .flex_shrink_0()
@@ -1108,12 +1124,14 @@ impl OrionApp {
                     .items_center()
                     .justify_center()
                     .window_control_area(WindowControlArea::Min)
+                    .aria_label("Minimize window")
                     .text_color(muted)
                     .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
-                    .child(Icon::new(IconName::WindowMinimize).small()),
+                    .child(Icon::new(IconName::WindowMinimize).size(px(ICON_SIZE_PX))),
             )
             .child(
                 div()
+                    .id("window-maximize")
                     .w(px(46.0))
                     .h_full()
                     .flex_shrink_0()
@@ -1121,12 +1139,14 @@ impl OrionApp {
                     .items_center()
                     .justify_center()
                     .window_control_area(WindowControlArea::Max)
+                    .aria_label(maximize_label)
                     .text_color(muted)
                     .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
-                    .child(Icon::new(maximize_icon).small()),
+                    .child(Icon::new(maximize_icon).size(px(ICON_SIZE_PX))),
             )
             .child(
                 div()
+                    .id("window-close")
                     .w(px(46.0))
                     .h_full()
                     .flex_shrink_0()
@@ -1134,9 +1154,10 @@ impl OrionApp {
                     .items_center()
                     .justify_center()
                     .window_control_area(WindowControlArea::Close)
+                    .aria_label("Close window")
                     .text_color(muted)
                     .hover(move |s| s.bg(close_hover_bg).text_color(close_hover_fg))
-                    .child(Icon::new(IconName::WindowClose).small()),
+                    .child(Icon::new(IconName::WindowClose).size(px(ICON_SIZE_PX))),
             )
     }
 
@@ -1213,9 +1234,9 @@ impl OrionApp {
                     .icon(Icon::new(IconName::PanelLeft))
                     .ghost()
                     .small()
-                    .h(px(44.0))
-                    .min_h(px(44.0))
-                    .min_w(px(44.0))
+                    .h(px(TOUCH_TARGET_PX))
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
                     .tooltip(sidebar_label)
                     .accessibility_label(sidebar_label)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1228,9 +1249,9 @@ impl OrionApp {
                     .icon(Icon::new(IconName::PanelRight))
                     .ghost()
                     .small()
-                    .h(px(44.0))
-                    .min_h(px(44.0))
-                    .min_w(px(44.0))
+                    .h(px(TOUCH_TARGET_PX))
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
                     .tooltip(review_label)
                     .accessibility_label(review_label)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1243,8 +1264,8 @@ impl OrionApp {
                     .label("New Terminal")
                     .secondary()
                     .small()
-                    .h(px(44.0))
-                    .min_h(px(44.0))
+                    .h(px(TOUCH_TARGET_PX))
+                    .min_h(px(TOUCH_TARGET_PX))
                     .tooltip("New Terminal")
                     .accessibility_label("New Terminal")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1270,9 +1291,9 @@ impl OrionApp {
                     .icon(Icon::new(IconName::Settings))
                     .ghost()
                     .small()
-                    .h(px(44.0))
-                    .min_h(px(44.0))
-                    .min_w(px(44.0))
+                    .h(px(TOUCH_TARGET_PX))
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
                     .tooltip("Settings")
                     .accessibility_label("Settings")
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1291,7 +1312,7 @@ impl OrionApp {
     /// The compact Chat|Terminal switch of the three-panel layout. The review
     /// column owns the diff there, so the middle column only needs the two
     /// lenses that share the focused pane's live views.
-    fn render_middle_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_middle_switcher(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         // The Changes lens keeps the conversation on screen in this layout, so
         // Chat is the selected tab for it too.
@@ -1301,6 +1322,7 @@ impl OrionApp {
         };
         let focused_pane_id = self.focused_pane.clone();
         let focused_pane_id_zoom = focused_pane_id.clone();
+        let switch_focus = &self.middle_switch_focus;
         div()
             .id("middle-switcher")
             .flex()
@@ -1311,6 +1333,26 @@ impl OrionApp {
             .px_3()
             .w_full()
             .bg(theme.panel_bg())
+            .track_focus(switch_focus)
+            .when(switch_focus.is_focused(window), |el| {
+                el.focus_ring_style(window, cx)
+            })
+            .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
+                if matches!(
+                    ev.keystroke.key.as_str(),
+                    "left"
+                        | "arrowleft"
+                        | "right"
+                        | "arrowright"
+                        | "up"
+                        | "arrowup"
+                        | "down"
+                        | "arrowdown"
+                ) {
+                    this.set_lens(cycle_middle_lens(this.current_lens()), cx);
+                    cx.notify();
+                }
+            }))
             .child(
                 TabBar::new("middle-switch")
                     .segmented()
@@ -1318,6 +1360,7 @@ impl OrionApp {
                     .child(
                         Tab::new()
                             .debug_selector(|| "middle-chat".into())
+                            .icon(Icon::new(IconName::MessageCircle).size(theme.scaled_icon_size()))
                             .label("Chat")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_lens(Lens::Chat, cx);
@@ -1327,6 +1370,9 @@ impl OrionApp {
                     .child(
                         Tab::new()
                             .debug_selector(|| "middle-terminal".into())
+                            .icon(
+                                Icon::new(IconName::SquareTerminal).size(theme.scaled_icon_size()),
+                            )
                             .label("Terminal")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_lens(Lens::Terminal, cx);
@@ -1337,9 +1383,14 @@ impl OrionApp {
             .child(div().flex_1())
             .child(
                 Button::new("middle-pane-zoom")
+                    .icon(Icon::new(IconName::ZoomIn).size(theme.scaled_icon_size()))
                     .label("Zoom")
                     .secondary()
                     .small()
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
+                    .tooltip("Zoom pane")
+                    .accessibility_label("Zoom pane")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(pane_id) = focused_pane_id_zoom.clone() {
                             this.call_route(
@@ -1352,9 +1403,14 @@ impl OrionApp {
             )
             .child(
                 Button::new("middle-pane-close")
+                    .icon(Icon::new(IconName::X).size(theme.scaled_icon_size()))
                     .label("Close")
                     .secondary()
                     .small()
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
+                    .tooltip("Close pane")
+                    .accessibility_label("Close pane")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(pane_id) = focused_pane_id.clone() {
                             if this.terminal_pane.read(cx).is_running() {
@@ -1450,17 +1506,14 @@ impl OrionApp {
         bar
     }
 
-    fn render_lens_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_lens_toggle(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         // The three lenses are one segmented switch: the kit's tab bar owns
         // the selected pill, and the index is the lens the book holds.
-        let lens_index = match self.current_lens() {
-            Lens::Chat => 0,
-            Lens::Terminal => 1,
-            Lens::Changes => 2,
-        };
+        let lens_index = lens_position(self.current_lens());
         let focused_pane_id = self.focused_pane.clone();
         let focused_pane_id_zoom = focused_pane_id.clone();
+        let switch_focus = &self.lens_switch_focus;
         div()
             .id("lens-toggle")
             .flex()
@@ -1474,6 +1527,19 @@ impl OrionApp {
             // as a black strip beside the buttons.
             .w_full()
             .bg(theme.surface_panel)
+            .track_focus(switch_focus)
+            .when(switch_focus.is_focused(window), |el| {
+                el.focus_ring_style(window, cx)
+            })
+            .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
+                let forward = match ev.keystroke.key.as_str() {
+                    "right" | "arrowright" | "down" | "arrowdown" => true,
+                    "left" | "arrowleft" | "up" | "arrowup" => false,
+                    _ => return,
+                };
+                this.set_lens(cycle_lens(this.current_lens(), forward), cx);
+                cx.notify();
+            }))
             .child(
                 TabBar::new("lens-switch")
                     .segmented()
@@ -1481,6 +1547,7 @@ impl OrionApp {
                     .child(
                         Tab::new()
                             .debug_selector(|| "lens-chat".into())
+                            .icon(Icon::new(IconName::MessageCircle).size(theme.scaled_icon_size()))
                             .label("Chat")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_lens(Lens::Chat, cx);
@@ -1490,6 +1557,9 @@ impl OrionApp {
                     .child(
                         Tab::new()
                             .debug_selector(|| "lens-terminal".into())
+                            .icon(
+                                Icon::new(IconName::SquareTerminal).size(theme.scaled_icon_size()),
+                            )
                             .label("Terminal")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_lens(Lens::Terminal, cx);
@@ -1499,6 +1569,7 @@ impl OrionApp {
                     .child(
                         Tab::new()
                             .debug_selector(|| "lens-changes".into())
+                            .icon(Icon::new(IconName::GitCompare).size(theme.scaled_icon_size()))
                             .label("Changes")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_lens(Lens::Changes, cx);
@@ -1508,9 +1579,14 @@ impl OrionApp {
             )
             .child(
                 Button::new("pane-zoom")
+                    .icon(Icon::new(IconName::ZoomIn).size(theme.scaled_icon_size()))
                     .label("Zoom")
                     .secondary()
                     .small()
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
+                    .tooltip("Zoom pane")
+                    .accessibility_label("Zoom pane")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(pane_id) = focused_pane_id_zoom.clone() {
                             this.call_route(
@@ -1523,9 +1599,14 @@ impl OrionApp {
             )
             .child(
                 Button::new("pane-close")
+                    .icon(Icon::new(IconName::X).size(theme.scaled_icon_size()))
                     .label("Close")
                     .secondary()
                     .small()
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
+                    .tooltip("Close pane")
+                    .accessibility_label("Close pane")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(pane_id) = focused_pane_id.clone() {
                             if this.terminal_pane.read(cx).is_running() {
@@ -1616,9 +1697,10 @@ impl OrionApp {
                         .child(
                             Button::new(format!("tab-edit-{tab_id}"))
                                 .tooltip("Rename tab")
-                                .label("✎")
-                                .min_h(px(44.0))
-                                .min_w(px(44.0))
+                                .accessibility_label("Rename tab")
+                                .icon(Icon::new(IconName::Pencil).size(px(MARK_SIZE_PX)))
+                                .min_h(px(TOUCH_TARGET_PX))
+                                .min_w(px(TOUCH_TARGET_PX))
                                 .text()
                                 .xsmall()
                                 .px_1()
@@ -1634,9 +1716,10 @@ impl OrionApp {
                         .child(
                             Button::new(format!("tab-split-{tab_id}"))
                                 .tooltip("Split pane")
-                                .label("◫")
-                                .min_h(px(44.0))
-                                .min_w(px(44.0))
+                                .accessibility_label("Split pane")
+                                .icon(Icon::new(IconName::Columns2).size(px(MARK_SIZE_PX)))
+                                .min_h(px(TOUCH_TARGET_PX))
+                                .min_w(px(TOUCH_TARGET_PX))
                                 .text()
                                 .xsmall()
                                 .px_1()
@@ -1660,9 +1743,10 @@ impl OrionApp {
                         .child(
                             Button::new(format!("tab-close-{tab_id}"))
                                 .tooltip("Close tab")
-                                .label("×")
-                                .min_h(px(44.0))
-                                .min_w(px(44.0))
+                                .accessibility_label("Close tab")
+                                .icon(Icon::new(IconName::X).size(px(MARK_SIZE_PX)))
+                                .min_h(px(TOUCH_TARGET_PX))
+                                .min_w(px(TOUCH_TARGET_PX))
                                 .text()
                                 .xsmall()
                                 .px_1()
@@ -1689,9 +1773,10 @@ impl OrionApp {
             .suffix(
                 Button::new("tab-new")
                     .tooltip("New tab")
-                    .label("+")
-                    .min_h(px(44.0))
-                    .min_w(px(44.0))
+                    .accessibility_label("New tab")
+                    .icon(Icon::new(IconName::Plus).size(px(MARK_SIZE_PX)))
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
                     .secondary()
                     .small()
                     .text_size(px(12.0 * scale))
@@ -2186,7 +2271,7 @@ impl Render for OrionApp {
                         .min_w(px(0.0))
                         .bg(theme.panel_bg())
                         .rounded(px(theme.radius_panel()))
-                        .child(self.render_middle_switcher(cx))
+                        .child(self.render_middle_switcher(window, cx))
                         .children(notice.map(|message| {
                             div()
                                 .id("command-notice")
@@ -2240,7 +2325,8 @@ impl Render for OrionApp {
                         // The tab strip and lens switcher act on a selected pane;
                         // with no workspace they would be dead chrome.
                         .children(
-                            has_workspaces.then(|| self.render_lens_toggle(cx).into_any_element()),
+                            has_workspaces
+                                .then(|| self.render_lens_toggle(window, cx).into_any_element()),
                         )
                         .children(
                             has_workspaces.then(|| self.render_tab_strip(cx).into_any_element()),
@@ -2269,6 +2355,9 @@ impl Render for OrionApp {
             .size_full()
             .bg(theme.window_bg())
             .track_focus(&self.focus_handle)
+            .when(self.focus_handle.is_focused(window), |el| {
+                el.focus_ring_style(window, cx)
+            })
             .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
                 this.handle_editing_key(ev, cx)
             }))
@@ -2320,29 +2409,50 @@ impl Render for OrionApp {
     }
 }
 
+// The default component bundle embeds only 101 icons; these Lucide glyphs are
+// outside it, so register just the extras the shell uses and fall back to it.
+gpui_kit::assets::icon_assets!(
+    ShellIcons,
+    [X, Pencil, Columns2, ZoomIn, MessageCircle, GitCompare]
+);
+
+struct ShellAssets;
+
+impl gpui_kit::AssetSource for ShellAssets {
+    fn load(&self, path: &str) -> gpui_kit::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Some(bytes) = ShellIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
+        gpui_kit::assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> gpui_kit::Result<Vec<gpui_kit::SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(ShellIcons.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+}
+
 pub fn run() {
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(|cx| {
-            gpui_kit::init(cx);
-            gpui_kit::open_window(
-                WindowOptions {
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Orion".into()),
-                        appears_transparent: true,
-                        ..Default::default()
-                    }),
-                    window_bounds: Some(WindowBounds::centered(
-                        Size::new(px(1600.0), px(900.0)),
-                        cx,
-                    )),
+    gpui_kit::application().with_assets(ShellAssets).run(|cx| {
+        gpui_kit::init(cx);
+        gpui_kit::open_window(
+            WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Orion".into()),
+                    appears_transparent: true,
                     ..Default::default()
-                },
-                cx,
-                |_window, cx| cx.new(OrionApp::new),
-            )
-            .expect("Failed to open window");
-        });
+                }),
+                window_bounds: Some(WindowBounds::centered(Size::new(px(1600.0), px(900.0)), cx)),
+                ..Default::default()
+            },
+            cx,
+            |_window, cx| cx.new(OrionApp::new),
+        )
+        .expect("Failed to open window");
+    });
     // The startup timeline, when the reader asked for one.
     orion_core::trace::print_report();
 }

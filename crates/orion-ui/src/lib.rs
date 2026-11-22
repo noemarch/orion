@@ -22,6 +22,7 @@ pub mod settings;
 pub mod shell_model;
 pub mod shell_picker;
 pub mod sidebar;
+pub mod sprites;
 pub mod terminal;
 pub mod terminal_font;
 pub mod terminal_grid;

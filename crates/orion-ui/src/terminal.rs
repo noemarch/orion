@@ -457,6 +457,8 @@ pub struct TerminalPane {
     /// Whether a mouse-tracking press was forwarded to the PTY, so a release is
     /// only sent when there was a matching press.
     mouse_forwarding_press: bool,
+    /// Whether the attached TUI has ever enabled mouse reporting.
+    mouse_reporting_seen: bool,
     /// Fractional rows left over from a pixel wheel delta, carried into the next
     /// event so a slow touchpad gesture still moves the viewport.
     wheel_fraction: f64,
@@ -580,6 +582,7 @@ impl TerminalPane {
             sel_cursor: None,
             selecting: false,
             mouse_forwarding_press: false,
+            mouse_reporting_seen: false,
             wheel_fraction: 0.0,
             char_w: 7.81, // refined from the measured font on the first frame.
             last_cols: 120,
@@ -629,7 +632,11 @@ impl TerminalPane {
         if changed {
             self.reset_for_new_pane();
         }
-        self.pane = Some(pane);
+        self.pane = Some(Arc::clone(&pane));
+        // The pane's TUI may have enabled mouse reporting before we attached,
+        // so its DECSET never reached this grid. A focus-in makes TUIs that
+        // track focus re-emit every active mode, including mouse reporting.
+        let _ = pane.write("\x1b[I");
     }
 
     /// Attach the pane a Restart produced. The id is the same, but the
@@ -640,6 +647,7 @@ impl TerminalPane {
     }
 
     fn reset_for_new_pane(&mut self) {
+        self.mouse_reporting_seen = false;
         self.screen = new_engine(self.last_cols, self.last_rows);
         self.cached_viewport_revision = 0;
         self.cached_viewport_offset = 0;
@@ -944,8 +952,17 @@ impl TerminalPane {
         }
     }
 
-    fn mouse_tracking(&self) -> bool {
-        self.screen.mode(1000) || self.screen.mode(1002) || self.screen.mode(1003)
+    fn mouse_tracking(&mut self) -> bool {
+        // TUIs that enable mouse reporting once can lose the DEC modes after a
+        // focus change (ConPTY strips them). Keep forwarding once seen.
+        if self.screen.mode(1000)
+            || self.screen.mode(1002)
+            || self.screen.mode(1003)
+            || self.screen.mode(1006)
+        {
+            self.mouse_reporting_seen = true;
+        }
+        self.mouse_reporting_seen
     }
 
     fn sgr_report(button: u8, vis_row: usize, col: usize, press: bool, mods: u8) -> Vec<u8> {
@@ -3048,6 +3065,29 @@ mod tests {
         // grid either: the agent's frames would be drawn by a fallback.
         assert!(!face_carries_a_grid(7.2, 7.2, &[None]));
     }
+
+    crate::orion_test!(
+        fn mouse_reporting_stays_enabled_after_modes_are_cleared(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let view = cx.update(|app| app.new(TerminalPane::new));
+            cx.update(|app| {
+                view.update(app, |pane, _cx| {
+                    assert!(!pane.mouse_tracking(), "a fresh pane forwards no clicks");
+                    pane.feed("\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+                    assert!(
+                        pane.mouse_tracking(),
+                        "DECSET 1000/1002/1006 enables forwarding"
+                    );
+                    pane.feed("\x1b[?1000l\x1b[?1002l\x1b[?1006l");
+                    assert!(
+                        pane.mouse_tracking(),
+                        "a focus change that strips DEC modes must not silence clicks"
+                    );
+                });
+            });
+        }
+    );
 
     crate::orion_test!(
         fn the_terminal_font_measures_a_monospace_cell(cx: &mut gpui_kit::TestAppContext) {

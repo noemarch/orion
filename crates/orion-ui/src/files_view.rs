@@ -26,13 +26,16 @@
 use crate::file_reader::FileReader;
 use crate::files_entities::{join_path, url_encode, DirectoryListing};
 use crate::shell_model::{clamp_tree_width, SPLITTER_WIDTH_PX, TREE_WIDTH_DEFAULT};
-use crate::theme::Theme;
+use crate::theme::{scaled_icon_size, Theme, TOUCH_TARGET_PX};
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::ThemeStyled;
+use gpui_kit::component::{Icon, IconName};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_kit::{
-    div, px, Context, Div, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Render, ScrollHandle, Stateful, Window,
+    div, px, Context, Div, Entity, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Render, ScrollHandle, Stateful, Window,
 };
 use orion_core::runtime::{PaneHandle, Runtime};
 use serde_json::Value;
@@ -65,6 +68,14 @@ fn is_absolute_path(path: &str) -> bool {
     bytes.len() >= 2 && bytes[1] == b':'
 }
 
+/// One visible tree row, in the order the keyboard walks and the renderer
+/// draws. Derived from `expanded`/`listings` so focus and pixels never disagree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TreeRow {
+    path: String,
+    is_folder: bool,
+}
+
 pub struct FileTree {
     engine: Option<Arc<dyn Runtime>>,
     /// The pane's cwd, absolute, forward slashes: the tree's root.
@@ -90,6 +101,10 @@ pub struct FileTree {
     resize_start_width: f32,
     /// Width the parent gave this view (px); `app.rs` pushes it in each render.
     available_width: f32,
+    /// Tab stop for the tree surface; arrow keys walk the visible rows.
+    focus_handle: FocusHandle,
+    /// Index into [`Self::visible_rows`] that the keyboard highlights.
+    focused_row: Option<usize>,
 }
 
 impl FileTree {
@@ -111,6 +126,8 @@ impl FileTree {
             resize_start_x: 0.0,
             resize_start_width: 0.0,
             available_width: 0.0,
+            focus_handle: cx.focus_handle().tab_stop(true),
+            focused_row: None,
         };
         view.start_poll(cx);
         view
@@ -120,6 +137,79 @@ impl FileTree {
         let id = self.row_seq;
         self.row_seq += 1;
         id
+    }
+
+    fn visible_rows(&self) -> Vec<TreeRow> {
+        let mut rows = Vec::new();
+        if let Some(root) = self.root_path.clone() {
+            self.collect_rows(&root, &mut rows);
+        }
+        rows
+    }
+
+    fn collect_rows(&self, path: &str, out: &mut Vec<TreeRow>) {
+        let Some(listing) = self.listings.get(path) else {
+            return;
+        };
+        for name in &listing.directories {
+            let child = join_path(&listing.path, name);
+            out.push(TreeRow {
+                path: child.clone(),
+                is_folder: true,
+            });
+            if self.expanded.contains(&child) {
+                self.collect_rows(&child, out);
+            }
+        }
+        for file in listing.file_entries() {
+            out.push(TreeRow {
+                path: join_path(&listing.path, &file.name),
+                is_folder: false,
+            });
+        }
+    }
+
+    fn focused_path(&self) -> Option<String> {
+        let rows = self.visible_rows();
+        self.focused_row
+            .and_then(|index| rows.get(index))
+            .map(|row| row.path.clone())
+    }
+
+    fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "down" => {
+                self.focused_row = Some(match self.focused_row {
+                    Some(current) => (current + 1).min(rows.len() - 1),
+                    None => 0,
+                });
+            }
+            "up" => {
+                self.focused_row = Some(match self.focused_row {
+                    Some(current) => current.saturating_sub(1),
+                    None => rows.len() - 1,
+                });
+            }
+            "home" => self.focused_row = Some(0),
+            "end" => self.focused_row = Some(rows.len() - 1),
+            "enter" | "space" => {
+                let current = self.focused_row.unwrap_or(0);
+                if let Some(row) = rows.get(current) {
+                    if row.is_folder {
+                        self.toggle_folder(row.path.clone(), cx);
+                    } else {
+                        self.open_file(row.path.clone(), cx);
+                    }
+                    cx.notify();
+                }
+            }
+            _ => return,
+        }
+        cx.notify();
     }
 
     /// Wire the engine + pane once they exist; the tree roots at the pane's
@@ -439,7 +529,8 @@ impl FileTree {
                             .debug_selector(|| "file-tree-retry".to_string())
                             .label("Retry")
                             .primary()
-                            .h(px(44.0))
+                            .h(px(TOUCH_TARGET_PX))
+                            .min_w(px(TOUCH_TARGET_PX))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.retry(cx);
                                 cx.notify();
@@ -486,26 +577,52 @@ impl FileTree {
             return rows;
         };
         let theme = Theme::current();
+        let icon_size = px(scaled_icon_size(theme.density_scale()));
         let indent = px((depth * 16) as f32);
+        let focused = self.focused_path();
         let mut rows = rows;
         for name in &listing.directories {
             let child = join_path(&listing.path, name);
             let is_expanded = self.expanded.contains(&child);
-            let chevron = if is_expanded { "▾" } else { "▸" };
+            let is_focused = focused.as_deref() == Some(child.as_str());
             let child_clone = child.clone();
-            rows = rows.child(
-                Button::new(self.next_row_id())
-                    .debug_selector(|| "file-tree-folder".to_string())
-                    .label(format!("{chevron} {name}"))
-                    .text()
-                    .pl(indent)
-                    .px_2()
-                    .py_1()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_folder(child_clone.clone(), cx);
-                        cx.notify();
-                    })),
-            );
+            let mut row = Button::new(self.next_row_id())
+                .debug_selector(|| "file-tree-folder".to_string())
+                .text()
+                .pl(indent)
+                .px_2()
+                .py_1()
+                .min_h(px(TOUCH_TARGET_PX))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            Icon::new(if is_expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size(icon_size)
+                            .text_color(theme.text_dim),
+                        )
+                        .child(
+                            Icon::new(IconName::Folder)
+                                .size(icon_size)
+                                .text_color(theme.status_working),
+                        )
+                        .child(name.clone()),
+                );
+            if is_focused {
+                row = row.bg(theme.surface_hover);
+            }
+            rows = rows.child(row.on_click(cx.listener(move |this, _, window, cx| {
+                this.focus_handle.focus(window, cx);
+                this.toggle_folder(child_clone.clone(), cx);
+                cx.notify();
+            })));
             if is_expanded {
                 rows = self.render_folder_rows(&child, depth + 1, rows, cx);
             }
@@ -513,14 +630,28 @@ impl FileTree {
         for file in listing.file_entries() {
             let child = join_path(&listing.path, &file.name);
             let selected = self.selected_file.as_deref() == Some(child.as_str());
+            let is_focused = focused.as_deref() == Some(child.as_str());
             let child_clone = child.clone();
             let mut row = Button::new(self.next_row_id())
                 .debug_selector(|| "file-tree-row".to_string())
-                .label(format!("{}  ({} bytes)", file.name, file.size))
                 .text()
                 .pl(indent)
                 .px_2()
-                .py_1();
+                .py_1()
+                .min_h(px(TOUCH_TARGET_PX))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            Icon::new(IconName::File)
+                                .size(icon_size)
+                                .text_color(theme.text_dim),
+                        )
+                        .child(format!("{}  ({} bytes)", file.name, file.size)),
+                );
             // The selected file's row is lit so the reader and the tree agree
             // on which file is open; the rest stay plain. A text button's
             // selected style is transparent, so the highlight is an explicit
@@ -528,7 +659,11 @@ impl FileTree {
             if selected {
                 row = row.bg(theme.surface_elevated);
             }
-            rows = rows.child(row.on_click(cx.listener(move |this, _, _, cx| {
+            if is_focused {
+                row = row.bg(theme.surface_hover);
+            }
+            rows = rows.child(row.on_click(cx.listener(move |this, _, window, cx| {
+                this.focus_handle.focus(window, cx);
                 this.open_file(child_clone.clone(), cx);
             })));
         }
@@ -561,7 +696,7 @@ impl FileTree {
 }
 
 impl Render for FileTree {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.row_seq = 0;
         let theme = Theme::current();
         let tree = self.render_tree(cx);
@@ -569,6 +704,14 @@ impl Render for FileTree {
 
         let mut surface = div()
             .id("files-surface")
+            .debug_selector(|| "files-surface".to_string())
+            .when(self.focus_handle.is_focused(window), |el| {
+                el.focus_ring_style(window, cx)
+            })
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                this.handle_key(event, cx);
+            }))
             .flex()
             .flex_row()
             .size_full()
@@ -585,34 +728,45 @@ impl Render for FileTree {
                     .flex_shrink_0()
                     .child(tree),
             )
-            // The splitter is a column of its own, not an overlay on the
-            // tree's edge: an element that overlaps a scroll container is
-            // hidden from gpui's hovered-hit test, and the handle would never
-            // see the drag.
+            // The splitter keeps its 8px layout column so the reader's minimum
+            // still holds; the drag handlers live on a 44px transparent hit
+            // area centred on the hairline. The visible line stays thin while
+            // the touch target meets TOUCH_TARGET_PX.
             .child(
                 div()
-                    .id("files-splitter")
-                    .debug_selector(|| "files-splitter".to_string())
+                    .relative()
                     .w(px(SPLITTER_WIDTH_PX))
                     .flex_shrink_0()
-                    .bg(theme.border)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                            this.begin_resize(f32::from(event.position.x));
-                            cx.notify();
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                        if event.dragging() {
-                            this.track_resize(f32::from(event.position.x), cx);
-                        }
-                    }))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseUpEvent, _window, cx| {
-                            this.end_resize(cx);
-                        }),
+                    .child(div().w_full().h_full().bg(theme.border))
+                    .child(
+                        div()
+                            .id("files-splitter")
+                            .debug_selector(|| "files-splitter".to_string())
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(px(-(TOUCH_TARGET_PX - SPLITTER_WIDTH_PX) / 2.0))
+                            .w(px(TOUCH_TARGET_PX))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                                    this.begin_resize(f32::from(event.position.x));
+                                    cx.notify();
+                                }),
+                            )
+                            .on_mouse_move(cx.listener(
+                                |this, event: &MouseMoveEvent, _window, cx| {
+                                    if event.dragging() {
+                                        this.track_resize(f32::from(event.position.x), cx);
+                                    }
+                                },
+                            ))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseUpEvent, _window, cx| {
+                                    this.end_resize(cx);
+                                }),
+                            ),
                     ),
             )
             .child(
@@ -759,6 +913,50 @@ mod tests {
                 assert!(
                     !view.read(app).expanded().any(|p| p == "/proj/src"),
                     "the folder is collapsed again"
+                );
+            });
+        }
+    );
+
+    fn key_event(key: &str) -> gpui_kit::KeyDownEvent {
+        gpui_kit::KeyDownEvent {
+            keystroke: gpui_kit::Keystroke {
+                key: key.to_string(),
+                key_char: None,
+                modifiers: gpui_kit::Modifiers::none(),
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    crate::orion_test!(
+        fn arrow_keys_walk_the_rows_and_enter_opens_a_file(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(FileTree::new));
+            cx.update(|_window, app| {
+                view.update(app, |v, _cx| {
+                    v.apply_listing(
+                        "/proj".to_string(),
+                        listing_json("/proj", &["src"], json!([{"name": "main.rs", "size": 123}])),
+                    );
+                });
+                // Visible order: the folder, then the file.
+                view.update(app, |v, cx| v.handle_key(&key_event("down"), cx));
+                assert_eq!(view.read(app).focused_row, Some(0));
+                view.update(app, |v, cx| v.handle_key(&key_event("down"), cx));
+                assert_eq!(view.read(app).focused_row, Some(1));
+                view.update(app, |v, cx| v.handle_key(&key_event("enter"), cx));
+                assert_eq!(
+                    view.read(app).selected_file(),
+                    Some("/proj/main.rs"),
+                    "Enter opens the focused file"
+                );
+                view.update(app, |v, cx| v.handle_key(&key_event("up"), cx));
+                view.update(app, |v, cx| v.handle_key(&key_event("enter"), cx));
+                assert!(
+                    view.read(app).expanded().any(|p| p == "/proj/src"),
+                    "Enter expands the focused folder"
                 );
             });
         }
@@ -915,6 +1113,35 @@ mod tests {
                 reader.size.width,
                 px(FILES_SURFACE_WIDTH_WIDE - (TREE_WIDTH_DEFAULT - 60.0) - SPLITTER_WIDTH_PX),
                 "the reader took the room"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn the_splitter_hit_area_is_a_44px_touch_target(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(FileTree::new));
+            cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
+                view.update(cx, |v, _cx| v.set_available_width(FILES_SURFACE_WIDTH_WIDE));
+                div()
+                    .w(px(FILES_SURFACE_WIDTH_WIDE))
+                    .h_full()
+                    .child(view.clone().into_any_element())
+            });
+
+            let hit = cx
+                .debug_bounds("files-splitter")
+                .expect("the splitter hit area");
+            assert!(
+                hit.size.width >= px(TOUCH_TARGET_PX),
+                "the splitter's hit box is at least 44px wide (got {})",
+                hit.size.width
+            );
+            // The visible column stays thin so the reader keeps its minimum.
+            let reader = cx.debug_bounds("files-right").expect("the reader column");
+            assert!(
+                reader.size.width >= px(READER_WIDTH_MIN),
+                "widening the hit box did not steal the reader's body"
             );
         }
     );

@@ -14,6 +14,7 @@
 use crate::diff_view::{diff_line_numbers, no_counts_label, ChangesView, DiffLine, PatchKind};
 use crate::files_entities::{RepoDiffFile, RepoDiffFileList, RepoDiffFilePatch, RepoDiffStatus};
 use crate::theme::Theme;
+use gpui_kit::base::component_traits::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::spinner::Spinner;
@@ -339,7 +340,9 @@ impl ReviewPane {
                     .secondary()
                     .compact()
                     .label(scope_label(list))
-                    .icon(IconName::ChevronDown),
+                    .icon(IconName::ChevronDown)
+                    .disabled(true)
+                    .tooltip("Scope is set by the repository comparison"),
             );
 
         if let Some((added, deleted)) = line_totals(files) {
@@ -367,17 +370,20 @@ impl ReviewPane {
                 Button::new("review-reanalyze")
                     .secondary()
                     .compact()
+                    .min_h(px(44.0))
                     .label("Re-analyze")
                     .icon(IconName::RefreshCw)
                     .on_click(cx.listener(|this, _, _, cx| this.reanalyze(cx))),
             )
             .child(
                 Button::new("review-settings")
-                    .tooltip("Review settings")
+                    .tooltip("Review settings are not available in this build")
+                    .accessibility_label("Review settings, unavailable")
                     .min_h(px(44.0))
                     .min_w(px(44.0))
                     .secondary()
                     .compact()
+                    .disabled(true)
                     .icon(IconName::Settings),
             )
     }

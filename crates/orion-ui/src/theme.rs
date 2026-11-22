@@ -17,6 +17,24 @@
 use gpui_kit::{px, rgb, rgba, App, Hsla, Rgba};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{LazyLock, Mutex};
+
+/// Shared physical-size tokens from DESIGN.md §Scale (issue #16).
+///
+/// These are fixed physical minimums, not density-scaled values: the touch
+/// target stays 44px even in compact density. Read them directly rather than
+/// multiplying by [`Theme::density_scale`].
+pub const TOUCH_TARGET_PX: f32 = 44.0;
+pub const ICON_SIZE_PX: f32 = 18.0;
+pub const MARK_SIZE_PX: f32 = 22.0;
+pub const AVATAR_SIZE_PX: f32 = 32.0;
+pub const AVATAR_SIZE_COMPACT_PX: f32 = 26.0;
+pub const DOT_SIZE_PX: f32 = 7.0;
+
+/// Standard icon size for a given UI scale (DESIGN.md §Scale).
+pub fn scaled_icon_size(scale: f32) -> f32 {
+    ICON_SIZE_PX * scale
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeMode {
     #[default]
@@ -281,6 +299,13 @@ fn tint(hex: u32, alpha_pct: u8) -> Rgba {
 }
 
 impl Theme {
+    pub const TOUCH_TARGET_PX: f32 = crate::theme::TOUCH_TARGET_PX;
+    pub const ICON_SIZE_PX: f32 = crate::theme::ICON_SIZE_PX;
+    pub const MARK_SIZE_PX: f32 = crate::theme::MARK_SIZE_PX;
+    pub const AVATAR_SIZE_PX: f32 = crate::theme::AVATAR_SIZE_PX;
+    pub const AVATAR_SIZE_COMPACT_PX: f32 = crate::theme::AVATAR_SIZE_COMPACT_PX;
+    pub const DOT_SIZE_PX: f32 = crate::theme::DOT_SIZE_PX;
+
     /// Quiet Slate dark (DESIGN.md §2, dark column). The default before
     /// settings load (DESIGN.md §1).
     pub fn dark() -> Self {
@@ -553,6 +578,11 @@ impl Theme {
     /// The ratio between the chosen body size and the density's body size.
     pub fn ui_scale(self) -> f32 {
         self.text_size() / self.density_body_size()
+    }
+
+    /// Standard icon size scaled by the interface's UI scale (DESIGN.md §Scale).
+    pub fn scaled_icon_size(&self) -> gpui_kit::Pixels {
+        px(ICON_SIZE_PX * self.ui_scale())
     }
 
     fn density_body_size(self) -> f32 {
@@ -1435,5 +1465,57 @@ mod tests {
         assert_eq!(theme.ui_font_size, None);
         assert_eq!(theme.text_size(), 13.0);
         assert_eq!(theme.ui_scale(), 1.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn touch_target_is_a_fixed_44px_minimum_even_in_compact_density() {
+        let compact = Theme::for_mode(ThemeMode::Dark, Density::Compact);
+        assert!(
+            compact.density_scale() < 1.0,
+            "compact scales other tokens down"
+        );
+        assert_eq!(
+            TOUCH_TARGET_PX, 44.0,
+            "touch target is a fixed physical minimum, not density-scaled"
+        );
+        assert_eq!(
+            Theme::TOUCH_TARGET_PX,
+            TOUCH_TARGET_PX,
+            "module and Theme constants agree"
+        );
+    }
+
+    fn design_px(token: &str, column: usize) -> f32 {
+        let doc = include_str!("../../../DESIGN.md");
+        for row in doc.lines().filter(|line| line.starts_with('|')) {
+            let cells = row.split('|').map(str::trim).collect::<Vec<_>>();
+            if cells.len() < 5 || cells[1].trim_matches('`') != token {
+                continue;
+            }
+            let value = cells[column].trim_matches('`').trim();
+            let number = value.strip_suffix("px").expect("a px size in DESIGN.md");
+            return number.parse::<f32>().expect("a numeric px size");
+        }
+        panic!("no DESIGN.md scale row for {token}");
+    }
+
+    #[::core::prelude::v1::test]
+    fn shared_size_tokens_match_design_md() {
+        assert_eq!(ICON_SIZE_PX, design_px("--icon-size", 2));
+        assert_eq!(MARK_SIZE_PX, design_px("--mark-size", 2));
+        assert_eq!(AVATAR_SIZE_PX, design_px("--avatar-size", 2));
+        assert_eq!(AVATAR_SIZE_COMPACT_PX, design_px("--avatar-size", 3));
+        assert_eq!(DOT_SIZE_PX, design_px("--dot-size", 2));
+        assert_eq!(TOUCH_TARGET_PX, design_px("--touch-target", 2));
+    }
+
+    #[::core::prelude::v1::test]
+    fn scaled_icon_size_grows_with_ui_font_size() {
+        let small = Theme::for_preferences(ThemeMode::Dark, Density::Comfortable, Some(12));
+        let base = Theme::for_preferences(ThemeMode::Dark, Density::Comfortable, Some(14));
+        let large = Theme::for_preferences(ThemeMode::Dark, Density::Comfortable, Some(20));
+        assert!(small.scaled_icon_size() < base.scaled_icon_size());
+        assert!(base.scaled_icon_size() < large.scaled_icon_size());
+        assert_eq!(base.scaled_icon_size(), px(ICON_SIZE_PX * base.ui_scale()));
     }
 }

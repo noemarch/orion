@@ -15,9 +15,11 @@
 use crate::chat_entities::ChatPrompt;
 use crate::composer::typed_character;
 use crate::pane_seam::{PaneSeam, PROMPT_CHANGED};
-use crate::theme::Theme;
+use crate::theme::{scaled_icon_size, Theme, TOUCH_TARGET_PX};
 use gpui_kit::base::component_traits::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{Icon, IconName, Selectable, ThemeStyled};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_kit::{div, px, App, Context, FocusHandle, IntoElement, KeyDownEvent, Render, Window};
 use std::sync::Arc;
@@ -52,7 +54,7 @@ impl PromptCard {
             error: None,
             custom_text: String::new(),
             custom_open: false,
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
         }
     }
 
@@ -210,11 +212,13 @@ impl Render for PromptCard {
         let theme = Theme::current();
         let prompt = self.prompt.clone();
         let pending = self.pending;
+        let pending_or_sent = pending || self.answered;
         // Rose marks the focused card alone; the resting edge is a quiet hairline.
         let focused = self.focus_handle.is_focused(window);
         let mut card = div()
             .id("prompt-card")
             .debug_selector(|| "prompt-card".to_string())
+            .when(focused, |el| el.focus_ring_style(window, cx))
             .flex_col()
             .gap(px(8.0))
             .p_3()
@@ -232,9 +236,18 @@ impl Render for PromptCard {
                 div()
                     .id("prompt-title")
                     .debug_selector(|| "prompt-title".to_string())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(theme.space_2()))
                     .text_size(px(12.0 * theme.density_scale()))
                     .font_weight(gpui_kit::FontWeight::BOLD)
                     .text_color(theme.text_muted)
+                    .child(
+                        Icon::new(IconName::Bot)
+                            .size(px(scaled_icon_size(theme.density_scale())))
+                            .text_color(theme.accent_emphasis),
+                    )
                     .child(format!("{} · {}", prompt.agent, prompt.title)),
             )
             .child(
@@ -279,6 +292,7 @@ impl Render for PromptCard {
                             .label(text)
                             .secondary()
                             .w_full()
+                            .min_h(px(TOUCH_TARGET_PX))
                             .disabled(pending)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !pending {
@@ -306,6 +320,10 @@ impl Render for PromptCard {
                             })
                             .secondary()
                             .w_full()
+                            .min_h(px(TOUCH_TARGET_PX))
+                            .disabled(pending_or_sent)
+                            .toggled(custom_open)
+                            .selected(custom_open)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.custom_open = !this.custom_open;
                                 cx.notify();
@@ -337,6 +355,8 @@ impl Render for PromptCard {
                             Button::new("prompt-custom-send")
                                 .label("Answer")
                                 .primary()
+                                .min_h(px(TOUCH_TARGET_PX))
+                                .disabled(pending_or_sent)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     let text = std::mem::take(&mut this.custom_text);
                                     if !text.is_empty() {
@@ -562,6 +582,19 @@ mod tests {
                 vec![SeamCall::Answer("p1".to_string(), 0)],
                 "the card did try"
             );
+        }
+    );
+
+    crate::orion_test!(
+        fn the_prompt_card_is_a_keyboard_tab_stop(cx: &mut TestAppContext) {
+            let pane = Arc::new(RecordingPane::new());
+            let card = card(cx, pane);
+            cx.update(|app| {
+                assert!(
+                    card.read(app).focus_handle().tab_stop,
+                    "the prompt card must be reachable by Tab"
+                );
+            });
         }
     );
 }

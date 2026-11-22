@@ -24,7 +24,10 @@
 use crate::agents::{agent_rows, AgentRow};
 use crate::session_status;
 use crate::terminal_tree::{status_token, terminal_rows, TerminalRow, TerminalSource};
-use crate::theme::Theme;
+use crate::theme::{
+    Theme, AVATAR_SIZE_COMPACT_PX, AVATAR_SIZE_PX, DOT_SIZE_PX, ICON_SIZE_PX, MARK_SIZE_PX,
+    TOUCH_TARGET_PX,
+};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     avatar::Avatar, button::Button, button::ButtonCustomVariant, button::ButtonVariants, Icon,
@@ -49,7 +52,6 @@ const SPACE_2: f32 = 8.0; // --space-2: row and menu gaps
 const SPACE_3: f32 = 12.0; // --space-3: control padding
 const SPACE_4: f32 = 16.0; // --space-4: section padding
 const RADIUS_SM: f32 = 6.0; // --radius-sm: chips and inner controls
-const TOUCH_TARGET: f32 = 44.0; // --touch-target: coarse-pointer minimum
 const ROW_SUB_INDENT: f32 = 28.0; // avatar (20) + row gap (8)
 
 /// One workspace row of the sidebar: mark + title + status on a single row.
@@ -121,7 +123,7 @@ impl WorkspaceSidebar {
             terminal_source: None,
             terminals: None,
             last_terminals: None,
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             row_seq: 0,
             pulse_phase: 0,
             rail: false,
@@ -512,17 +514,19 @@ impl WorkspaceSidebar {
             // click handler or visibility state of their own.
             .child(
                 Icon::new(IconName::Menu)
-                    .size(px(15.0 * scale))
+                    .size(theme.scaled_icon_size())
                     .text_color(theme.text_muted),
             )
             .child(
                 Icon::new(IconName::PanelLeft)
-                    .size(px(15.0 * scale))
+                    .size(theme.scaled_icon_size())
                     .text_color(theme.text_muted),
             )
     }
 
     /// The 44px search row: magnifier, placeholder and three trailing tools.
+    /// The row itself is decorative — it has no text input and no click or
+    /// focus handler; search lives in the command palette (DESIGN.md:997).
     /// The square-plus tool is the live New Workspace control; the other two
     /// are the reference's quiet affordances.
     fn render_search_row(
@@ -537,12 +541,12 @@ impl WorkspaceSidebar {
             .flex_row()
             .items_center()
             .gap(px(SPACE_2 * scale))
-            .h(px(TOUCH_TARGET))
+            .h(px(TOUCH_TARGET_PX))
             .flex_shrink_0()
             .px(px(SPACE_4 * scale))
             .child(
                 Icon::new(IconName::Search)
-                    .size(px(15.0 * scale))
+                    .size(theme.scaled_icon_size())
                     .text_color(theme.text_muted),
             )
             .child(
@@ -565,8 +569,8 @@ impl WorkspaceSidebar {
                     .items_center()
                     .gap(px(SPACE_1 * scale))
                     .child(
-                        Icon::new(IconName::Settings2)
-                            .size(px(15.0 * scale))
+                        Icon::new(IconName::Settings)
+                            .size(theme.scaled_icon_size())
                             .text_color(theme.text_muted),
                     )
                     .child(
@@ -574,8 +578,8 @@ impl WorkspaceSidebar {
                             .tooltip("New workspace")
                             .ghost()
                             .icon(IconName::Plus)
-                            .min_h(px(TOUCH_TARGET))
-                            .min_w(px(TOUCH_TARGET))
+                            .min_h(px(TOUCH_TARGET_PX))
+                            .min_w(px(TOUCH_TARGET_PX))
                             .on_click(cx.listener(|_this, _, _, cx| {
                                 cx.emit(SidebarEvent::NewWorkspace);
                                 cx.notify();
@@ -583,7 +587,7 @@ impl WorkspaceSidebar {
                     )
                     .child(
                         Icon::new(IconName::SquareTerminal)
-                            .size(px(15.0 * scale))
+                            .size(theme.scaled_icon_size())
                             .text_color(theme.text_muted),
                     ),
             )
@@ -603,13 +607,7 @@ impl WorkspaceSidebar {
         let session_running = matches!(ws.status, AgentStatus::Working | AgentStatus::Blocked);
         let sidebar_entity = cx.entity();
         let session_label = ws.label.clone();
-        let mark = ws
-            .agent
-            .chars()
-            .next()
-            .unwrap_or('?')
-            .to_ascii_uppercase()
-            .to_string();
+        let mark = Self::agent_mark(&ws.agent, theme, false);
         let pane_id = ws.focus_pane.clone();
         let ws_id = ws.id.clone();
         let project = if self.rail {
@@ -659,7 +657,7 @@ impl WorkspaceSidebar {
                             .flex_row()
                             .items_center()
                             .gap(px(theme.space_2()))
-                            .child(Self::avatar_chip(&mark, theme, scale))
+                            .child(mark)
                             .child(
                                 div()
                                     .flex_1()
@@ -674,16 +672,15 @@ impl WorkspaceSidebar {
                                 div().id(self.next_row_id()).into_any_element()
                             } else {
                                 Button::new(self.next_row_id())
-                                    .text()
+                                    .ghost()
                                     .child(
-                                        div()
-                                            .text_size(px(11.0 * scale))
-                                            .text_color(theme.text_faint)
-                                            .child("×"),
+                                        Icon::new(IconName::X)
+                                            .size(px(ICON_SIZE_PX))
+                                            .text_color(theme.text_faint),
                                     )
                                     .tooltip("Close session")
-                                    .min_h(px(TOUCH_TARGET))
-                                    .min_w(px(TOUCH_TARGET))
+                                    .min_h(px(TOUCH_TARGET_PX))
+                                    .min_w(px(TOUCH_TARGET_PX))
                                     .on_click(cx.listener(move |_this, _, window, cx| {
                                         cx.stop_propagation();
                                         if session_running {
@@ -720,7 +717,7 @@ impl WorkspaceSidebar {
                             })
                             .child(
                                 div()
-                                    .size(px(8.0))
+                                    .size(px(DOT_SIZE_PX))
                                     .rounded_full()
                                     .bg(Self::status_color(ws.status, theme, self.pulse_phase))
                                     .id(self.next_row_id()),
@@ -772,12 +769,7 @@ impl WorkspaceSidebar {
             &agent.title,
             duplicates.contains(&(agent.workspace_id.clone(), agent.agent_name.clone())),
         );
-        let mark = label
-            .chars()
-            .next()
-            .unwrap_or('?')
-            .to_ascii_uppercase()
-            .to_string();
+        let mark = Self::agent_mark(&label, theme, false);
         let (project, sub) = match agent.context.split_once(" · ") {
             Some((project, rest)) => (project.to_string(), rest.to_string()),
             None => (agent.context.clone(), String::new()),
@@ -820,7 +812,7 @@ impl WorkspaceSidebar {
                             .flex_row()
                             .items_center()
                             .gap(px(theme.space_2()))
-                            .child(Self::avatar_chip(&mark, theme, scale))
+                            .child(mark)
                             .child(
                                 div()
                                     .flex_1()
@@ -833,7 +825,7 @@ impl WorkspaceSidebar {
                             .child(status_area)
                             .child(
                                 div()
-                                    .size(px(8.0))
+                                    .size(px(DOT_SIZE_PX))
                                     .rounded_full()
                                     .bg(Self::status_color(agent.status, theme, self.pulse_phase))
                                     .id(self.next_row_id()),
@@ -864,18 +856,29 @@ impl WorkspaceSidebar {
             }))
     }
 
-    /// The small rounded-square avatar chip that leads every session card.
-    fn avatar_chip(mark: &str, theme: &Theme, scale: f32) -> impl IntoElement {
+    /// The single agent mark used by every sidebar row: one token-sized chip
+    /// whose letter is derived from the row's agent or label.
+    fn agent_mark(source: &str, theme: &Theme, compact: bool) -> impl IntoElement {
+        let mark = source
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_ascii_uppercase()
+            .to_string();
+        let chip = if compact {
+            AVATAR_SIZE_COMPACT_PX
+        } else {
+            AVATAR_SIZE_PX
+        };
         div()
             .flex_none()
+            .size(px(chip))
             .rounded(px(theme.radius_control()))
             .bg(theme.hover_bg())
-            .p(px(theme.space_1()))
-            .child(
-                Avatar::new()
-                    .name(mark.to_string())
-                    .with_size(px(16.0 * scale)),
-            )
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(Avatar::new().name(mark).with_size(px(MARK_SIZE_PX)))
     }
 
     /// The trailing status of a session card: a tinted "Waiting" pill when the
@@ -928,7 +931,7 @@ impl WorkspaceSidebar {
             .flex_row()
             .items_center()
             .gap(px(SPACE_2 * scale))
-            .min_h(px(TOUCH_TARGET))
+            .min_h(px(TOUCH_TARGET_PX))
             .pl(px((14.0 + row.depth as f32 * SPACE_3) * scale))
             .pr(px(14.0 * scale))
             .child(
@@ -941,11 +944,9 @@ impl WorkspaceSidebar {
                     .child(if self.rail { String::new() } else { label }),
             )
             .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .children(badge.map(|color| div().size(px(8.0)).rounded_full().bg(color))),
+                div().flex_none().flex().items_center().children(
+                    badge.map(|color| div().size(px(DOT_SIZE_PX)).rounded_full().bg(color)),
+                ),
             )
     }
 
@@ -966,7 +967,7 @@ impl WorkspaceSidebar {
         for (name, rows, expandable) in [("Working", working, true), ("Settled", settled, false)] {
             let chevron = if expandable {
                 Icon::new(IconName::ChevronRight)
-                    .size(px(13.0 * scale))
+                    .size(theme.scaled_icon_size())
                     .text_color(theme.text_faint)
                     .into_any_element()
             } else {
@@ -978,7 +979,7 @@ impl WorkspaceSidebar {
                     .flex_row()
                     .items_center()
                     .gap(px(SPACE_2 * scale))
-                    .h(px(TOUCH_TARGET))
+                    .h(px(TOUCH_TARGET_PX))
                     .px(px(SPACE_4 * scale))
                     .text_size(px(12.0 * scale))
                     .text_color(theme.text_muted)
@@ -1004,24 +1005,19 @@ impl WorkspaceSidebar {
                     &agent.title,
                     duplicates.contains(&(agent.workspace_id.clone(), agent.agent_name.clone())),
                 );
-                let mark = label
-                    .chars()
-                    .next()
-                    .unwrap_or('?')
-                    .to_ascii_uppercase()
-                    .to_string();
+                let mark = Self::agent_mark(&label, theme, true);
                 section = section.child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap(px(SPACE_2 * scale))
-                        .h(px(TOUCH_TARGET))
+                        .h(px(TOUCH_TARGET_PX))
                         .pl(px(ROW_SUB_INDENT * scale))
                         .pr(px(SPACE_4 * scale))
                         .text_size(px(12.0 * scale))
                         .text_color(theme.text)
-                        .child(Self::avatar_chip(&mark, theme, scale))
+                        .child(mark)
                         .child(
                             div()
                                 .flex_1()
@@ -1064,12 +1060,12 @@ impl WorkspaceSidebar {
             .px(px(SPACE_4 * scale))
             .child(
                 Icon::new(IconName::SquareTerminal)
-                    .size(px(15.0 * scale))
+                    .size(theme.scaled_icon_size())
                     .text_color(theme.token_text_dim()),
             )
             .child(
                 Icon::new(IconName::LayoutDashboard)
-                    .size(px(15.0 * scale))
+                    .size(theme.scaled_icon_size())
                     .text_color(theme.token_text_dim()),
             )
     }

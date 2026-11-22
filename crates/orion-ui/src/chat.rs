@@ -39,11 +39,13 @@ use crate::tool_card::{
     clipped_output, lines_with_paths, part_card, tool_object, tool_verb, DiffLine, PartCard,
     ToolCard, ToolStatus, MAX_FILE_LINKS,
 };
+use gpui_kit::assets::IconName;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyTitle};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::skeleton::Skeleton;
+use gpui_kit::component::Icon;
 use gpui_kit::*;
 use gpui_kit::{
     div, px, App, Context, Entity, FocusHandle, FontStyle, FontWeight, IntoElement, Render,
@@ -1373,11 +1375,14 @@ impl ChatView {
                         .flex_row()
                         .items_center()
                         .gap(px(ROW_GAP))
-                        .child(div().text_color(theme.token_text_dim()).child(if open {
-                            "\u{25be}"
-                        } else {
-                            "\u{25b8}"
-                        }))
+                        .child(
+                            Icon::new(if open {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .text_color(theme.token_text_dim()),
+                        )
                         .child(
                             div()
                                 .text_size(px(13.0 * theme.density_scale()))
