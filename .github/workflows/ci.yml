@@ -26,6 +26,11 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: no-webview gate
+        shell: pwsh
+        run: |
+          $bin = if ($IsWindows) { 'target/debug/orion-ui.exe' } else { 'target/debug/orion-ui' }
+          ./scripts/check_no_webview.ps1 -Binary $bin
 
   # Nothing named after the tool Orion replaces may appear in code, paths or dependencies. This
   # is an enforcement rule, not product prose: the pattern has to be spelled out to be checked.

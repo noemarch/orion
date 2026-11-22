@@ -281,6 +281,19 @@ mod frame_times {
     use super::*;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AppContext, Context, Entity, IntoElement, Render, Window};
+    use std::sync::Mutex;
+
+    // `perf` keeps one process-global stats buffer. Serialize the two
+    // frame-time tests so one test's `reset()` cannot clear the other's
+    // samples mid-replay.
+    static FRAME_GATE_LOCK: Mutex<()> = Mutex::new(());
+
+    // This harness uses GPUI's headless test renderer, which is software and
+    // does not draw the app shell (see docs/perf/ui-post-change-2026-11-17.md).
+    // Its frame timings are useful as a regression trace, NOT as a 60fps gate.
+    // The live gate is ORION_TERMINAL_DEBUG=perf on the running app — see
+    // docs/perf/2026-11-22-issue16-frame-gate.md.
+    const REPLAYS: usize = 1;
 
     struct TerminalRoot {
         view: Entity<orion_ui::terminal::TerminalPane>,
@@ -337,23 +350,30 @@ mod frame_times {
         }
     }
 
-    orion_ui::orion_test!(
-        fn fixture_replay_frame_times(cx: &mut gpui_kit::TestAppContext) {
-            let text = fixture_text();
-            let (wall, stats) = replay_with_draws(cx, &text, 4 * 1024);
-            report("fixture replay", wall, &stats);
+    fn assert_frame_gate(
+        label: &str,
+        cx: &mut gpui_kit::TestAppContext,
+        text: &str,
+        chunk_size: usize,
+    ) {
+        let _guard = FRAME_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for run in 1..=REPLAYS {
+            let (wall, stats) = replay_with_draws(cx, text, chunk_size);
+            report(&format!("{label} run {run}/{REPLAYS}"), wall, &stats);
             assert!(!stats.frames.is_empty(), "the replay drew frames");
             assert!(!stats.feeds.is_empty(), "the replay fed the grid");
+        }
+    }
+
+    orion_ui::orion_test!(
+        fn fixture_replay_frame_times(cx: &mut gpui_kit::TestAppContext) {
+            assert_frame_gate("fixture replay", cx, &fixture_text(), 4 * 1024);
         }
     );
 
     orion_ui::orion_test!(
         fn big_log_replay_frame_times(cx: &mut gpui_kit::TestAppContext) {
-            let log = big_log();
-            let (wall, stats) = replay_with_draws(cx, &log, 16 * 1024);
-            report("big log replay", wall, &stats);
-            assert!(!stats.frames.is_empty(), "the replay drew frames");
-            assert!(!stats.feeds.is_empty(), "the replay fed the grid");
+            assert_frame_gate("big log replay", cx, &big_log(), 16 * 1024);
         }
     );
 }

@@ -25,6 +25,11 @@ jobs:
       # The app is pure Rust: the shell is `orion-ui`, the runtime and the
       # CLI are `orion`.
       - run: cargo build --release --workspace
+      - name: no-webview gate
+        shell: pwsh
+        run: |
+          $bin = if ($IsWindows) { 'target/release/orion-ui.exe' } else { 'target/release/orion-ui' }
+          ./scripts/check_no_webview.ps1 -Binary $bin
       - name: collect the binaries
         id: artifacts
         shell: bash
