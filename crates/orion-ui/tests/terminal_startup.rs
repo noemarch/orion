@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::test::TestWindowExt;
 
 use gpui_kit::{AppContext, Context, Entity, IntoElement, Render, Window};
-use orion_core::agents::LaunchSpec;
+use orion_core::agents::{find_in_path, LaunchSpec};
 use orion_core::engine::pane::PaneConfig;
 use orion_core::protocol::{AgentKind, TerminalSize};
 use orion_core::trace::{self, Event};
@@ -226,6 +226,10 @@ orion_ui::orion_test!(
     fn the_terminal_startup_timeline_separates_the_agent_from_the_app(
         cx: &mut gpui_kit::TestAppContext,
     ) {
+        if find_in_path("claude").is_none() {
+            eprintln!("skipped: claude is not on PATH");
+            return;
+        }
         // The timeline is on whether or not the reader set the variable.
         trace::force_enabled();
         // The pump waits on the channel, so the executor always has a task
@@ -299,6 +303,10 @@ struct Step {
 
 orion_ui::orion_test!(
     fn the_startup_path_costs_the_ui_thread(cx: &mut gpui_kit::TestAppContext) {
+        if find_in_path("claude").is_none() {
+            eprintln!("skipped: claude is not on PATH");
+            return;
+        }
         trace::force_enabled();
         cx.background_executor.allow_parking();
 
