@@ -2374,7 +2374,23 @@ impl RouteTable {
         Ok(pane)
     }
 
+    /// A deterministic stand-in for unit tests: the test binary lists its own tests and exits.
+    /// Integration smoke tests still resolve the real agent CLI via `LaunchSpec::for_agent`.
+    #[cfg(test)]
+    fn test_agent_spec(_agent: crate::protocol::AgentKind) -> LaunchSpec {
+        LaunchSpec {
+            program: std::env::current_exe().expect("the test binary's path"),
+            args: vec!["--list".to_string()],
+        }
+    }
+
     fn spawn_pane_request(&self, request: PaneRequest) -> Result<Arc<Pane>> {
+        #[cfg(test)]
+        let agent_spec = {
+            let _ = (&request.session, request.resume_last);
+            Self::test_agent_spec(request.agent)
+        };
+        #[cfg(not(test))]
         let agent_spec = LaunchSpec::for_agent(
             request.agent,
             &request.args,
@@ -2647,6 +2663,7 @@ fn agent_request(body: &Value) -> std::result::Result<AgentRequest, (u16, Value)
         ));
     }
     let command = kind.default_command();
+    #[cfg(not(test))]
     if find_in_path(command).is_none() {
         return Err(api_error(
             400,
@@ -2654,6 +2671,8 @@ fn agent_request(body: &Value) -> std::result::Result<AgentRequest, (u16, Value)
             &format!("'{command}' is not on this PC's PATH."),
         ));
     }
+    #[cfg(test)]
+    let _ = command;
     let name = agent
         .get("name")
         .and_then(Value::as_str)
