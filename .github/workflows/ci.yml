@@ -25,6 +25,13 @@ jobs:
       - uses: mlugg/setup-zig@v2.2.1
         with:
           version: '0.17.1'
+      - name: linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libxkbcommon-dev \
+            libxcb1-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
+            libwayland-dev libegl1-mesa-dev libgl1-mesa-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
