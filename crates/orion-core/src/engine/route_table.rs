@@ -1447,6 +1447,9 @@ impl RouteTable {
             .map_err(|error| api_error(400, "agent_failed", &format!("{error}")))?;
             (spec, source_shell_path, None)
         } else {
+            #[cfg(test)]
+            let agent_spec = Self::test_agent_spec(agent);
+            #[cfg(not(test))]
             let agent_spec = LaunchSpec::for_agent(agent, &args, None, false)
                 .map_err(|error| api_error(400, "agent_failed", &format!("{error}")))?;
             let (spec, shell_path, inner) = self
