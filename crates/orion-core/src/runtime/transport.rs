@@ -672,7 +672,11 @@ mod imp {
         /// Waits for the next connection.
         pub async fn accept(&self) -> io::Result<RuntimeStream> {
             let (stream, _address) = self.listener.accept().await?;
-            RuntimeStream::from_std(stream.into_std()?)
+            let stream = stream.into_std()?;
+            // The accepted tokio socket is nonblocking; the daemon reads frames
+            // on a dedicated thread, so EAGAIN would close a healthy peer.
+            stream.set_nonblocking(false)?;
+            RuntimeStream::from_std(stream)
         }
     }
 
