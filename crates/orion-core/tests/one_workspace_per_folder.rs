@@ -6,9 +6,14 @@
 
 use std::path::{Path, PathBuf};
 
+use orion_core::agents::find_in_path;
 use orion_core::engine::store::Store;
 use orion_core::engine::Engine;
 use serde_json::{json, Value};
+
+fn claude_available() -> bool {
+    find_in_path("claude").is_some()
+}
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("orion-{name}-{}", std::process::id()));
@@ -28,6 +33,10 @@ fn create(engine: &Engine, cwd: &Path) -> Value {
 
 #[test]
 fn asking_again_for_the_same_folder_finds_the_workspace_that_is_there() {
+    if !claude_available() {
+        eprintln!("skipped: claude is not on PATH");
+        return;
+    }
     let dir = scratch("one-workspace");
     let cwd = dir.join("project");
     std::fs::create_dir_all(&cwd).expect("a project directory");
@@ -74,6 +83,10 @@ fn asking_again_for_the_same_folder_finds_the_workspace_that_is_there() {
 
 #[test]
 fn a_different_folder_gets_its_own_workspace() {
+    if !claude_available() {
+        eprintln!("skipped: claude is not on PATH");
+        return;
+    }
     let dir = scratch("two-workspaces");
     let one = dir.join("one");
     let two = dir.join("two");

@@ -511,7 +511,12 @@ mod tests {
         let repo = TempRepo::new();
         let metadata = repository(&repo.path);
         let root = metadata["root"].as_str().expect("root");
-        assert_eq!(Path::new(root), repo.path);
+        // Windows reports short names (RUNNER~1) for TEMP and long names for
+        // git's rev-parse output; compare canonical paths, not string spellings.
+        assert_eq!(
+            std::fs::canonicalize(root).expect("canonical root"),
+            std::fs::canonicalize(&repo.path).expect("canonical temp repo")
+        );
         let branch = metadata["branch"].as_str().expect("branch");
         let head = metadata["head"].as_str().expect("head");
         assert!(!branch.is_empty(), "the branch is named");
