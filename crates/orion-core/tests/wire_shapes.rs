@@ -1,9 +1,14 @@
 //! Wire shapes must not drift: every response the conformance suite exercises is checked for the
 //! field names the client reads, so a renamed key fails here instead of in the UI.
 
+use orion_core::agents::find_in_path;
 use orion_core::engine::store::Store;
 use orion_core::engine::Engine;
 use serde_json::{json, Value};
+
+fn claude_available() -> bool {
+    find_in_path("claude").is_some()
+}
 
 fn assert_fields(value: &Value, fields: &[&str], what: &str) {
     let object = value
@@ -101,6 +106,10 @@ fn rest_responses_keep_the_field_names_the_client_reads() {
 
 #[test]
 fn pane_read_and_prompt_keep_their_client_fields() {
+    if !claude_available() {
+        eprintln!("skipped: claude is not on PATH");
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("orion-wire-pane-{}", uuid::Uuid::new_v4()));
     let engine = Engine::with_store(Store::at(dir.join("data")));
     let cwd = dir.join("project");
@@ -216,6 +225,10 @@ fn pane_read_and_prompt_keep_their_client_fields() {
 
 #[test]
 fn the_files_routes_answer_what_the_tree_and_reader_need() {
+    if !claude_available() {
+        eprintln!("skipped: claude is not on PATH");
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("orion-wire-files-{}", uuid::Uuid::new_v4()));
     let engine = Engine::with_store(Store::at(dir.join("data")));
     let project = dir.join("project");
