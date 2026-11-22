@@ -651,11 +651,10 @@ mod tests {
     fn env_printer() -> LaunchSpec {
         #[cfg(windows)]
         let spec = LaunchSpec {
-            program: "powershell.exe".into(),
+            program: "cmd.exe".into(),
             args: vec![
-                "-NoProfile".into(),
-                "-Command".into(),
-                "Write-Host ([Environment]::GetEnvironmentVariable('RUNTIME_TERMINAL_ID')); Write-Host ([Environment]::GetEnvironmentVariable('RUNTIME_SOCKET')); Write-Host ([Environment]::GetEnvironmentVariable('RUNTIME_CLI'))".into(),
+                "/c".into(),
+                "echo %RUNTIME_TERMINAL_ID% & echo %RUNTIME_SOCKET% & echo %RUNTIME_CLI%".into(),
             ],
         };
         #[cfg(not(windows))]
