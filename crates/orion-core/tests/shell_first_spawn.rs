@@ -44,6 +44,17 @@ fn wait_for_exit(pane: &orion_core::engine::pane::Pane) {
     panic!("the pane did not exit");
 }
 
+fn wait_for(label: &str, predicate: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if predicate() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("timed out waiting for {label}");
+}
+
 #[test]
 fn a_wrapped_agent_pane_keeps_the_shell_root_and_the_inner_command() {
     let dir = scratch("shell-first");
@@ -198,5 +209,69 @@ fn restart_refuses_a_pane_that_is_still_running() {
         engine.http("POST", "/api/pane/restart", &json!({ "pane_id": "p-live" }));
     assert_eq!(status, 409, "a live pane cannot be restarted: {body}");
     assert_eq!(body["error"]["code"], "pane_alive");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_inner_command_exit_returns_to_the_shell_prompt_in_the_same_pane() {
+    let dir = scratch("prompt-returns");
+    let engine = Engine::with_store(Store::at(dir.join("state")));
+    let shell = shell_program();
+    let run_id = uuid::Uuid::new_v4().simple().to_string();
+    let exit_marker = format!("ORION_T6_EXIT_{run_id}");
+    let prompt_marker = format!("ORION_T6_PROMPT_{run_id}");
+
+    #[cfg(windows)]
+    let inner = format!("echo {exit_marker} && set PROMPT={prompt_marker}$G");
+    #[cfg(not(windows))]
+    let inner = format!("export PS1='{prompt_marker}$ '; echo {exit_marker}");
+
+    let spec = LaunchSpec::for_shell_command(&inner, &shell_kind(), Some(&shell))
+        .expect("the inner command wraps in the shell");
+
+    let pane = engine
+        .spawn_pane(PaneConfig {
+            id: "p-prompt".into(),
+            workspace_id: "w1".into(),
+            tab_id: "t1".into(),
+            agent: AgentKind::Claude,
+            label: "Claude".into(),
+            cwd: dir.clone(),
+            spec,
+            args: Vec::new(),
+            shell_path: Some(shell.to_string_lossy().to_string()),
+            launch_command: Some(inner.clone()),
+            size: TerminalSize {
+                rows: 32,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+        })
+        .expect("the pane starts");
+
+    wait_for("the inner command's exit marker", || {
+        pane.visible_text().contains(&exit_marker)
+    });
+    wait_for("the shell prompt after the inner command exited", || {
+        pane.visible_text().contains(&prompt_marker)
+    });
+
+    let alive = engine
+        .pane_by_id("p-prompt")
+        .expect("the pane is still open under the same id");
+    assert!(alive.exited().is_none(), "the shell is still running");
+
+    let text = alive.visible_text();
+    let exit_at = text
+        .find(&exit_marker)
+        .expect("the exit marker is on screen");
+    let prompt_at = text
+        .find(&prompt_marker)
+        .expect("the prompt marker is on screen");
+    assert!(
+        prompt_at > exit_at,
+        "the prompt is drawn after the inner command exited: {text}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
