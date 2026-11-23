@@ -16,6 +16,8 @@
 - No changes to in-layout controls that are not modals: tab rename, terminal find bar, terminal touch key bar, tooltips, scrollbars, or the empty-state button that opens Add Workspace.
 - Colors come from `cx.theme()` / Orion theme tokens only; no raw hex or `rgb`.
 - Spacing, type, and panel dimensions use `theme.density_scale()`; `TOUCH_TARGET_PX` remains a fixed 44px physical minimum.
+- `ModalShell` is the sole vertical scroll owner for custom overlays; inner lists grow naturally and do not add `overflow_y_scroll`.
+- Panel width is `min(preferred * scale, available - 32 * scale)` with no lower bound that can exceed the window.
 - The workspace-creation modal's canonical visible label is "New workspace".
 - One visible close control per custom overlay: header X only. Escape is keyboard dismissal, not a second close control. No scrim click-to-close.
 - Each modal view owns `opener_focus`; the shared shell receives a clone only to restore focus on Escape/X dismissal. A successful commit clears it so the new pane takes focus.
@@ -181,9 +183,7 @@ impl RenderOnce for ModalShell {
         let theme = Theme::current();
         let scale = theme.density_scale();
         let available = f32::from(window.bounds().size.width);
-        let width = (self.preferred_width * scale)
-            .min(available - 32.0 * scale)
-            .max(300.0 * scale);
+        let width = (self.preferred_width * scale).min(available - 32.0 * scale);
 
         let close_click = self.on_close.clone();
         let click_opener = self.opener_focus.clone();
@@ -450,8 +450,6 @@ let shell = ModalShell::new(
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .h(px(180.0 * scale))
-                        .overflow_y_scroll()
                         .children(directory_rows),
                 ),
         )
@@ -470,9 +468,6 @@ let shell = ModalShell::new(
                         .id("new-workspace-agent-scroll")
                         .flex()
                         .flex_col()
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .overflow_y_scroll()
                         .child(
                             RadioGroup::new("new-workspace-agents")
                                 .children(agent_choices)
