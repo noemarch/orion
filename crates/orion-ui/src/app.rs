@@ -670,7 +670,7 @@ impl OrionApp {
         self.workspace_sidebar
             .update(cx, |view, _cx| view.attach(Arc::clone(&engine)));
         self.settings
-            .update(cx, |view, _cx| view.attach(Arc::clone(&engine)));
+            .update(cx, |view, cx| view.attach(Arc::clone(&engine), cx));
         self.new_workspace
             .update(cx, |view, _cx| view.attach(Arc::clone(&engine)));
         self.shell_picker
@@ -1277,7 +1277,7 @@ impl OrionApp {
                     .on_click(cx.listener(|this, _, _, cx| {
                         let default = this
                             .settings
-                            .update(cx, |view, _cx| view.prefs().default_shell.clone());
+                            .update(cx, |view, cx| view.prefs(cx).default_shell.clone());
                         let cwd = this
                             .cached_workspaces
                             .iter()
@@ -1955,7 +1955,7 @@ impl Render for OrionApp {
 
         // The Changes lens' 2s polls run only while it is active; views are
         // preserved between lens switches (entities stay mounted above).
-        let prefs = self.settings.update(cx, |view, _cx| view.prefs().clone());
+        let prefs = self.settings.update(cx, |view, cx| view.prefs(cx));
         if self.last_render_prefs.as_ref() != Some(&prefs) {
             Theme::set_current(Theme::for_preferences(
                 prefs.theme,
