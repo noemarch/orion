@@ -16,8 +16,11 @@
 - No changes to in-layout controls that are not modals: tab rename, terminal find bar, terminal touch key bar, tooltips, scrollbars, or the empty-state button that opens Add Workspace.
 - Colors come from `cx.theme()` / Orion theme tokens only; no raw hex or `rgb`.
 - Spacing, type, and panel dimensions use `theme.density_scale()`; `TOUCH_TARGET_PX` remains a fixed 44px physical minimum.
-- One visible close control per custom overlay: header X only. Escape also closes. No scrim click-to-close.
-- Focus is trapped while open and restored to the opener on close.
+- The workspace-creation modal's canonical visible label is "New workspace".
+- One visible close control per custom overlay: header X only. Escape is keyboard dismissal, not a second close control. No scrim click-to-close.
+- Each modal view owns `opener_focus`; the shared shell receives a clone only to restore focus on Escape/X dismissal. A successful commit clears it so the new pane takes focus.
+- Trigger paths with a `Window` pass `window.focused(cx)`; event-only paths pass `None` and do not synthesize a focus handle.
+- Focus is trapped while open and restored to a real opener on dismissal.
 - All HTTP calls, validation rules, emitted events, selection rules, recent-directory fallback, and error meaning stay unchanged.
 - Confirmation dialogs keep gpui-kit alert-dialog primitives and callbacks; only sentence-case titles, outcome-verb buttons, and verified theme tokens may change.
 - Commit messages are English semantic commits matching the repo style, with the Sisyphus trailer applied by `--trailer`.
@@ -747,7 +750,7 @@ Expected: titles are sentence case, buttons are outcome verbs, and no raw colors
 
 - [ ] **Step 3: Capture evidence**
 
-Use OS-level automation to open each confirmation and capture light/dark screenshots into `docs/visual/screenshots/`. If a dialog cannot be reached in the current environment, record the exact blocker and keep the code trace as evidence. Do not introduce a new test-only env flag.
+Use OS-level automation to open each confirmation and capture light/dark screenshots into `docs/visual/screenshots/`. The dialogs are evidence-only: do not change their source merely to make the task look complete. If a dialog cannot be reached in the current environment, record the exact blocker and keep the code trace and API audit as evidence. Do not introduce a new test-only env flag.
 
 - [ ] **Step 4: Run checks**
 
