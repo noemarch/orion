@@ -49,3 +49,27 @@ The message handler responsible for parsing, validating, and routing push frames
 
 #### Route Table
 The HTTP/REST dispatch table mapping inbound `/api/*` requests to their corresponding engine operations.
+
+---
+
+### Modal Presentation
+
+#### Modal Shell
+The shared, stateless frame for a custom overlay: scrim, centered panel, header title, one close control, and focus trap. It defines presentation only; modal views own their state.
+_Avoid_: Dialog primitive, settings page
+
+#### Close Control
+The single visible button in a modal header that dismisses the modal. It is distinct from Escape, which is keyboard dismissal, and from a primary action that commits a result.
+_Avoid_: Cancel button, Done button, dismiss button
+
+#### Keyboard Dismissal
+Escape closing the topmost modal without acting as a visible control. It complements the close control rather than duplicating it.
+_Avoid_: Escape action, close shortcut
+
+#### Opener Focus
+The view that had keyboard focus when a modal opened and receives focus back when a dismissal closes it. A successful commit clears it so the newly created pane can take focus.
+_Avoid_: saved focus, previous focus handle
+
+#### Confirmation Dialog
+A gpui-kit alert dialog that asks whether to close a running agent or session. It keeps kit-owned focus behavior and uses a specific consequence statement and "Close" outcome verb.
+_Avoid_: custom modal, alert prompt
