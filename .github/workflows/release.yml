@@ -21,6 +21,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: '0.17.1'
+      - name: linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libxcb1-dev libxcb-xinerama0-dev libxcb-shape0-dev \
+            libx11-dev libxrandr-dev libxi-dev libxcursor-dev libwayland-dev \
+            libegl1-mesa-dev libgl1-mesa-dev
       - uses: Swatinem/rust-cache@v2
       # The app is pure Rust: the shell is `orion-ui`, the runtime and the
       # CLI are `orion`.
@@ -40,9 +51,14 @@ jobs:
             windows-latest) suffix=".exe" ;;
             *) suffix="" ;;
           esac
-          for name in orion orion-ui; do
+          for name in orion orion-ui orion-rt; do
             cp "target/release/${name}${suffix}" "dist/${name}-${{ matrix.os }}${suffix}"
           done
+          pwsh ./scripts/package-release.ps1 \
+            -Version "${{ github.ref_name }}" \
+            -Os "${{ matrix.os }}" \
+            -BinaryDir target/release \
+            -OutDir dist
           echo "artifacts=$(ls dist/* | tr '\n' ' ')" >> $GITHUB_OUTPUT
       - name: create GitHub release
         uses: softprops/action-gh-release@v2
