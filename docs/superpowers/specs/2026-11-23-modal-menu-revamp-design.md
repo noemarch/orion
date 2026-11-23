@@ -44,7 +44,8 @@ Ownership changes in the two custom modals:
 - `NewWorkspaceModal` keeps its fields and removes only the shell-level rendering concerns. It gains `opener_focus: Option<FocusHandle>`; its `focus_handle` remains the view's handle and is passed to the shell.
 - `ShellPickerModal` gets the same `opener_focus` field and uses the shared shell.
 - Trigger sites in `app.rs` (sidebar New Workspace event, empty-state button, header New Terminal button) pass `window.focused(cx)` into the open method. If no window-focused value is available at a trigger, pass `None` and the shell simply has no focus target to restore; do not synthesize one.
-- `open_with_focus` replaces or extends current open methods so the opener is captured at open time. All existing open triggers must be updated.
+- Add `open_with_focus` to both modal views. `NewWorkspaceModal::open_with_focus(opener: Option<FocusHandle>, start: Option<String>, cx: &mut App)` stores the opener and calls the existing `open_at`; `ShellPickerModal::open_with_focus(opener: Option<FocusHandle>, default: &str, cwd: Option<String>, cx: &mut App)` stores the opener and calls the existing `open_with_default`. All existing open triggers must be updated to pass `window.focused(cx)` as the opener.
+- The focus trap uses the verified gpui-kit 0.9.1 API `.focus_trap(id, &focus_handle)` from `gpui_kit::base::FocusTrapElement`, matching `settings.rs`.
 
 The shell pattern mirrors `settings.rs` shell composition (scrim, centered panel, header, footer rhythm) but does not import `Settings`, `SettingPage`, `SettingGroup`, `SettingItem`, or `SettingField`.
 
@@ -56,7 +57,7 @@ The shell pattern mirrors `settings.rs` shell composition (scrim, centered panel
 - Shell Picker: "Shell" section with radio rows and optional path field in vertical layout; error directly above footer.
 - Footer: primary action only ("Open workspace", "Open terminal") — the existing footer Cancel buttons are removed as duplicate close controls.
 - Tokens: colors from `cx.theme()` / Orion theme tokens only; no raw hex or `rgb`. Spacing, type, and panel dimensions use `theme.density_scale()`; `TOUCH_TARGET_PX` remains a fixed physical minimum. Disabled rows are dimmed but legible; selected rows use a persistent selected surface.
-- Confirmation dialogs: sentence-case titles and outcome-verb buttons; no raw literals introduced. Their kit-owned geometry and focus behavior remain.
+- Confirmation dialogs: sentence-case titles and outcome-verb buttons; no raw literals introduced. Their kit-owned geometry and focus behavior remain. A "token/copy pass" permits changing only strings and theme-token arguments after the 0.9.1 APIs are verified; if the current dialog already satisfies those rules, it stays unchanged and the screenshots are the evidence.
 
 ## Behavior and data flow
 
