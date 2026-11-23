@@ -732,12 +732,12 @@ impl ReviewPane {
             }
             content = content.child(
                 div()
-                    .id("review-no-patch")
-                    .debug_selector(|| "review-no-patch".to_string())
+                    .id("review-select-file")
+                    .debug_selector(|| "review-select-file".to_string())
                     .mt(px(theme.space_5()))
                     .text_size(px(theme.font_ui_secondary()))
                     .text_color(theme.token_text_muted())
-                    .child("No changes"),
+                    .child("Select a file to see its patch."),
             );
             return content;
         };
@@ -1287,6 +1287,40 @@ mod tests {
                     "Retry requested a fresh fetch"
                 );
             });
+        }
+    );
+
+    crate::orion_test!(
+        fn no_patch_without_a_fetch_does_not_claim_no_changes(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::{point, size};
+            let cx = cx.add_empty_window();
+            let changes = cx.update(|_window, app| app.new(ChangesView::new));
+            let pane = cx.update(|_window, app| app.new(|cx| ReviewPane::new(changes.clone(), cx)));
+            let list = one_file_list();
+            cx.draw(point(px(0.), px(0.)), size(px(1280.), px(800.)), |_, cx| {
+                pane.update(cx, |p, cx| {
+                    p.render_body(
+                        Some(&list),
+                        &list.files,
+                        None,
+                        PatchLoad {
+                            pending: false,
+                            error: None,
+                        },
+                        &Theme::current(),
+                        cx,
+                    )
+                    .into_any_element()
+                })
+            });
+            assert!(
+                cx.debug_bounds("review-select-file").is_some(),
+                "a file with no requested patch asks the reader to select one"
+            );
+            assert!(
+                cx.debug_bounds("review-no-patch").is_none(),
+                "the pane never claims 'No changes' without a patch fetch"
+            );
         }
     );
 

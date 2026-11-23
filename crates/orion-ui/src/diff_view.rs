@@ -418,10 +418,7 @@ impl ChangesView {
                 }
                 view.last_list_body = Some(encoded);
                 match RepoDiffFileList::parse(&body) {
-                    Ok(list) => {
-                        view.list = Some(list);
-                        view.error = None;
-                    }
+                    Ok(list) => view.install_list(list),
                     Err(_) => view.error = Some(LIST_ERROR_MESSAGE.to_string()),
                 }
                 cx.notify();
@@ -642,11 +639,41 @@ impl ChangesView {
         self.list_width
     }
 
+    /// Install a freshly fetched list, keeping the selection honest. A
+    /// selection the new list no longer contains is dropped along with its
+    /// patch; when nothing valid is selected and the list is non-empty the
+    /// first file is selected. A patch is requested only when the selection
+    /// was created or changed, so an unchanged poll does not churn.
+    fn install_list(&mut self, list: RepoDiffFileList) {
+        let selection_valid = self
+            .selected_path
+            .as_deref()
+            .is_some_and(|path| list.files.iter().any(|file| file.path == path));
+        let mut selection_changed = false;
+        if !selection_valid {
+            self.selected_path = None;
+            self.selected_old_path = None;
+            self.patch = None;
+            self.patch_error = None;
+            self.patch_loading = false;
+            self.last_patch_body = None;
+            if let Some(first) = list.files.first() {
+                self.selected_path = Some(first.path.clone());
+                self.selected_old_path = first.old_path.clone();
+                selection_changed = true;
+            }
+        }
+        self.list = Some(list);
+        self.error = None;
+        if selection_changed {
+            self.refresh_patch();
+        }
+    }
+
     /// A list fetch answered (test seam mirroring `apply_conversation`).
     pub fn apply_list(&mut self, list: RepoDiffFileList) {
-        self.list = Some(list);
         self.last_list_body = None;
-        self.error = None;
+        self.install_list(list);
     }
 
     /// A list fetch failed (test seam). The raw message is dropped: the view
@@ -655,10 +682,19 @@ impl ChangesView {
         self.error = Some(LIST_ERROR_MESSAGE.to_string());
     }
 
-    /// A patch fetch answered (test seam).
+    fn store_patch(&mut self, patch: RepoDiffFilePatch) {
+        self.patch = Some(patch);
+        self.last_patch_body = None;
+        self.error = None;
+        self.patch_error = None;
+        self.patch_loading = false;
+        self.patch_pending = false;
+    }
+
+    /// A patch fetch answered (test seam). Installs the patch as current;
+    /// callers modelling a late answer use [`Self::apply_patch_for`].
     pub fn apply_patch(&mut self, patch: RepoDiffFilePatch) {
-        let path = patch.file.path.clone();
-        self.apply_patch_for(&path, patch);
+        self.store_patch(patch);
     }
 
     /// A patch fetch for `path` answered (test seam). A response for a file
@@ -671,11 +707,7 @@ impl ChangesView {
         {
             return;
         }
-        self.patch = Some(patch);
-        self.last_patch_body = None;
-        self.error = None;
-        self.patch_error = None;
-        self.patch_loading = false;
+        self.store_patch(patch);
     }
 
     /// A patch fetch failed (test seam); same plain-language rule as `fail_list`.
@@ -683,6 +715,7 @@ impl ChangesView {
         self.error = Some(PATCH_ERROR_MESSAGE.to_string());
         self.patch_error = Some(PATCH_ERROR_MESSAGE.to_string());
         self.patch_loading = false;
+        self.patch_pending = false;
     }
 
     /// The reader asked for the data again: forget the cached bodies so the
@@ -1520,6 +1553,82 @@ mod tests {
                 assert!(
                     view.read(app).patch_pending(),
                     "selecting a file starts the patch fetch before any render"
+                );
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn list_load_auto_selects_the_first_file_and_starts_its_patch_fetch(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.update(|_window, app| {
+                view.update(app, |v, _cx| v.apply_list(two_file_list()));
+            });
+            cx.update(|_window, app| {
+                let v = view.read(app);
+                assert_eq!(
+                    v.selected_path.as_deref(),
+                    Some("a.rs"),
+                    "loading a list selects its first file"
+                );
+                assert!(
+                    v.patch_pending(),
+                    "the first file's patch fetch is requested on load"
+                );
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn list_refresh_drops_a_stale_selection(cx: &mut gpui_kit::TestAppContext) {
+            let cx = cx.add_empty_window();
+            let view = cx.update(|_window, app| app.new(ChangesView::new));
+            cx.update(|_window, app| {
+                view.update(app, |v, cx| {
+                    v.apply_list(two_file_list());
+                    v.select_file_now(1, cx);
+                    let patch_b = RepoDiffFilePatch::parse(&patch_json(
+                        "b.rs",
+                        Some("@@ -1 +1 @@\n-x\n+y\n"),
+                        None,
+                    ))
+                    .expect("parse B");
+                    v.apply_patch(patch_b);
+                });
+            });
+            cx.update(|_window, app| {
+                let v = view.read(app);
+                assert_eq!(v.selected_path.as_deref(), Some("b.rs"));
+                assert!(v.current_patch().is_some(), "B's patch is loaded");
+            });
+            cx.update(|_window, app| {
+                view.update(app, |v, _cx| {
+                    v.apply_list(
+                        RepoDiffFileList::parse(&file_list_json(json!([
+                            {"path": "a.rs", "old_path": null, "status": "modified",
+                             "additions": 3, "deletions": 1, "binary": null},
+                        ])))
+                        .expect("parse"),
+                    );
+                });
+            });
+            cx.update(|_window, app| {
+                let v = view.read(app);
+                assert_eq!(
+                    v.selected_path.as_deref(),
+                    Some("a.rs"),
+                    "a file still in the list is selected"
+                );
+                assert!(
+                    v.current_patch().is_none(),
+                    "the stale file's patch is cleared"
+                );
+                assert!(
+                    v.patch_pending(),
+                    "the newly selected file's patch fetch is requested"
                 );
             });
         }
