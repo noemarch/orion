@@ -3,9 +3,11 @@
 > **Superseded for the desktop shell.** This plan was written before Orion moved from a
 > Tauri v2 + React shell to a native GPUI shell. The engine, runtime daemon, PTY layer,
 > transcript parsers and headless gateway described below are current; the Tauri IPC layer,
-> the React/PWA client and the `src-tauri` / `src` trees are not. See
-> [`docs/adr/desktop-shell-ownership.md`](docs/adr/desktop-shell-ownership.md) for the
-> decision and [`docs/architecture.md`](docs/architecture.md) for the app as it is now.
+> the React/PWA client and the `src-tauri` / `src` trees are not. Tauri is retired and
+> the GPUI shell has no tray, desktop notifications, updater, or single-instance guard.
+> See [`docs/adr/desktop-shell-ownership.md`](docs/adr/desktop-shell-ownership.md) for the
+> decision, [`docs/install.md`](docs/install.md) for supported install methods, and
+> [`docs/architecture.md`](docs/architecture.md) for the app as it is now.
 
 > **Product Definition:** Orion is an open-source, local-first AI agent orchestrator and multi-device control panel. It runs on your computer (desktop app via Tauri v2 or headless daemon) and allows you to monitor, guide, approve, and command terminal AI coding agents (Claude Code, Codex, Antigravity, OpenCode, Cursor CLI, Grok, omp, omo, pi, Hermes, Devin) from desktop or mobile (installable PWA over Tailscale/LAN).
 >

@@ -1,5 +1,7 @@
 # Orion roadmap
 
+> **Superseded:** Tauri is retired; `orion-ui` is the only desktop shell; tray, desktop notifications, updater, and single-instance are not implemented. See [`adr/desktop-shell-ownership.md`](adr/desktop-shell-ownership.md) and [`install.md`](install.md).
+
 The architecture is described in [`../PLAN.md`](../PLAN.md). This document is the executable
 plan: the milestones, what each one proves, and the gate that must pass before the next one
 starts. A milestone ships when its definition of done (DoD) is demonstrated on Windows, not when

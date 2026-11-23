@@ -3,6 +3,8 @@
 > **Status:** Plan only — not started. Created 2026-11-07 in response to a stakeholder
 > demand that Orion be 100% Rust. No code has been changed for this plan.
 
+> **Superseded:** Tauri is retired; `orion-ui` is the only desktop shell; tray, desktop notifications, updater, and single-instance are not implemented. See [`adr/desktop-shell-ownership.md`](adr/desktop-shell-ownership.md) and [`install.md`](install.md).
+
 ## Why this exists
 
 Orion is already pure Rust where it matters: the engine (`crates/orion-core`), the Tauri v2

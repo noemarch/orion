@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Superseded:** Tauri is retired; `orion-ui` is the only desktop shell; tray, desktop notifications, updater, and single-instance are not implemented. See [`../../adr/desktop-shell-ownership.md`](../../adr/desktop-shell-ownership.md) and [`../../install.md`](../../install.md).
+
 **Goal:** Port the Orbit UI to the native GPUI `orion-ui` shell so Orion looks and behaves like Orbit at desktop sizes, with no React/DOM/CSS/WebView in the shipped binary.
 
 **Architecture:** Keep `orion-core::Engine` as the only data seam. Build GPUI views that mirror Orbit component boundaries — App shell, Sidebar workspaces, Agent roster, TabStrip, PaneCanvas, Chat, Composer, Terminal, Changes, Settings/dialogs — and drive them from Engine session/transcript projections. Record the desktop-shell ADR and gpui-kit spike before shell code lands.
@@ -68,9 +70,9 @@
 ```markdown
 # Desktop Shell Ownership
 
-Decision: The native `orion-ui` binary is the desktop application. Tauri is [retired / reduced to launcher and tray host] as checked by the spike and release review.
+Decision: The native `orion-ui` binary is the desktop application. Tauri is retired; no WebView is reintroduced.
 
-Consequences: the release pipeline ships the GPUI binary as the desktop app; any retained Tauri role is launcher/tray only and does not render the UI.
+Consequences: the release pipeline ships the GPUI binary as the desktop app; tray, desktop notifications, the updater, and a single-instance guard are not implemented. The recorded decision is in `docs/adr/desktop-shell-ownership.md`.
 ```
 
 - [ ] **Step 2: Run the gpui-kit spike**

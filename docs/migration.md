@@ -2,7 +2,7 @@
 
 ## Upgrading between releases
 
-Orion updates are shipped by pulling this repository. There is no release channel or automatic updater triggered by the app itself; you build from source or run the installers from a GitHub release.
+Orion publishes versioned native packages on GitHub Releases. There is no release channel or automatic updater triggered by the app itself; download a package from GitHub Releases or build from source, then follow [`install.md`](install.md).
 
 ### What migrates automatically
 

@@ -1,5 +1,7 @@
 # Orbit UI Port — Native GPUI Design
 
+> **Superseded:** Tauri is retired; `orion-ui` is the only desktop shell; tray, desktop notifications, updater, and single-instance are not implemented. See [`../../adr/desktop-shell-ownership.md`](../../adr/desktop-shell-ownership.md) and [`../../install.md`](../../install.md).
+
 Date: 2026-11-10  
 Ticket: #7 (shell: native Orion layout and Quiet Slate chrome), part of #5  
 Reference: `C:\herdr-plugins-project\orbit`, live Orbit at `http://127.0.0.1:7317/?ws=w2Q-orion&pane=w2Q%3ApA&view=terminal`
@@ -68,7 +70,7 @@ Root layout is a desktop two-column shell:
 
 Before shell code lands, record:
 
-1. **Desktop-shell ownership ADR** under `docs/adr/`: whether Tauri is retired or reduced to launcher/tray host, and what the release pipeline does.
+1. **Desktop-shell ownership ADR** under `docs/adr/`: recorded in `docs/adr/desktop-shell-ownership.md` — Tauri is retired, `orion-ui` is the only desktop shell, and the release pipeline ships versioned packages.
 2. **gpui-kit spike record**: build and rendered component evidence, plus adopt/defer recommendation.
 
 These are prerequisites in the implementation plan, not optional follow-ups.

@@ -8,6 +8,8 @@
 > from the [gpui-kit component catalog](https://gpui-kit.com/component) first. Only
 > build a custom control when no gpui-kit component fits and document why.
 
+> **Superseded:** Tauri is retired; `orion-ui` is the only desktop shell; tray, desktop notifications, updater, and single-instance are not implemented. See [`adr/desktop-shell-ownership.md`](adr/desktop-shell-ownership.md) and [`install.md`](install.md).
+
 ## 1. Why gpui-kit
 
 Orion's native UI was prototyped with raw [`gpui`](https://gpui.rs) 0.2 in
