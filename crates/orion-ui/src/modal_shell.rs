@@ -230,4 +230,24 @@ mod tests {
             });
         }
     );
+
+    crate::orion_test!(
+        fn close_control_restores_opener(cx: &mut gpui_kit::TestAppContext) {
+            let opener = cx.update(|app| app.focus_handle().tab_stop(true));
+            let (root, cx) = cx.add_window_view(|_, cx| ShellHost {
+                closed: false,
+                focus_handle: cx.focus_handle(),
+                opener: opener.clone(),
+            });
+            cx.update(|window, cx| {
+                opener.focus(window, cx);
+                window.render_frame(cx);
+                window.click("shell-test-close", cx);
+            });
+            cx.update(|window, app| {
+                assert!(root.read(app).closed, "the header X closed the shell");
+                assert!(opener.is_focused(window), "focus returned to the opener");
+            });
+        }
+    );
 }

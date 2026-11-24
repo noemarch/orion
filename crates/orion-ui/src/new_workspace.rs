@@ -103,7 +103,7 @@ impl gpui_kit::EventEmitter<NewWorkspaceEvent> for NewWorkspaceModal {}
 
 /// The folder-browser + agent-picker modal behind `POST /api/workspace/create`.
 ///
-/// The app opens it with [`NewWorkspaceModal::open_at`] and listens for
+/// The app opens it with [`NewWorkspaceModal::open_with_focus`] and listens for
 /// [`NewWorkspaceEvent::Created`] to focus the returned pane. The modal never
 /// touches the sidebar directly; the Engine snapshot is the only source of
 /// truth.
@@ -563,6 +563,85 @@ mod tests {
             "C:/work/any"
         );
     }
+
+    crate::orion_test!(
+        fn non_installed_agents_are_disabled_and_unselectable(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::test::TestWindowExt;
+            let (root, cx) = cx.add_window_view(|_, cx| NewWorkspaceModal::new(cx));
+            cx.update(|_, cx| {
+                root.update(cx, |view, cx| {
+                    view.agents = vec![
+                        AgentChoice {
+                            kind: "claude".into(),
+                            label: "Claude Code".into(),
+                            installed: true,
+                        },
+                        AgentChoice {
+                            kind: "codex".into(),
+                            label: "Codex".into(),
+                            installed: false,
+                        },
+                    ];
+                    view.selected_agent = Some("claude".into());
+                    view.cwd = "C:/work".into();
+                    view.open = true;
+                    cx.notify();
+                });
+            });
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                assert_eq!(
+                    window
+                        .within("new-workspace-agents")
+                        .find(0usize)
+                        .disabled(),
+                    None
+                );
+                assert_eq!(
+                    window
+                        .within("new-workspace-agents")
+                        .find(1usize)
+                        .disabled(),
+                    Some(true)
+                );
+                window.within("new-workspace-agents").click(1usize, cx);
+            });
+            cx.update(|_, app| {
+                assert_eq!(
+                    root.read(app).selected_agent.as_deref(),
+                    Some("claude"),
+                    "a non-installed agent cannot be selected"
+                );
+            });
+        }
+    );
+
+    crate::orion_test!(
+        fn primary_action_is_disabled_until_a_valid_choice(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::test::TestWindowExt;
+            let (root, cx) = cx.add_window_view(|_, cx| NewWorkspaceModal::new(cx));
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                assert_eq!(window.find("new-workspace-create").disabled(), Some(true));
+            });
+            cx.update(|_, cx| {
+                root.update(cx, |view, cx| {
+                    view.agents = vec![AgentChoice {
+                        kind: "claude".into(),
+                        label: "Claude Code".into(),
+                        installed: true,
+                    }];
+                    view.selected_agent = Some("claude".into());
+                    view.cwd = "C:/work".into();
+                    cx.notify();
+                });
+            });
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                assert_eq!(window.find("new-workspace-create").disabled(), None);
+            });
+        }
+    );
 
     crate::orion_test!(
         fn modal_has_one_close_control(cx: &mut gpui_kit::TestAppContext) {

@@ -372,6 +372,29 @@ mod tests {
     use super::*;
 
     crate::orion_test!(
+        fn primary_action_is_disabled_until_a_shell_is_available(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            use gpui_kit::test::TestWindowExt;
+            let (root, cx) = cx.add_window_view(|_, cx| ShellPickerModal::new(cx));
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                assert_eq!(window.find("shell-picker-open").disabled(), Some(true));
+            });
+            cx.update(|_, cx| {
+                root.update(cx, |view, cx| {
+                    view.selected = Some("powershell".into());
+                    cx.notify();
+                });
+            });
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                assert_eq!(window.find("shell-picker-open").disabled(), None);
+            });
+        }
+    );
+
+    crate::orion_test!(
         fn modal_has_one_close_control(cx: &mut gpui_kit::TestAppContext) {
             use gpui_kit::test::TestWindowExt;
             let (_, cx) = cx.add_window_view(|_, cx| ShellPickerModal::new(cx));
