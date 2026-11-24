@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::theme::Theme;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::component_traits::Disableable;
+use gpui_kit::base::StyledExt;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::radio::{Radio, RadioGroup};
@@ -116,6 +117,7 @@ pub struct NewWorkspaceModal {
     selected_agent: Option<String>,
     error: Option<String>,
     focus_handle: FocusHandle,
+    opener_focus: Option<FocusHandle>,
     row_seq: usize,
 }
 
@@ -131,6 +133,7 @@ impl NewWorkspaceModal {
             selected_agent: None,
             error: None,
             focus_handle: cx.focus_handle(),
+            opener_focus: None,
             row_seq: 0,
         }
     }
@@ -161,6 +164,17 @@ impl NewWorkspaceModal {
         if self.cwd.is_empty() {
             self.load("~");
         }
+    }
+
+    pub fn open_with_focus(
+        &mut self,
+        opener: Option<FocusHandle>,
+        start: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.opener_focus = opener;
+        self.open_at(start);
+        cx.notify();
     }
 
     pub fn close(&mut self) {
@@ -274,6 +288,7 @@ impl NewWorkspaceModal {
             .and_then(Value::as_str)
             .map(str::to_string);
         self.open = false;
+        self.opener_focus = None;
         if let Some(pane_id) = pane_id {
             cx.emit(NewWorkspaceEvent::Created(pane_id));
         }
@@ -292,9 +307,7 @@ pub(crate) fn error_message(body: &Value, fallback: &str) -> String {
 
 impl Render for NewWorkspaceModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The modal owns the keyboard while it is open, so Escape closes it
-        // regardless of which pane had focus.
-        if !self.focus_handle.is_focused(window) {
+        if self.open && !self.focus_handle.is_focused(window) {
             self.focus_handle.focus(window, cx);
         }
         let theme = Theme::current();
@@ -345,171 +358,127 @@ impl Render for NewWorkspaceModal {
                 .disabled(!agent.installed)
         });
 
-        div()
-            .id("new-workspace-modal")
-            .flex()
-            .items_center()
-            .justify_center()
-            .size_full()
-            .bg(theme.scrim)
-            .child(
-                div()
-                    .id("new-workspace-panel")
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0 * scale))
-                    .w(px(520.0))
-                    .max_h(px(560.0))
-                    .p_4()
-                    .rounded_lg()
-                    .bg(theme.surface_panel)
-                    .border_1()
-                    .border_color(theme.border)
-                    .track_focus(&self.focus_handle)
-                    .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
-                        if ev.keystroke.key == "escape" {
-                            this.close();
-                            cx.notify();
-                        }
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(14.0 * scale))
-                                    .text_color(theme.text_strong)
-                                    .child("New Workspace"),
-                            )
-                            .child(
-                                Button::new("new-workspace-close")
-                                    .icon(IconName::X)
-                                    .tooltip("Close")
-                                    .accessibility_label("Close new workspace")
-                                    .min_h(px(44.0))
-                                    .min_w(px(44.0))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close();
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0 * scale))
-                            .text_size(px(11.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child("FOLDER")
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_row()
-                                    .justify_end()
-                                    .gap(px(8.0 * scale))
-                                    .child(
-                                        Button::new("new-workspace-home")
-                                            .label("Home")
-                                            .secondary()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.go_home();
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("new-workspace-up")
-                                            .label("Up")
-                                            .secondary()
-                                            .disabled(parent.is_none())
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.go_up();
-                                                cx.notify();
-                                            })),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child(cwd.clone()),
-                    )
-                    .child(
-                        div()
-                            .id("new-workspace-directories")
-                            .flex()
-                            .flex_none()
-                            .flex_col()
-                            .gap_1()
-                            .h(px(180.0))
-                            .overflow_y_scroll()
-                            .children(directory_rows),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child("AGENT"),
-                    )
-                    .child(
-                        div()
-                            .id("new-workspace-agent-scroll")
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_h(px(0.0))
-                            .overflow_y_scroll()
-                            .child(
-                                RadioGroup::new("new-workspace-agents")
-                                    .children(agent_choices)
-                                    .selected_index(selected_index)
-                                    .on_change(cx.listener(|this, index: &usize, _, cx| {
-                                        if let Some(agent) = this.agents.get(*index) {
-                                            if agent.installed {
-                                                this.selected_agent = Some(agent.kind.clone());
-                                                cx.notify();
+        crate::modal_shell::ModalShell::new(
+            "new-workspace",
+            "New workspace",
+            &self.focus_handle,
+            self.opener_focus.clone(),
+            520.0,
+            560.0,
+            div()
+                .v_flex()
+                .gap(px(10.0 * scale))
+                .child(
+                    div()
+                        .v_flex()
+                        .gap(px(8.0 * scale))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .pb(px(8.0 * scale))
+                        .child(
+                            div()
+                                .text_size(px(11.0 * scale))
+                                .text_color(theme.text_dim)
+                                .child("Folder"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0 * scale))
+                                .text_color(theme.text_dim)
+                                .child(cwd.clone()),
+                        )
+                        .child(
+                            div()
+                                .h_flex()
+                                .items_center()
+                                .justify_end()
+                                .gap(px(8.0 * scale))
+                                .child(
+                                    Button::new("new-workspace-home")
+                                        .label("Home")
+                                        .secondary()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.go_home();
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("new-workspace-up")
+                                        .label("Up")
+                                        .secondary()
+                                        .disabled(parent.is_none())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.go_up();
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("new-workspace-directories")
+                                .debug_selector(|| "new-workspace-directories".to_string())
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .children(directory_rows),
+                        ),
+                )
+                .child(
+                    div()
+                        .v_flex()
+                        .gap(px(8.0 * scale))
+                        .child(
+                            div()
+                                .text_size(px(11.0 * scale))
+                                .text_color(theme.text_dim)
+                                .child("Agent"),
+                        )
+                        .child(
+                            div()
+                                .id("new-workspace-agent-scroll")
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    RadioGroup::new("new-workspace-agents")
+                                        .children(agent_choices)
+                                        .selected_index(selected_index)
+                                        .on_change(cx.listener(|this, index: &usize, _, cx| {
+                                            if let Some(agent) = this.agents.get(*index) {
+                                                if agent.installed {
+                                                    this.selected_agent = Some(agent.kind.clone());
+                                                    cx.notify();
+                                                }
                                             }
-                                        }
-                                    })),
-                            ),
-                    )
-                    .child(if let Some(error) = error {
-                        Alert::error("new-workspace-error", error).into_any_element()
-                    } else {
-                        div().into_any_element()
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .gap(px(8.0 * scale))
-                            .child(
-                                Button::new("new-workspace-cancel")
-                                    .label("Cancel")
-                                    .secondary()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close();
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("new-workspace-create")
-                                    .label("Open Workspace")
-                                    .primary()
-                                    .disabled(!can_create)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.create(cx);
-                                    })),
-                            ),
+                                        })),
+                                ),
+                        ),
+                )
+                .child(if let Some(error) = error {
+                    Alert::error("new-workspace-error", error).into_any_element()
+                } else {
+                    div().into_any_element()
+                })
+                .child(
+                    div().h_flex().justify_end().gap(px(8.0 * scale)).child(
+                        Button::new("new-workspace-create")
+                            .label("Open workspace")
+                            .primary()
+                            .disabled(!can_create)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.create(cx);
+                            })),
                     ),
-            )
+                ),
+            {
+                let view = cx.entity();
+                move |_: &mut Window, app: &mut App| {
+                    view.update(app, |this, cx| {
+                        this.close();
+                        cx.notify();
+                    });
+                }
+            },
+        )
     }
 }
 
@@ -594,6 +563,39 @@ mod tests {
             "C:/work/any"
         );
     }
+
+    crate::orion_test!(
+        fn modal_has_one_close_control(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::test::TestWindowExt;
+            let (_, cx) = cx.add_window_view(|_, cx| NewWorkspaceModal::new(cx));
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+            });
+            assert!(cx.debug_bounds("new-workspace-close").is_some());
+            assert!(cx.debug_bounds("new-workspace-cancel").is_none());
+            assert!(cx.debug_bounds("new-workspace-directories").is_some());
+        }
+    );
+
+    crate::orion_test!(
+        fn modal_restores_opener_focus_on_escape(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::test::TestWindowExt;
+            let opener = cx.update(|app| app.focus_handle().tab_stop(true));
+            let (root, cx) = cx.add_window_view(|_, cx| NewWorkspaceModal::new(cx));
+            cx.update(|window, cx| {
+                root.update(cx, |view, cx| {
+                    view.open_with_focus(Some(opener.clone()), None, cx);
+                });
+                opener.focus(window, cx);
+                window.render_frame(cx);
+            });
+            cx.simulate_keystrokes("escape");
+            cx.update(|window, app| {
+                assert!(!root.read(app).is_open());
+                assert!(opener.is_focused(window));
+            });
+        }
+    );
 
     crate::orion_test!(
         fn modal_draws_the_folder_browser_at_the_recent_directory(

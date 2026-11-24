@@ -567,7 +567,7 @@ impl OrionApp {
         let modal_events = app.new_workspace.clone();
         let sidebar_sub = cx.subscribe(&sidebar_events, |this, _, event: &SidebarEvent, cx| {
             match event {
-                SidebarEvent::NewWorkspace => this.open_new_workspace(cx),
+                SidebarEvent::NewWorkspace => this.open_new_workspace(cx, None),
                 SidebarEvent::CloseWorkspace(workspace_id) => {
                     this.call_route(
                         "/api/workspace/close",
@@ -1057,7 +1057,7 @@ impl OrionApp {
     }
 
     /// Seed the New Workspace picker from the most recent folder.
-    fn open_new_workspace(&mut self, cx: &mut App) {
+    fn open_new_workspace(&mut self, cx: &mut App, opener: Option<FocusHandle>) {
         let (focused_cwd, any_cwd) = self.workspace_sidebar.update(cx, |view, _cx| {
             let workspaces = view.workspaces();
             let focused = workspaces
@@ -1092,8 +1092,7 @@ impl OrionApp {
         );
         let start = if start.is_empty() { None } else { Some(start) };
         self.new_workspace.update(cx, |view, cx| {
-            view.open_at(start);
-            cx.notify();
+            view.open_with_focus(opener, start, cx);
         });
     }
 
@@ -2080,8 +2079,9 @@ impl Render for OrionApp {
                     Button::new("empty-new-workspace")
                         .label("New Workspace")
                         .primary()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_new_workspace(cx);
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let opener = window.focused(cx);
+                            this.open_new_workspace(cx, opener);
                             cx.notify();
                         })),
                 )

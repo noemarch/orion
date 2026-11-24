@@ -52,18 +52,11 @@ impl ModalShell {
 }
 
 impl RenderOnce for ModalShell {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let theme = Theme::current();
         let scale = theme.density_scale();
         let available = f32::from(window.bounds().size.width);
         let width = (self.preferred_width * scale).min(available - 32.0 * scale);
-
-        // The shell owns the keyboard while it is drawn. The view stops
-        // rendering it when closed, so this cannot steal focus from an opener
-        // that a dismissal has just restored.
-        if !self.focus_handle.is_focused(window) {
-            self.focus_handle.focus(window, cx);
-        }
 
         let close_click = self.on_close.clone();
         let click_opener = self.opener_focus.clone();
@@ -170,7 +163,10 @@ mod tests {
     }
 
     impl Render for ShellHost {
-        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if !self.closed && !self.focus_handle.is_focused(window) {
+                self.focus_handle.focus(window, cx);
+            }
             let view = cx.entity();
             let close = move |_: &mut Window, app: &mut App| {
                 view.update(app, |this, cx| {
