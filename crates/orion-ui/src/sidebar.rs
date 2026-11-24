@@ -24,23 +24,19 @@
 use crate::agents::{agent_rows, AgentRow};
 use crate::session_status;
 use crate::shell_model::ShellLayout;
-use crate::theme::{
-    Theme, AVATAR_SIZE_COMPACT_PX, AVATAR_SIZE_PX, DOT_SIZE_PX, ICON_SIZE_PX, MARK_SIZE_PX,
-    TOUCH_TARGET_PX,
-};
+use crate::theme::{Theme, DOT_SIZE_PX, ICON_SIZE_PX, TOUCH_TARGET_PX};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{
-    avatar::Avatar, button::Button, button::ButtonCustomVariant, button::ButtonVariants, Icon,
-    Sizable, ThemeStyled, WindowExt,
-};
+use gpui_kit::base::{v_virtual_list, VirtualListScrollHandle};
+use gpui_kit::component::{button::Button, button::ButtonVariants, Icon, ThemeStyled};
 use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::test::TestSupportExt;
 use gpui_kit::*;
 use gpui_kit::{div, px, Context, FocusHandle, Render, Styled, Window};
 use orion_core::protocol::AgentStatus;
 use orion_core::runtime::Runtime;
-use orion_core::session_state::SessionState;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,9 +45,12 @@ use std::time::Duration;
 // repeating bare literals across the view. Radii are the §4 chip/control tokens.
 const SPACE_1: f32 = 4.0; // --space-1: tight icon and control gaps
 const SPACE_2: f32 = 8.0; // --space-2: row and menu gaps
+const SPACE_3: f32 = 12.0; // --space-3: control padding
 const SPACE_4: f32 = 16.0; // --space-4: section padding
 const RADIUS_SM: f32 = 6.0; // --radius-sm: chips and inner controls
-const ROW_SUB_INDENT: f32 = 28.0; // avatar (20) + row gap (8)
+const HEADER_ROW_PX: f32 = 30.0;
+const PANE_ROW_PX: f32 = 48.0;
+const MONO: &str = "JetBrains Mono";
 
 /// One workspace row of the sidebar: mark + title + status on a single row.
 #[derive(Debug, Clone)]
@@ -96,6 +95,19 @@ pub struct TabEntry {
     pub layout: String,
 }
 
+enum TreeRow {
+    Header {
+        workspace: WorkspaceEntry,
+        pane_count: usize,
+        collapsed: bool,
+    },
+    Pane {
+        agent: AgentRow,
+        subtitle: String,
+        brand: IconName,
+    },
+}
+
 /// The sidebar view. State is the last session snapshot; `refresh()` swaps
 /// it in when the wire body changes (stale rows are swept with it).
 pub struct WorkspaceSidebar {
@@ -104,6 +116,8 @@ pub struct WorkspaceSidebar {
     last_body: Option<String>,
     focus_handle: FocusHandle,
     pulse_phase: u32,
+    collapsed_workspaces: HashSet<String>,
+    scroll: VirtualListScrollHandle,
 }
 
 impl WorkspaceSidebar {
@@ -114,6 +128,8 @@ impl WorkspaceSidebar {
             last_body: None,
             focus_handle: cx.focus_handle().tab_stop(true),
             pulse_phase: 0,
+            collapsed_workspaces: HashSet::new(),
+            scroll: VirtualListScrollHandle::new(),
         };
         view.start_poll(cx);
         view.start_pulse(cx);
@@ -134,6 +150,260 @@ impl WorkspaceSidebar {
     /// compares it on sidebar notifies to skip cache rebuilds on pulse ticks.
     pub fn snapshot_fingerprint(&self) -> Option<&str> {
         self.last_body.as_deref()
+    }
+
+    fn visible_rows(&self) -> Vec<TreeRow> {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return Vec::new();
+        };
+        let agents = agent_rows(snapshot);
+        let panes = snapshot.get("panes").and_then(Value::as_array);
+        let mut rows = Vec::new();
+
+        for ws in self.workspaces() {
+            let mut pane_ids: Vec<String> = self
+                .tabs(&ws.id)
+                .into_iter()
+                .flat_map(|tab| tab.pane_ids)
+                .collect();
+            let mut seen = HashSet::new();
+            pane_ids.retain(|id| seen.insert(id.clone()));
+            let group: Vec<&AgentRow> = pane_ids
+                .iter()
+                .filter_map(|id| agents.iter().find(|agent| &agent.pane_id == id))
+                .collect();
+            let collapsed = self.collapsed_workspaces.contains(&ws.id);
+            rows.push(TreeRow::Header {
+                workspace: ws,
+                pane_count: group.len(),
+                collapsed,
+            });
+            if collapsed {
+                continue;
+            }
+            for agent in group {
+                let subtitle = pane_field(panes, &agent.pane_id, "cwd")
+                    .or_else(|| pane_field(panes, &agent.pane_id, "shell_path"))
+                    .or_else(|| pane_field(panes, &agent.pane_id, "shell"))
+                    .unwrap_or_default()
+                    .to_string();
+                let brand = if pane_field(panes, &agent.pane_id, "pane_kind") == Some("shell") {
+                    IconName::SquareTerminal
+                } else {
+                    IconName::Bot
+                };
+                rows.push(TreeRow::Pane {
+                    agent: agent.clone(),
+                    subtitle,
+                    brand,
+                });
+            }
+        }
+        rows
+    }
+
+    fn toggle_workspace(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.collapsed_workspaces.remove(id) {
+            self.collapsed_workspaces.insert(id.to_string());
+        }
+        cx.notify();
+    }
+
+    fn status_indicator(
+        &self,
+        pane_id: &str,
+        status: AgentStatus,
+        theme: &Theme,
+    ) -> gpui_kit::AnyElement {
+        let base = div()
+            .id(format!("sidebar-pane-{pane_id}-status"))
+            .test_support()
+            .role(gpui_kit::Role::Image)
+            .aria_label(session_status::badge_word(session_status::state_of(status)))
+            .size(px(DOT_SIZE_PX))
+            .rounded_full();
+        match status {
+            AgentStatus::Idle => base
+                .border_1()
+                .border_color(theme.status_idle)
+                .into_any_element(),
+            _ => base
+                .bg(Self::status_color(status, theme, self.pulse_phase))
+                .into_any_element(),
+        }
+    }
+
+    fn render_tree_row(
+        &self,
+        row: &TreeRow,
+        rail: bool,
+        theme: &Theme,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        match row {
+            TreeRow::Header {
+                workspace,
+                pane_count,
+                collapsed,
+            } => {
+                let id = workspace.id.clone();
+                let chevron = if *collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                };
+                let count = format!(
+                    "{pane_count} {}",
+                    if *pane_count == 1 { "pane" } else { "panes" }
+                );
+                div()
+                    .id(format!("sidebar-workspace-{}", workspace.id))
+                    .test_support()
+                    .h(px(HEADER_ROW_PX))
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2 * scale))
+                    .px(px(SPACE_2 * scale))
+                    .role(gpui_kit::Role::Button)
+                    .aria_expanded(!collapsed)
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_workspace(&id, cx)))
+                    .child(
+                        Icon::new(chevron)
+                            .size(px(12.0))
+                            .text_color(theme.token_text_muted()),
+                    )
+                    .child(
+                        div()
+                            .id(format!("sidebar-workspace-{}-label", workspace.id))
+                            .test_support()
+                            .aria_label(workspace.label.clone())
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .text_size(px(theme.font_ui_secondary()))
+                            .text_color(theme.text_primary())
+                            .child(if rail {
+                                String::new()
+                            } else {
+                                workspace.label.clone()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id(format!("sidebar-workspace-{}-count", workspace.id))
+                            .test_support()
+                            .aria_label(count)
+                            .flex_none()
+                            .text_size(px(theme.font_ui_secondary()))
+                            .text_color(theme.token_text_muted())
+                            .child(if rail {
+                                String::new()
+                            } else {
+                                pane_count.to_string()
+                            }),
+                    )
+                    .child(
+                        Button::new(format!("sidebar-workspace-{}-create", workspace.id))
+                            .ghost()
+                            .icon(IconName::Plus)
+                            .tooltip("New pane")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(SidebarEvent::NewWorkspace);
+                                cx.notify();
+                            })),
+                    )
+            }
+            TreeRow::Pane {
+                agent,
+                subtitle,
+                brand,
+            } => {
+                let pane_id = agent.pane_id.clone();
+                let needs_input = matches!(agent.status, AgentStatus::Blocked);
+                div()
+                    .id(format!("sidebar-pane-{}", agent.pane_id))
+                    .test_support()
+                    .h(px(PANE_ROW_PX))
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .gap(px(SPACE_1 * scale))
+                    .px(px(SPACE_3 * scale))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.focus_pane(&pane_id);
+                        cx.emit(SidebarEvent::PaneFocused(pane_id.clone()));
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(SPACE_2 * scale))
+                            .child(self.status_indicator(&agent.pane_id, agent.status, theme))
+                            .child(
+                                div()
+                                    .id(format!("sidebar-pane-{}-brand", agent.pane_id))
+                                    .test_support()
+                                    .aria_label(agent.agent_name.clone())
+                                    .child(
+                                        Icon::new(*brand)
+                                            .size(px(ICON_SIZE_PX))
+                                            .text_color(theme.token_text_muted()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id(format!("sidebar-pane-{}-title", agent.pane_id))
+                                    .test_support()
+                                    .aria_label(agent.title.clone())
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .text_size(px(theme.font_ui_body()))
+                                    .text_color(theme.text_primary())
+                                    .child(if rail {
+                                        String::new()
+                                    } else {
+                                        agent.title.clone()
+                                    }),
+                            )
+                            .when(needs_input, |el| {
+                                el.child(
+                                    div()
+                                        .id(format!("sidebar-pane-{}-badge", agent.pane_id))
+                                        .test_support()
+                                        .flex_none()
+                                        .text_size(px(theme.font_ui_secondary()))
+                                        .text_color(theme.state_attention())
+                                        .child("Needs Input"),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id(format!("sidebar-pane-{}-subtitle", agent.pane_id))
+                            .test_support()
+                            .aria_label(subtitle.clone())
+                            .w_full()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .font_family(MONO)
+                            .text_size(px(theme.font_ui_secondary()))
+                            .text_color(theme.token_text_muted())
+                            .child(if rail {
+                                String::new()
+                            } else {
+                                subtitle.clone()
+                            }),
+                    )
+            }
+        }
     }
 
     /// Workspaces of the current snapshot, in engine order. Each entry points
@@ -522,430 +792,6 @@ impl WorkspaceSidebar {
             )
     }
 
-    /// A workspace rendered as a rounded session card: agent mark and project
-    /// on top, title and cwd/agent below, status word and dot on the right.
-    /// Clicking the card focuses its pane; the close control stops propagation.
-    fn render_workspace_row(
-        &self,
-        rail: bool,
-        ws: &WorkspaceEntry,
-        theme: &Theme,
-        scale: f32,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let is_chosen = ws.focused;
-        let session_running = matches!(ws.status, AgentStatus::Working | AgentStatus::Blocked);
-        let sidebar_entity = cx.entity();
-        let session_label = ws.label.clone();
-        let mark = Self::agent_mark(&ws.agent, theme, false);
-        let pane_id = ws.focus_pane.clone();
-        let ws_id = ws.id.clone();
-        let project = if rail {
-            String::new()
-        } else {
-            ws.agent.clone()
-        };
-        let title = if rail {
-            String::new()
-        } else {
-            ws.label.clone()
-        };
-        let sub = if rail {
-            String::new()
-        } else {
-            ws.cwd.clone().unwrap_or_else(|| ws.agent.clone())
-        };
-        let status_area = Self::status_area(ws.status, rail, theme);
-        let mut row = Button::new(format!("sidebar-workspace-{}", ws.id))
-            .custom(
-                ButtonCustomVariant::new(cx)
-                    .color(if is_chosen {
-                        theme.selected_bg().into()
-                    } else {
-                        Theme::transparent().into()
-                    })
-                    .hover(if is_chosen {
-                        theme.selected_bg().into()
-                    } else {
-                        theme.hover_bg().into()
-                    }),
-            )
-            .w_full()
-            .h(px(88.0 * scale))
-            .px(px(theme.space_3()))
-            .py(px(theme.space_3()))
-            .rounded(px(theme.radius_card()))
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(theme.space_1()))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(theme.space_2()))
-                            .child(mark)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .truncate()
-                                    .text_size(px(theme.font_ui_secondary()))
-                                    .text_color(theme.token_text_muted())
-                                    .child(project),
-                            )
-                            .child(status_area)
-                            .child(if rail {
-                                div()
-                                    .id(format!("sidebar-workspace-{}-rail", ws.id))
-                                    .into_any_element()
-                            } else {
-                                Button::new(format!("sidebar-workspace-{}-close", ws.id))
-                                    .ghost()
-                                    .child(
-                                        Icon::new(IconName::X)
-                                            .size(px(ICON_SIZE_PX))
-                                            .text_color(theme.text_faint),
-                                    )
-                                    .tooltip("Close session")
-                                    .min_h(px(TOUCH_TARGET_PX))
-                                    .min_w(px(TOUCH_TARGET_PX))
-                                    .on_click(cx.listener(move |_this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        if session_running {
-                                            let pane_id = ws_id.clone();
-                                            let sidebar = sidebar_entity.clone();
-                                            let label = session_label.clone();
-                                            window.open_alert_dialog(cx, move |alert, _, _| {
-                                                let sidebar = sidebar.clone();
-                                                let pane_id = pane_id.clone();
-                                                alert
-                                                    .title("Close running session?")
-                                                    .description(format!(
-                                                        "{label} is still running. Closing it will terminate the agent."
-                                                    ))
-                                                    .confirm()
-                                                    .ok_text("Close")
-                                                    .on_ok(move |_, _, app| {
-                                                        sidebar.update(app, |_view, view_cx| {
-                                                            view_cx.emit(
-                                                                SidebarEvent::CloseWorkspace(
-                                                                    pane_id.clone(),
-                                                                ),
-                                                            );
-                                                        });
-                                                        true
-                                                    })
-                                            });
-                                        } else {
-                                            cx.emit(SidebarEvent::CloseWorkspace(ws_id.clone()));
-                                        }
-                                        cx.notify();
-                                    }))
-                                    .into_any_element()
-                            })
-                            .child(
-                                div()
-                                    .size(px(DOT_SIZE_PX))
-                                    .rounded_full()
-                                    .bg(Self::status_color(ws.status, theme, self.pulse_phase))
-                                    .id(format!("sidebar-workspace-{}-status", ws.id)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .truncate()
-                            .text_size(px(theme.font_ui_body()))
-                            .font_weight(gpui_kit::FontWeight::MEDIUM)
-                            .text_color(theme.text_primary())
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .truncate()
-                            .text_size(px(theme.font_ui_secondary()))
-                            .text_color(theme.token_text_muted())
-                            .child(sub),
-                    ),
-            );
-
-        if let Some(pane_id) = pane_id {
-            row = row.on_click(cx.listener(move |this, _, _, cx| {
-                this.focus_pane(&pane_id);
-                cx.emit(SidebarEvent::PaneFocused(pane_id.clone()));
-                cx.notify();
-            }));
-        }
-        row
-    }
-
-    /// An agent rendered as a session card: project, title and context split
-    /// across three lines, written status word and a non-rose status dot.
-    /// Clicking focuses the agent's pane.
-    fn render_agent_row(
-        &self,
-        rail: bool,
-        agent: &AgentRow,
-        duplicates: &HashSet<(String, String)>,
-        theme: &Theme,
-        scale: f32,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let pane_id = agent.pane_id.clone();
-        let label = session_status::row_label(
-            &agent.agent_name,
-            &agent.title,
-            duplicates.contains(&(agent.workspace_id.clone(), agent.agent_name.clone())),
-        );
-        let mark = Self::agent_mark(&label, theme, false);
-        let (project, sub) = match agent.context.split_once(" · ") {
-            Some((project, rest)) => (project.to_string(), rest.to_string()),
-            None => (agent.context.clone(), String::new()),
-        };
-        let (project, sub) = if rail {
-            (String::new(), String::new())
-        } else {
-            (project, sub)
-        };
-        let title = if rail { String::new() } else { label };
-        let status_area = Self::status_area(agent.status, rail, theme);
-        Button::new(format!("sidebar-pane-{}", agent.pane_id))
-            .custom(
-                ButtonCustomVariant::new(cx)
-                    .color(if agent.selected {
-                        theme.selected_bg().into()
-                    } else {
-                        Theme::transparent().into()
-                    })
-                    .hover(if agent.selected {
-                        theme.selected_bg().into()
-                    } else {
-                        theme.hover_bg().into()
-                    }),
-            )
-            .w_full()
-            .h(px(88.0 * scale))
-            .px(px(theme.space_3()))
-            .py(px(theme.space_3()))
-            .rounded(px(theme.radius_card()))
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(theme.space_1()))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(theme.space_2()))
-                            .child(mark)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .truncate()
-                                    .text_size(px(theme.font_ui_secondary()))
-                                    .text_color(theme.token_text_muted())
-                                    .child(project),
-                            )
-                            .child(status_area)
-                            .child(
-                                div()
-                                    .size(px(DOT_SIZE_PX))
-                                    .rounded_full()
-                                    .bg(Self::status_color(agent.status, theme, self.pulse_phase))
-                                    .id(format!("sidebar-pane-{}-status", agent.pane_id)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .truncate()
-                            .text_size(px(theme.font_ui_body()))
-                            .font_weight(gpui_kit::FontWeight::MEDIUM)
-                            .text_color(theme.text_primary())
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .truncate()
-                            .text_size(px(theme.font_ui_secondary()))
-                            .text_color(theme.token_text_muted())
-                            .child(sub),
-                    ),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.focus_pane(&pane_id);
-                cx.emit(SidebarEvent::PaneFocused(pane_id.clone()));
-                cx.notify();
-            }))
-    }
-
-    /// The single agent mark used by every sidebar row: one token-sized chip
-    /// whose letter is derived from the row's agent or label.
-    fn agent_mark(source: &str, theme: &Theme, compact: bool) -> impl IntoElement {
-        let mark = source
-            .chars()
-            .next()
-            .unwrap_or('?')
-            .to_ascii_uppercase()
-            .to_string();
-        let chip = if compact {
-            AVATAR_SIZE_COMPACT_PX
-        } else {
-            AVATAR_SIZE_PX
-        };
-        div()
-            .flex_none()
-            .size(px(chip))
-            .rounded(px(theme.radius_control()))
-            .bg(theme.hover_bg())
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(Avatar::new().name(mark).with_size(px(MARK_SIZE_PX)))
-    }
-
-    /// The trailing status of a session card: a tinted "Waiting" pill when the
-    /// agent is blocked, otherwise the plain status word in dim text.
-    fn status_area(status: AgentStatus, rail: bool, theme: &Theme) -> gpui_kit::AnyElement {
-        let state = session_status::state_of(status);
-        let word = session_status::badge_word(state);
-        if state == SessionState::NeedsInput {
-            div()
-                .flex_none()
-                .px(px(theme.space_2()))
-                .py(px(theme.space_1()))
-                .rounded(px(theme.radius_control()))
-                .bg(theme.status_blocked_tint)
-                .text_size(px(theme.font_ui_secondary()))
-                .text_color(session_status::badge_color(state, theme, 0))
-                .child(if rail {
-                    String::new()
-                } else {
-                    word.to_string()
-                })
-                .into_any_element()
-        } else {
-            div()
-                .flex_none()
-                .text_size(px(theme.font_ui_secondary()))
-                .text_color(theme.token_text_dim())
-                .child(if rail {
-                    String::new()
-                } else {
-                    word.to_string()
-                })
-                .into_any_element()
-        }
-    }
-
-    fn render_status_section(
-        &self,
-        rail: bool,
-        working: &[&AgentRow],
-        settled: &[&AgentRow],
-        duplicates: &HashSet<(String, String)>,
-        theme: &Theme,
-        scale: f32,
-    ) -> impl IntoElement {
-        let mut section = div()
-            .id("sidebar-status-section")
-            .flex()
-            .flex_col()
-            .flex_shrink_0();
-
-        for (name, rows, expandable) in [("Working", working, true), ("Settled", settled, false)] {
-            let chevron = if expandable {
-                Icon::new(IconName::ChevronRight)
-                    .size(theme.scaled_icon_size())
-                    .text_color(theme.text_faint)
-                    .into_any_element()
-            } else {
-                div().into_any_element()
-            };
-            section = section.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SPACE_2 * scale))
-                    .h(px(TOUCH_TARGET_PX))
-                    .px(px(SPACE_4 * scale))
-                    .text_size(px(12.0 * scale))
-                    .text_color(theme.text_muted)
-                    .child(if rail {
-                        String::new()
-                    } else {
-                        name.to_string()
-                    })
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(12.0 * scale))
-                            .text_color(theme.token_text_dim())
-                            .child(rows.len().to_string()),
-                    )
-                    .child(chevron),
-            );
-
-            for agent in rows {
-                let state = session_status::state_of(agent.status);
-                let label = session_status::row_label(
-                    &agent.agent_name,
-                    &agent.title,
-                    duplicates.contains(&(agent.workspace_id.clone(), agent.agent_name.clone())),
-                );
-                let mark = Self::agent_mark(&label, theme, true);
-                section = section.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(SPACE_2 * scale))
-                        .h(px(TOUCH_TARGET_PX))
-                        .pl(px(ROW_SUB_INDENT * scale))
-                        .pr(px(SPACE_4 * scale))
-                        .text_size(px(12.0 * scale))
-                        .text_color(theme.text)
-                        .child(mark)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .truncate()
-                                .text_color(theme.token_text_muted())
-                                .child(if rail { String::new() } else { label }),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(11.0 * scale))
-                                .text_color(session_status::badge_color(
-                                    state,
-                                    theme,
-                                    self.pulse_phase,
-                                ))
-                                .child(if rail {
-                                    String::new()
-                                } else {
-                                    session_status::badge_word(state).to_string()
-                                }),
-                        ),
-                );
-            }
-        }
-        section
-    }
-
     /// The 40px bottom icon bar.
     fn render_bottom_bar(&self, theme: &Theme, scale: f32) -> impl IntoElement {
         div()
@@ -1014,58 +860,52 @@ impl Render for WorkspaceSidebar {
         let theme = Theme::current();
         let scale = theme.density_scale();
         let rail = ShellLayout::for_width(f32::from(window.bounds().size.width)).rail;
-        let workspaces = self.workspaces();
-        let agents = self.snapshot.as_ref().map(agent_rows).unwrap_or_default();
-
-        let duplicates = session_status::duplicate_names(&agents);
-        let states: Vec<SessionState> = agents
-            .iter()
-            .map(|agent| session_status::state_of(agent.status))
-            .collect();
-        let (working, settled): (Vec<&AgentRow>, Vec<&AgentRow>) =
-            agents.iter().partition(|agent| {
-                session_status::group(session_status::state_of(agent.status))
-                    == session_status::StatusGroup::Working
-            });
-        debug_assert_eq!(
-            orion_core::session_state::working_count(&states),
-            working.len()
+        let rows = self.visible_rows();
+        let empty = rows.is_empty();
+        let sizes = Rc::new(
+            rows.iter()
+                .map(|row| match row {
+                    TreeRow::Header { .. } => size(px(0.0), px(HEADER_ROW_PX)),
+                    TreeRow::Pane { .. } => size(px(0.0), px(PANE_ROW_PX)),
+                })
+                .collect::<Vec<_>>(),
         );
-        debug_assert_eq!(
-            orion_core::session_state::settled_count(&states),
-            settled.len()
-        );
-
-        let mut sessions =
-            div()
-                .id("sidebar-sessions")
-                .flex_1()
-                .min_h(px(0.0))
-                .overflow_y_scroll()
-                .pb(px(SPACE_2 * scale))
-                .children(
-                    workspaces
-                        .iter()
-                        .map(|ws| self.render_workspace_row(rail, ws, &theme, scale, cx)),
+        let tree = div()
+            .id("sidebar-tree-viewport")
+            .test_support()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(
+                v_virtual_list(
+                    cx.entity(),
+                    "sidebar-tree",
+                    sizes,
+                    move |this, range, _window, cx| {
+                        range
+                            .filter_map(|ix| rows.get(ix))
+                            .map(|row| {
+                                this.render_tree_row(row, rail, &theme, scale, cx)
+                                    .into_any_element()
+                            })
+                            .collect()
+                    },
                 )
-                .children(agents.iter().map(|agent| {
-                    self.render_agent_row(rail, agent, &duplicates, &theme, scale, cx)
-                }));
-
-        if workspaces.is_empty() {
-            sessions = sessions.child(
-                div()
-                    .px(px(SPACE_4 * scale))
-                    .py(px(SPACE_2 * scale))
-                    .text_size(px(12.0 * scale))
-                    .text_color(theme.text_faint)
-                    .child(if rail {
-                        String::new()
-                    } else {
-                        "No workspaces yet — open a workspace to begin.".to_string()
-                    }),
-            );
-        }
+                .track_scroll(&self.scroll),
+            )
+            .when(empty, |el| {
+                el.child(
+                    div()
+                        .px(px(SPACE_4 * scale))
+                        .py(px(SPACE_2 * scale))
+                        .text_size(px(12.0 * scale))
+                        .text_color(theme.text_faint)
+                        .child(if rail {
+                            String::new()
+                        } else {
+                            "No workspaces yet — open a workspace to begin.".to_string()
+                        }),
+                )
+            });
 
         div()
             .id("workspace-sidebar")
@@ -1080,8 +920,7 @@ impl Render for WorkspaceSidebar {
             .rounded(px(theme.radius_panel()))
             .child(self.render_titlebar(rail, &theme, scale))
             .child(self.render_search_row(rail, &theme, scale, cx))
-            .child(sessions)
-            .child(self.render_status_section(rail, &working, &settled, &duplicates, &theme, scale))
+            .child(tree)
             .child(self.render_bottom_bar(&theme, scale))
     }
 }
@@ -1090,6 +929,83 @@ impl Render for WorkspaceSidebar {
 mod tests {
     use super::*;
     use gpui_kit::rgb;
+    use gpui_kit::test::{TestQueryExt, TestWindowExt};
+    use orion_core::runtime::PaneHandle;
+    use orion_core::FrameSink;
+
+    struct TreeFixture {
+        snapshot: Value,
+    }
+
+    impl Runtime for TreeFixture {
+        fn identity(&self) -> Value {
+            json!({ "version": "fixture", "protocol": 1 })
+        }
+
+        fn http(&self, method: &str, path: &str, _body: &Value) -> (u16, Value) {
+            if method == "GET" && path == "/api/session" {
+                return (200, json!({ "snapshot": self.snapshot }));
+            }
+            (200, Value::Null)
+        }
+
+        fn pane_by_id(&self, _pane_id: &str) -> Option<Arc<dyn PaneHandle>> {
+            None
+        }
+
+        fn connect(&self, _sink: FrameSink) -> String {
+            "fixture".to_string()
+        }
+
+        fn send_to(&self, _connection: &str, _frame: Value) {}
+
+        fn disconnect(&self, _connection: &str) {}
+
+        fn dispatch_from(
+            &self,
+            _connection: Option<&str>,
+            _request: &Value,
+        ) -> std::result::Result<Option<Value>, String> {
+            Ok(None)
+        }
+
+        fn snapshot_value(&self) -> Value {
+            self.snapshot.clone()
+        }
+
+        fn restore(&self) {}
+    }
+
+    fn tree_snapshot() -> Value {
+        json!({
+            "workspaces": [
+                { "workspace_id": "ws-1", "label": "Orion", "active_tab_id": "tab-1",
+                  "focused": true, "agent_status": "idle" },
+                { "workspace_id": "ws-2", "label": "Side project", "active_tab_id": "tab-2",
+                  "focused": false, "agent_status": "idle" },
+            ],
+            "tabs": [
+                { "tab_id": "tab-1", "workspace_id": "ws-1", "label": "main",
+                  "pane_ids": ["p1", "p2"], "active_pane_id": "p1", "focused": true,
+                  "agent_status": "working" },
+                { "tab_id": "tab-2", "workspace_id": "ws-2", "label": "side",
+                  "pane_ids": ["p3"], "active_pane_id": "p3", "focused": false,
+                  "agent_status": "done" },
+            ],
+            "panes": [
+                { "pane_id": "p1", "workspace_id": "ws-1", "tab_id": "tab-1",
+                  "label": "Build", "display_agent": "claude", "cwd": "/work/orion",
+                  "agent_status": "working", "focused": true },
+                { "pane_id": "p2", "workspace_id": "ws-1", "tab_id": "tab-1",
+                  "label": "Review", "display_agent": "codex", "cwd": "/work/orion/docs",
+                  "agent_status": "blocked", "focused": false },
+                { "pane_id": "p3", "workspace_id": "ws-2", "tab_id": "tab-2",
+                  "label": "Deploy", "display_agent": "opencode", "shell_path": "/bin/bash",
+                  "agent_status": "done", "focused": false },
+            ],
+            "focused_pane_id": "p1",
+        })
+    }
 
     crate::orion_test!(
         fn sidebar_renders_empty_state_without_panic(cx: &mut gpui_kit::TestAppContext) {
@@ -1250,6 +1166,210 @@ mod tests {
                 events.borrow()
             );
             drop(subscription);
+        }
+    );
+
+    fn status_snapshot() -> Value {
+        let panes = [
+            ("p1", "idle"),
+            ("p2", "working"),
+            ("p3", "blocked"),
+            ("p4", "done"),
+            ("p5", "error"),
+            ("p6", "unknown"),
+        ];
+        json!({
+            "workspaces": [{
+                "workspace_id": "ws-1", "label": "Statuses", "active_tab_id": "tab-1",
+            }],
+            "tabs": [{
+                "tab_id": "tab-1", "workspace_id": "ws-1",
+                "pane_ids": panes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            }],
+            "panes": panes.iter().map(|(id, status)| json!({
+                "pane_id": id, "workspace_id": "ws-1", "tab_id": "tab-1",
+                "label": id, "agent_status": status,
+            })).collect::<Vec<_>>(),
+            "focused_pane_id": "p1",
+        })
+    }
+
+    crate::orion_test!(
+        fn every_status_uses_the_shared_accessible_name(cx: &mut gpui_kit::TestAppContext) {
+            let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture {
+                snapshot: status_snapshot(),
+            });
+            let (root, cx) = cx.add_window_view(|_, cx| WorkspaceSidebar::new(cx));
+            cx.update(|_, app| root.update(app, |view, _cx| view.attach(Arc::clone(&runtime))));
+            cx.update(|window, cx| window.render_frame(cx));
+
+            for label in ["Idle", "Working", "Waiting", "Done", "Error", "Starting"] {
+                let _ = cx.update(|window, _| window.find_by_label(label));
+            }
+        }
+    );
+
+    fn open_tree_fixture<'a>(
+        cx: &'a mut gpui_kit::TestAppContext,
+    ) -> (
+        Entity<WorkspaceSidebar>,
+        &'a mut gpui_kit::VisualTestContext,
+    ) {
+        let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture {
+            snapshot: tree_snapshot(),
+        });
+        let (root, cx) = cx.add_window_view(|_, cx| WorkspaceSidebar::new(cx));
+        cx.update(|_, app| root.update(app, |view, _cx| view.attach(Arc::clone(&runtime))));
+        (root, cx)
+    }
+
+    crate::orion_test!(
+        fn workspaces_group_their_panes_and_collapse_together(cx: &mut gpui_kit::TestAppContext) {
+            let (_root, cx) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+
+            for id in [
+                "sidebar-workspace-ws-1",
+                "sidebar-workspace-ws-2",
+                "sidebar-pane-p1",
+                "sidebar-pane-p2",
+                "sidebar-pane-p3",
+            ] {
+                assert!(
+                    cx.update(|window, _| window.try_find(id).is_some()),
+                    "{id} is in the tree"
+                );
+            }
+            let _ = cx.update(|window, _| window.find_by_label("2 panes"));
+            let _ = cx.update(|window, _| window.find_by_label("1 pane"));
+
+            cx.update(|window, cx| window.click("sidebar-workspace-ws-1-create", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some()),
+                "the create control does not collapse its group"
+            );
+
+            cx.update(|window, cx| window.click("sidebar-workspace-ws-1", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()),
+                "collapsing a workspace hides its panes"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p2").is_none()),
+                "every pane in the group is hidden"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p3").is_some()),
+                "another workspace stays expanded"
+            );
+            let _ = cx.update(|window, _| window.find_by_label("2 panes"));
+
+            cx.update(|window, cx| window.click("sidebar-workspace-ws-1", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some()),
+                "the header expands its group again"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn pane_rows_name_status_and_show_a_monospace_subtitle(cx: &mut gpui_kit::TestAppContext) {
+            let (_root, cx) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+
+            for label in ["Working", "Waiting", "Done", "/work/orion", "/bin/bash"] {
+                let _ = cx.update(|window, _| window.find_by_label(label));
+            }
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p2-badge").is_some()),
+                "the needs-input badge is present"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-status-section").is_none()),
+                "the old Working and Settled sections are gone"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1-status").is_some()),
+                "the left indicator owns the status"
+            );
+        }
+    );
+
+    struct MountHarness {
+        sidebar: Entity<WorkspaceSidebar>,
+        mounted: bool,
+    }
+
+    impl Render for MountHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("mount-harness")
+                .when(self.mounted, |el| el.child(self.sidebar.clone()))
+        }
+    }
+
+    crate::orion_test!(
+        fn collapse_survives_sidebar_hide_and_show(cx: &mut gpui_kit::TestAppContext) {
+            let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture {
+                snapshot: tree_snapshot(),
+            });
+            let (root, cx) = cx.add_window_view(|_, cx| MountHarness {
+                sidebar: cx.new(WorkspaceSidebar::new),
+                mounted: true,
+            });
+            let sidebar = cx.update(|_, app| root.read(app).sidebar.clone());
+            cx.update(|_, app| {
+                sidebar.update(app, |view, _cx| view.attach(Arc::clone(&runtime)));
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            cx.update(|window, cx| window.click("sidebar-workspace-ws-1", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()),
+                "the header collapsed the group"
+            );
+
+            for mounted in [false, true] {
+                cx.update(|_, app| {
+                    root.update(app, |harness, cx| {
+                        harness.mounted = mounted;
+                        cx.notify();
+                    });
+                });
+                cx.update(|window, cx| window.render_frame(cx));
+            }
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()),
+                "the collapse choice survives a hide/show cycle"
+            );
+
+            cx.update(|window, cx| window.click("sidebar-workspace-ws-1", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some()),
+                "the header still expands the group"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn tree_rows_use_precomputed_header_and_pane_heights(cx: &mut gpui_kit::TestAppContext) {
+            let (_root, cx) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+
+            let header = cx.update(|window, _| {
+                window
+                    .try_find("sidebar-workspace-ws-1")
+                    .expect("the header")
+                    .bounds()
+            });
+            let pane = cx.update(|window, _| {
+                window
+                    .try_find("sidebar-pane-p1")
+                    .expect("the pane")
+                    .bounds()
+            });
+            assert_eq!(f32::from(header.size.height), 30.0);
+            assert_eq!(f32::from(pane.size.height), 48.0);
         }
     );
 }
