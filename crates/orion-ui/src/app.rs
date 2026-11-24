@@ -1927,8 +1927,6 @@ impl Render for OrionApp {
         let window_w = f32::from(window.bounds().size.width);
         let layout = ShellLayout::for_width(window_w);
         let sidebar_w = layout.sidebar_width_px;
-        self.workspace_sidebar
-            .update(cx, |view, _cx| view.set_rail(layout.rail));
 
         // Shell state is cached from session events (see `refresh_shell_cache`);
         // the frame path only reads it. Panes that left the Session do not keep

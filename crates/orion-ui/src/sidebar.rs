@@ -23,7 +23,7 @@
 
 use crate::agents::{agent_rows, AgentRow};
 use crate::session_status;
-use crate::terminal_tree::{status_token, terminal_rows, TerminalRow, TerminalSource};
+use crate::shell_model::ShellLayout;
 use crate::theme::{
     Theme, AVATAR_SIZE_COMPACT_PX, AVATAR_SIZE_PX, DOT_SIZE_PX, ICON_SIZE_PX, MARK_SIZE_PX,
     TOUCH_TARGET_PX,
@@ -49,7 +49,6 @@ use std::time::Duration;
 // repeating bare literals across the view. Radii are the §4 chip/control tokens.
 const SPACE_1: f32 = 4.0; // --space-1: tight icon and control gaps
 const SPACE_2: f32 = 8.0; // --space-2: row and menu gaps
-const SPACE_3: f32 = 12.0; // --space-3: control padding
 const SPACE_4: f32 = 16.0; // --space-4: section padding
 const RADIUS_SM: f32 = 6.0; // --radius-sm: chips and inner controls
 const ROW_SUB_INDENT: f32 = 28.0; // avatar (20) + row gap (8)
@@ -103,15 +102,8 @@ pub struct WorkspaceSidebar {
     engine: Option<Arc<dyn Runtime>>,
     snapshot: Option<Value>,
     last_body: Option<String>,
-    /// Where the runtime's terminals come from, once the shell wires it up.
-    terminal_source: Option<Arc<dyn TerminalSource>>,
-    /// The runtime's last reported terminals (`{"terminals": [...]}`).
-    terminals: Option<Value>,
-    last_terminals: Option<String>,
     focus_handle: FocusHandle,
-    row_seq: usize,
     pulse_phase: u32,
-    rail: bool,
 }
 
 impl WorkspaceSidebar {
@@ -120,41 +112,17 @@ impl WorkspaceSidebar {
             engine: None,
             snapshot: None,
             last_body: None,
-            terminal_source: None,
-            terminals: None,
-            last_terminals: None,
             focus_handle: cx.focus_handle().tab_stop(true),
-            row_seq: 0,
             pulse_phase: 0,
-            rail: false,
         };
         view.start_poll(cx);
         view.start_pulse(cx);
         view
     }
 
-    fn next_row_id(&mut self) -> usize {
-        let id = self.row_seq;
-        self.row_seq += 1;
-        id
-    }
-
     pub fn attach(&mut self, engine: Arc<dyn Runtime>) {
         self.engine = Some(engine);
         self.refresh();
-    }
-
-    /// Where the sidebar reads the runtime's terminals from.
-    ///
-    /// The runtime is a separate process the shell has not wired up yet; until
-    /// it is, the section stays hidden rather than showing an empty header.
-    pub fn attach_terminals(&mut self, source: Arc<dyn TerminalSource>) {
-        self.terminal_source = Some(source);
-        self.refresh_terminals();
-    }
-
-    pub fn set_rail(&mut self, rail: bool) {
-        self.rail = rail;
     }
 
     /// The snapshot body (`snapshot` object) backing the current render.
@@ -336,12 +304,10 @@ impl WorkspaceSidebar {
         self.refresh();
     }
 
-    /// Returns whether either source actually changed, so the poll can notify
+    /// Returns whether the session actually changed, so the poll can notify
     /// only on a real update instead of relying on the pulse to repaint.
     pub fn refresh(&mut self) -> bool {
-        let session_changed = self.refresh_session();
-        let terminals_changed = self.refresh_terminals();
-        session_changed || terminals_changed
+        self.refresh_session()
     }
 
     fn refresh_session(&mut self) -> bool {
@@ -359,30 +325,6 @@ impl WorkspaceSidebar {
         self.last_body = Some(encoded);
         self.snapshot = body.get("snapshot").cloned();
         true
-    }
-
-    /// The terminal source is polled on the same tick as the session. A source
-    /// that cannot answer, or an empty runtime, is an empty list, not an error.
-    fn refresh_terminals(&mut self) -> bool {
-        let Some(source) = self.terminal_source.clone() else {
-            return false;
-        };
-        let body = source.terminals();
-        let encoded = body.as_ref().map(Value::to_string);
-        if self.last_terminals == encoded {
-            return false;
-        }
-        self.last_terminals = encoded;
-        self.terminals = body;
-        true
-    }
-
-    /// The runtime's terminals as tree rows; empty when nothing is attached.
-    fn runtime_terminals(&self) -> Vec<TerminalRow> {
-        self.terminals
-            .as_ref()
-            .map(terminal_rows)
-            .unwrap_or_default()
     }
 
     fn start_poll(&self, cx: &mut Context<Self>) {
@@ -446,20 +388,6 @@ impl WorkspaceSidebar {
                 }
             }
         }
-        if let Some(terminals) = self.terminals.as_ref() {
-            let rows = terminals
-                .as_array()
-                .or_else(|| terminals.get("terminals").and_then(Value::as_array));
-            if let Some(rows) = rows {
-                if rows.iter().any(|row| {
-                    status_token(row.get("status").and_then(Value::as_str))
-                        .and_then(AgentStatus::from_wire)
-                        .is_some_and(is_animating)
-                }) {
-                    return true;
-                }
-            }
-        }
         false
     }
 
@@ -472,7 +400,7 @@ impl WorkspaceSidebar {
     }
 
     /// The 40px titlebar: the brand mark, the "Orion" wordmark and two trailing decorative glyphs.
-    fn render_titlebar(&self, theme: &Theme, scale: f32) -> impl IntoElement {
+    fn render_titlebar(&self, rail: bool, theme: &Theme, scale: f32) -> impl IntoElement {
         div()
             .id("sidebar-titlebar")
             .flex()
@@ -502,7 +430,7 @@ impl WorkspaceSidebar {
                     .text_size(px(14.0 * scale))
                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .text_color(theme.text_strong)
-                    .child(if self.rail {
+                    .child(if rail {
                         String::new()
                     } else {
                         "Orion".to_string()
@@ -531,6 +459,7 @@ impl WorkspaceSidebar {
     /// are the reference's quiet affordances.
     fn render_search_row(
         &self,
+        rail: bool,
         theme: &Theme,
         scale: f32,
         cx: &mut Context<Self>,
@@ -556,7 +485,7 @@ impl WorkspaceSidebar {
                     .truncate()
                     .text_size(px(13.0 * scale))
                     .text_color(theme.token_text_dim())
-                    .child(if self.rail {
+                    .child(if rail {
                         String::new()
                     } else {
                         "Search".to_string()
@@ -597,7 +526,8 @@ impl WorkspaceSidebar {
     /// on top, title and cwd/agent below, status word and dot on the right.
     /// Clicking the card focuses its pane; the close control stops propagation.
     fn render_workspace_row(
-        &mut self,
+        &self,
+        rail: bool,
         ws: &WorkspaceEntry,
         theme: &Theme,
         scale: f32,
@@ -610,23 +540,23 @@ impl WorkspaceSidebar {
         let mark = Self::agent_mark(&ws.agent, theme, false);
         let pane_id = ws.focus_pane.clone();
         let ws_id = ws.id.clone();
-        let project = if self.rail {
+        let project = if rail {
             String::new()
         } else {
             ws.agent.clone()
         };
-        let title = if self.rail {
+        let title = if rail {
             String::new()
         } else {
             ws.label.clone()
         };
-        let sub = if self.rail {
+        let sub = if rail {
             String::new()
         } else {
             ws.cwd.clone().unwrap_or_else(|| ws.agent.clone())
         };
-        let status_area = Self::status_area(ws.status, self.rail, theme);
-        let mut row = Button::new(self.next_row_id())
+        let status_area = Self::status_area(ws.status, rail, theme);
+        let mut row = Button::new(format!("sidebar-workspace-{}", ws.id))
             .custom(
                 ButtonCustomVariant::new(cx)
                     .color(if is_chosen {
@@ -668,10 +598,12 @@ impl WorkspaceSidebar {
                                     .child(project),
                             )
                             .child(status_area)
-                            .child(if self.rail {
-                                div().id(self.next_row_id()).into_any_element()
+                            .child(if rail {
+                                div()
+                                    .id(format!("sidebar-workspace-{}-rail", ws.id))
+                                    .into_any_element()
                             } else {
-                                Button::new(self.next_row_id())
+                                Button::new(format!("sidebar-workspace-{}-close", ws.id))
                                     .ghost()
                                     .child(
                                         Icon::new(IconName::X)
@@ -720,7 +652,7 @@ impl WorkspaceSidebar {
                                     .size(px(DOT_SIZE_PX))
                                     .rounded_full()
                                     .bg(Self::status_color(ws.status, theme, self.pulse_phase))
-                                    .id(self.next_row_id()),
+                                    .id(format!("sidebar-workspace-{}-status", ws.id)),
                             ),
                     )
                     .child(
@@ -756,7 +688,8 @@ impl WorkspaceSidebar {
     /// across three lines, written status word and a non-rose status dot.
     /// Clicking focuses the agent's pane.
     fn render_agent_row(
-        &mut self,
+        &self,
+        rail: bool,
         agent: &AgentRow,
         duplicates: &HashSet<(String, String)>,
         theme: &Theme,
@@ -774,14 +707,14 @@ impl WorkspaceSidebar {
             Some((project, rest)) => (project.to_string(), rest.to_string()),
             None => (agent.context.clone(), String::new()),
         };
-        let (project, sub) = if self.rail {
+        let (project, sub) = if rail {
             (String::new(), String::new())
         } else {
             (project, sub)
         };
-        let title = if self.rail { String::new() } else { label };
-        let status_area = Self::status_area(agent.status, self.rail, theme);
-        Button::new(self.next_row_id())
+        let title = if rail { String::new() } else { label };
+        let status_area = Self::status_area(agent.status, rail, theme);
+        Button::new(format!("sidebar-pane-{}", agent.pane_id))
             .custom(
                 ButtonCustomVariant::new(cx)
                     .color(if agent.selected {
@@ -828,7 +761,7 @@ impl WorkspaceSidebar {
                                     .size(px(DOT_SIZE_PX))
                                     .rounded_full()
                                     .bg(Self::status_color(agent.status, theme, self.pulse_phase))
-                                    .id(self.next_row_id()),
+                                    .id(format!("sidebar-pane-{}-status", agent.pane_id)),
                             ),
                     )
                     .child(
@@ -915,43 +848,9 @@ impl WorkspaceSidebar {
         }
     }
 
-    /// A terminal rendered as a quiet one-line row in the flat session list.
-    fn render_terminal_row(
-        &mut self,
-        row: &TerminalRow,
-        theme: &Theme,
-        scale: f32,
-    ) -> impl IntoElement {
-        let label = terminal_label(row);
-        let status = status_token(row.status.as_deref()).and_then(AgentStatus::from_wire);
-        let badge = status.map(|status| Self::status_color(status, theme, self.pulse_phase));
-        div()
-            .id(self.next_row_id())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(SPACE_2 * scale))
-            .min_h(px(TOUCH_TARGET_PX))
-            .pl(px((14.0 + row.depth as f32 * SPACE_3) * scale))
-            .pr(px(14.0 * scale))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .truncate()
-                    .text_size(px(12.0 * scale))
-                    .text_color(theme.text_primary())
-                    .child(if self.rail { String::new() } else { label }),
-            )
-            .child(
-                div().flex_none().flex().items_center().children(
-                    badge.map(|color| div().size(px(DOT_SIZE_PX)).rounded_full().bg(color)),
-                ),
-            )
-    }
-
     fn render_status_section(
         &self,
+        rail: bool,
         working: &[&AgentRow],
         settled: &[&AgentRow],
         duplicates: &HashSet<(String, String)>,
@@ -983,7 +882,7 @@ impl WorkspaceSidebar {
                     .px(px(SPACE_4 * scale))
                     .text_size(px(12.0 * scale))
                     .text_color(theme.text_muted)
-                    .child(if self.rail {
+                    .child(if rail {
                         String::new()
                     } else {
                         name.to_string()
@@ -1024,7 +923,7 @@ impl WorkspaceSidebar {
                                 .min_w(px(0.0))
                                 .truncate()
                                 .text_color(theme.token_text_muted())
-                                .child(if self.rail { String::new() } else { label }),
+                                .child(if rail { String::new() } else { label }),
                         )
                         .child(
                             div()
@@ -1035,7 +934,7 @@ impl WorkspaceSidebar {
                                     theme,
                                     self.pulse_phase,
                                 ))
-                                .child(if self.rail {
+                                .child(if rail {
                                     String::new()
                                 } else {
                                     session_status::badge_word(state).to_string()
@@ -1110,24 +1009,13 @@ fn pane_field<'a>(panes: Option<&'a Vec<Value>>, pane_id: &str, field: &str) -> 
         .as_str()
 }
 
-/// What a terminal row shows: its name, else its program, else its id.
-fn terminal_label(row: &TerminalRow) -> String {
-    if let Some(name) = row.name.as_deref().filter(|name| !name.is_empty()) {
-        return name.to_string();
-    }
-    if !row.program.is_empty() {
-        return row.program.clone();
-    }
-    row.id.clone()
-}
-
 impl Render for WorkspaceSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         let scale = theme.density_scale();
+        let rail = ShellLayout::for_width(f32::from(window.bounds().size.width)).rail;
         let workspaces = self.workspaces();
         let agents = self.snapshot.as_ref().map(agent_rows).unwrap_or_default();
-        let terminal_entries = self.runtime_terminals();
 
         let duplicates = session_status::duplicate_names(&agents);
         let states: Vec<SessionState> = agents
@@ -1148,31 +1036,21 @@ impl Render for WorkspaceSidebar {
             settled.len()
         );
 
-        let mut sessions = div()
-            .id("sidebar-sessions")
-            .flex_1()
-            .min_h(px(0.0))
-            .overflow_y_scroll()
-            .pb(px(SPACE_2 * scale))
-            .children(
-                workspaces
-                    .iter()
-                    .map(|ws| self.render_workspace_row(ws, &theme, scale, cx)),
-            )
-            .children(
-                agents
-                    .iter()
-                    .map(|agent| self.render_agent_row(agent, &duplicates, &theme, scale, cx)),
-            );
-
-        // The terminal section stays conditional on non-empty real data.
-        if !terminal_entries.is_empty() {
-            sessions = sessions.children(
-                terminal_entries
-                    .iter()
-                    .map(|row| self.render_terminal_row(row, &theme, scale)),
-            );
-        }
+        let mut sessions =
+            div()
+                .id("sidebar-sessions")
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .pb(px(SPACE_2 * scale))
+                .children(
+                    workspaces
+                        .iter()
+                        .map(|ws| self.render_workspace_row(rail, ws, &theme, scale, cx)),
+                )
+                .children(agents.iter().map(|agent| {
+                    self.render_agent_row(rail, agent, &duplicates, &theme, scale, cx)
+                }));
 
         if workspaces.is_empty() {
             sessions = sessions.child(
@@ -1181,7 +1059,7 @@ impl Render for WorkspaceSidebar {
                     .py(px(SPACE_2 * scale))
                     .text_size(px(12.0 * scale))
                     .text_color(theme.text_faint)
-                    .child(if self.rail {
+                    .child(if rail {
                         String::new()
                     } else {
                         "No workspaces yet — open a workspace to begin.".to_string()
@@ -1200,10 +1078,10 @@ impl Render for WorkspaceSidebar {
             .size_full()
             .bg(theme.panel_bg())
             .rounded(px(theme.radius_panel()))
-            .child(self.render_titlebar(&theme, scale))
-            .child(self.render_search_row(&theme, scale, cx))
+            .child(self.render_titlebar(rail, &theme, scale))
+            .child(self.render_search_row(rail, &theme, scale, cx))
             .child(sessions)
-            .child(self.render_status_section(&working, &settled, &duplicates, &theme, scale))
+            .child(self.render_status_section(rail, &working, &settled, &duplicates, &theme, scale))
             .child(self.render_bottom_bar(&theme, scale))
     }
 }
@@ -1258,4 +1136,120 @@ mod tests {
             rgb(0x58a6ff)
         );
     }
+
+    crate::orion_test!(
+        fn the_sidebar_renders_a_fixture_snapshot_with_stable_rows(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            use gpui_kit::test::TestWindowExt;
+            use orion_core::runtime::PaneHandle;
+            use orion_core::FrameSink;
+            use std::cell::RefCell;
+            use std::rc::Rc;
+
+            struct FixtureRuntime {
+                snapshot: Value,
+            }
+
+            impl Runtime for FixtureRuntime {
+                fn identity(&self) -> Value {
+                    json!({ "version": "fixture", "protocol": 1 })
+                }
+
+                fn http(&self, method: &str, path: &str, _body: &Value) -> (u16, Value) {
+                    if method == "GET" && path == "/api/session" {
+                        return (200, json!({ "snapshot": self.snapshot }));
+                    }
+                    (200, Value::Null)
+                }
+
+                fn pane_by_id(&self, _pane_id: &str) -> Option<Arc<dyn PaneHandle>> {
+                    None
+                }
+
+                fn connect(&self, _sink: FrameSink) -> String {
+                    "fixture".to_string()
+                }
+
+                fn send_to(&self, _connection: &str, _frame: Value) {}
+
+                fn disconnect(&self, _connection: &str) {}
+
+                fn dispatch_from(
+                    &self,
+                    _connection: Option<&str>,
+                    _request: &Value,
+                ) -> std::result::Result<Option<Value>, String> {
+                    Ok(None)
+                }
+
+                fn snapshot_value(&self) -> Value {
+                    self.snapshot.clone()
+                }
+
+                fn restore(&self) {}
+            }
+
+            let snapshot = json!({
+                "workspaces": [{
+                    "workspace_id": "ws-1", "label": "Orion", "active_tab_id": "tab-1",
+                    "focused": true, "agent_status": "idle"
+                }],
+                "tabs": [{
+                    "tab_id": "tab-1", "workspace_id": "ws-1", "label": "main",
+                    "pane_ids": ["p1"], "active_pane_id": "p1", "focused": true,
+                    "agent_status": "idle"
+                }],
+                "panes": [{
+                    "pane_id": "p1", "workspace_id": "ws-1", "tab_id": "tab-1",
+                    "label": "Build", "display_agent": "claude", "cwd": "/work/orion",
+                    "agent_status": "idle", "focused": true
+                }],
+                "focused_pane_id": "p1",
+            });
+            let runtime: Arc<dyn Runtime> = Arc::new(FixtureRuntime { snapshot });
+            let (root, cx) = cx.add_window_view(|_, cx| WorkspaceSidebar::new(cx));
+            cx.update(|_, app| {
+                root.update(app, |view, _cx| view.attach(Arc::clone(&runtime)));
+            });
+
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-workspace-ws-1").is_some()),
+                "the fixture workspace is on screen"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some()),
+                "the fixture pane is on screen"
+            );
+
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-workspace-ws-1").is_some()),
+                "the workspace keeps its identity across renders"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some()),
+                "the pane keeps its identity across renders"
+            );
+
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let collected = events.clone();
+            // The subscription must outlive the click, or the event goes nowhere.
+            let subscription = cx.update(|_window, app| {
+                app.subscribe(&root, move |_entity, event: &SidebarEvent, _cx| {
+                    collected.borrow_mut().push(event.clone());
+                })
+            });
+            cx.update(|window, cx| window.click("sidebar-pane-p1", cx));
+            assert!(
+                events
+                    .borrow()
+                    .contains(&SidebarEvent::PaneFocused("p1".to_string())),
+                "clicking the row reports its pane: {:?}",
+                events.borrow()
+            );
+            drop(subscription);
+        }
+    );
 }
