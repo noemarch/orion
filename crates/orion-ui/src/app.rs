@@ -32,7 +32,7 @@ use crate::shell_model::{
     FILES_SURFACE_WIDTH_WIDE,
 };
 use crate::shell_picker::{ShellPickerEvent, ShellPickerModal};
-use crate::sidebar::{SidebarEvent, TabEntry, WorkspaceEntry};
+use crate::sidebar::{focus_search, FocusSidebarSearch, SidebarEvent, TabEntry, WorkspaceEntry};
 use crate::terminal::{TerminalPane, TerminalPaneEvent};
 use crate::theme::{Theme, ICON_SIZE_PX, MARK_SIZE_PX, TOUCH_TARGET_PX};
 use crate::workspace::WorkspaceSidebar;
@@ -486,8 +486,8 @@ fn pane_is_shell(pane: &Value) -> bool {
 }
 
 impl OrionApp {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let workspace_sidebar = cx.new(WorkspaceSidebar::new);
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let workspace_sidebar = cx.new(|cx| WorkspaceSidebar::new(window, cx));
         let terminal_pane = cx.new(TerminalPane::new);
         let chat_view = cx.new(ChatView::new);
         let file_tree = cx.new(FileTree::new);
@@ -2363,6 +2363,32 @@ impl Render for OrionApp {
             .when(self.focus_handle.is_focused(window), |el| {
                 el.focus_ring_style(window, cx)
             })
+            .on_action(cx.listener(|this, _: &FocusSidebarSearch, window, cx| {
+                let focused = window.focused(cx);
+                let text_entry = [
+                    this.terminal_pane.read(cx).focus_handle().clone(),
+                    this.split_terminal_pane.read(cx).focus_handle().clone(),
+                    this.chat_view.read(cx).composer_focus(cx),
+                    this.split_chat_view.read(cx).composer_focus(cx),
+                ];
+                let in_modal = this.settings.read(cx).is_open()
+                    || this.new_workspace.read(cx).is_open()
+                    || this.shell_picker.read(cx).is_open();
+                if in_modal
+                    || text_entry
+                        .iter()
+                        .any(|handle| focused.as_ref() == Some(handle))
+                    || this
+                        .chat_view
+                        .read(cx)
+                        .prompt_card_focus(cx)
+                        .is_some_and(|handle| focused.as_ref() == Some(&handle))
+                {
+                    cx.stop_propagation();
+                    return;
+                }
+                focus_search(&this.workspace_sidebar, window, cx);
+            }))
             .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
                 this.handle_editing_key(ev, cx)
             }))
@@ -2440,9 +2466,17 @@ impl gpui_kit::AssetSource for ShellAssets {
     }
 }
 
+pub fn register_search_shortcuts(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("/", FocusSidebarSearch, None),
+        KeyBinding::new("ctrl-k", FocusSidebarSearch, None),
+    ]);
+}
+
 pub fn run() {
     gpui_kit::application().with_assets(ShellAssets).run(|cx| {
         gpui_kit::init(cx);
+        register_search_shortcuts(cx);
         gpui_kit::open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
@@ -2454,7 +2488,7 @@ pub fn run() {
                 ..Default::default()
             },
             cx,
-            |_window, cx| cx.new(OrionApp::new),
+            |window, cx| cx.new(|cx| OrionApp::new(window, cx)),
         )
         .expect("Failed to open window");
     });

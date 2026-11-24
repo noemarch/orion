@@ -829,6 +829,10 @@ impl TerminalPane {
         self.focus_wanted = true;
     }
 
+    pub fn focus_handle(&self) -> &FocusHandle {
+        &self.focus_handle
+    }
+
     /// Debug-only repaint clock: `ORION_TERMINAL_DEBUG=repaint` asks for a frame
     /// every 60ms so the bypassed row cache is exercised without starving the
     /// machine.

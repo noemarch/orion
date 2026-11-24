@@ -27,6 +27,7 @@ use crate::shell_model::ShellLayout;
 use crate::theme::{Theme, DOT_SIZE_PX, ICON_SIZE_PX, TOUCH_TARGET_PX};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{v_virtual_list, VirtualListScrollHandle};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{button::Button, button::ButtonVariants, Icon, ThemeStyled};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::test::TestSupportExt;
@@ -39,6 +40,8 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
+
+gpui_kit::actions!(sidebar, [FocusSidebarSearch]);
 
 // Spacing scale from DESIGN.md §4 (4px base). The Rust theme exposes density
 // scaling but no spacing tokens, so keep the scale named and local instead of
@@ -115,18 +118,31 @@ pub struct WorkspaceSidebar {
     snapshot: Option<Value>,
     last_body: Option<String>,
     focus_handle: FocusHandle,
+    search_input: Entity<InputState>,
+    _search_subscription: Subscription,
     pulse_phase: u32,
     collapsed_workspaces: HashSet<String>,
     scroll: VirtualListScrollHandle,
 }
 
 impl WorkspaceSidebar {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let subscription = cx.subscribe(
+            &search_input,
+            |_this, _input: Entity<InputState>, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        );
         let view = Self {
             engine: None,
             snapshot: None,
             last_body: None,
             focus_handle: cx.focus_handle().tab_stop(true),
+            search_input,
+            _search_subscription: subscription,
             pulse_phase: 0,
             collapsed_workspaces: HashSet::new(),
             scroll: VirtualListScrollHandle::new(),
@@ -145,6 +161,18 @@ impl WorkspaceSidebar {
         &self.focus_handle
     }
 
+    pub fn focus_search(&self, window: &mut Window, cx: &mut App) {
+        let handle = self.search_input.read(cx).focus_handle(cx);
+        handle.focus(window, cx);
+    }
+
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
     /// The snapshot body (`snapshot` object) backing the current render.
     pub fn snapshot(&self) -> Option<Value> {
         self.snapshot.clone()
@@ -156,12 +184,14 @@ impl WorkspaceSidebar {
         self.last_body.as_deref()
     }
 
-    fn visible_rows(&self) -> Vec<TreeRow> {
+    fn visible_rows(&self, query: &str) -> Vec<TreeRow> {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return Vec::new();
         };
         let agents = agent_rows(snapshot);
         let panes = snapshot.get("panes").and_then(Value::as_array);
+        let needle = query.trim().to_lowercase();
+        let searching = !needle.is_empty();
         let mut rows = Vec::new();
 
         for ws in self.workspaces() {
@@ -175,8 +205,12 @@ impl WorkspaceSidebar {
             let group: Vec<&AgentRow> = pane_ids
                 .iter()
                 .filter_map(|id| agents.iter().find(|agent| &agent.pane_id == id))
+                .filter(|agent| matches_query(agent, panes, &needle))
                 .collect();
-            let collapsed = self.collapsed_workspaces.contains(&ws.id);
+            if searching && group.is_empty() {
+                continue;
+            }
+            let collapsed = !searching && self.collapsed_workspaces.contains(&ws.id);
             rows.push(TreeRow::Header {
                 workspace: ws,
                 pane_count: group.len(),
@@ -276,7 +310,11 @@ impl WorkspaceSidebar {
                     .aria_expanded(!collapsed)
                     .aria_selected(workspace.focused)
                     .when(workspace.focused, |el| el.bg(theme.selected_bg()))
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_workspace(&id, cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.search_input.read(cx).value().trim().is_empty() {
+                            this.toggle_workspace(&id, cx);
+                        }
+                    }))
                     .child(
                         Icon::new(chevron)
                             .size(px(12.0))
@@ -750,20 +788,18 @@ impl WorkspaceSidebar {
             )
     }
 
-    /// The 44px search row: magnifier, placeholder and three trailing tools.
-    /// The row itself is decorative — it has no text input and no click or
-    /// focus handler; search lives in the command palette (DESIGN.md:997).
-    /// The square-plus tool is the live New Workspace control; the other two
-    /// are the reference's quiet affordances.
     fn render_search_row(
         &self,
         rail: bool,
         theme: &Theme,
         scale: f32,
+        query: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let searching = !query.trim().is_empty();
         div()
             .id("sidebar-search")
+            .test_support()
             .flex()
             .flex_row()
             .items_center()
@@ -778,17 +814,32 @@ impl WorkspaceSidebar {
             )
             .child(
                 div()
+                    .id("sidebar-search-input")
+                    .test_support()
                     .flex_1()
                     .min_w(px(0.0))
-                    .truncate()
-                    .text_size(px(13.0 * scale))
-                    .text_color(theme.token_text_dim())
-                    .child(if rail {
-                        String::new()
-                    } else {
-                        "Search".to_string()
-                    }),
+                    .when(!rail, |el| {
+                        el.child(Input::new(&self.search_input).w_full())
+                    })
+                    .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                        if ev.keystroke.key.to_lowercase() == "escape" {
+                            this.clear_search(window, cx);
+                        }
+                    })),
             )
+            .when(!rail && searching, |el| {
+                el.child(
+                    Button::new("sidebar-search-clear")
+                        .ghost()
+                        .icon(IconName::X)
+                        .tooltip("Clear search")
+                        .min_h(px(TOUCH_TARGET_PX))
+                        .min_w(px(TOUCH_TARGET_PX))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.clear_search(window, cx);
+                        })),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -883,13 +934,32 @@ fn pane_field<'a>(panes: Option<&'a Vec<Value>>, pane_id: &str, field: &str) -> 
         .as_str()
 }
 
+fn matches_query(agent: &AgentRow, panes: Option<&Vec<Value>>, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if agent.title.to_lowercase().contains(needle) {
+        return true;
+    }
+    ["cwd", "shell_path", "shell"].iter().any(|field| {
+        pane_field(panes, &agent.pane_id, field)
+            .is_some_and(|value| value.to_lowercase().contains(needle))
+    })
+}
+
+pub fn focus_search(sidebar: &Entity<WorkspaceSidebar>, window: &mut Window, cx: &mut App) {
+    sidebar.update(cx, |view, cx| view.focus_search(window, cx));
+}
+
 impl Render for WorkspaceSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         let scale = theme.density_scale();
         let rail = ShellLayout::for_width(f32::from(window.bounds().size.width)).rail;
-        let rows = self.visible_rows();
+        let query = self.search_input.read(cx).value().to_string();
+        let rows = self.visible_rows(&query);
         let empty = rows.is_empty();
+        let searching = !query.trim().is_empty();
         let sizes = Rc::new(
             rows.iter()
                 .map(|row| match row {
@@ -923,14 +993,37 @@ impl Render for WorkspaceSidebar {
             .when(empty, |el| {
                 el.child(
                     div()
+                        .id("sidebar-empty")
+                        .test_support()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(SPACE_2 * scale))
                         .px(px(SPACE_4 * scale))
                         .py(px(SPACE_2 * scale))
                         .text_size(px(12.0 * scale))
                         .text_color(theme.text_faint)
+                        .when(searching && !rail, |el| {
+                            el.aria_label("No panes match that search.")
+                        })
                         .child(if rail {
                             String::new()
+                        } else if searching {
+                            "No panes match that search.".to_string()
                         } else {
                             "No workspaces yet — open a workspace to begin.".to_string()
+                        })
+                        .when(searching, |el| {
+                            el.child(
+                                Button::new("sidebar-empty-clear")
+                                    .ghost()
+                                    .label("Clear")
+                                    .min_h(px(TOUCH_TARGET_PX))
+                                    .min_w(px(TOUCH_TARGET_PX))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.clear_search(window, cx);
+                                    })),
+                            )
                         }),
                 )
             });
@@ -945,7 +1038,7 @@ impl Render for WorkspaceSidebar {
             .bg(theme.panel_bg())
             .rounded(px(theme.radius_panel()))
             .child(self.render_titlebar(rail, &theme, scale))
-            .child(self.render_search_row(rail, &theme, scale, cx))
+            .child(self.render_search_row(rail, &theme, scale, &query, cx))
             .child(tree)
             .child(self.render_bottom_bar(&theme, scale))
     }
@@ -1102,9 +1195,14 @@ mod tests {
         fn sidebar_renders_empty_state_without_panic(cx: &mut gpui_kit::TestAppContext) {
             use gpui_kit::{point, size};
             let cx = cx.add_empty_window();
-            cx.draw(point(px(0.), px(0.)), size(px(264.), px(800.)), |_, cx| {
-                cx.new(WorkspaceSidebar::new).into_any_element()
-            });
+            cx.draw(
+                point(px(0.), px(0.)),
+                size(px(264.), px(800.)),
+                |window, cx| {
+                    cx.new(|cx| WorkspaceSidebar::new(window, cx))
+                        .into_any_element()
+                },
+            );
         }
     );
 
@@ -1215,7 +1313,7 @@ mod tests {
                 "focused_pane_id": "p1",
             });
             let runtime: Arc<dyn Runtime> = Arc::new(FixtureRuntime { snapshot });
-            let (root, cx) = cx.add_window_view(|_, cx| WorkspaceSidebar::new(cx));
+            let (root, cx) = cx.add_window_view(|window, cx| WorkspaceSidebar::new(window, cx));
             cx.update(|_, app| {
                 root.update(app, |view, _cx| view.attach(Arc::clone(&runtime)));
             });
@@ -1384,7 +1482,7 @@ mod tests {
     crate::orion_test!(
         fn every_status_uses_the_shared_accessible_name(cx: &mut gpui_kit::TestAppContext) {
             let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture::new(status_snapshot()));
-            let (root, cx) = cx.add_window_view(|_, cx| WorkspaceSidebar::new(cx));
+            let (root, cx) = cx.add_window_view(|window, cx| WorkspaceSidebar::new(window, cx));
             cx.update(|_, app| root.update(app, |view, _cx| view.attach(Arc::clone(&runtime))));
             cx.update(|window, cx| window.render_frame(cx));
 
@@ -1403,7 +1501,7 @@ mod tests {
     ) {
         let fixture = Arc::new(TreeFixture::new(tree_snapshot()));
         let runtime: Arc<dyn Runtime> = fixture.clone();
-        let (root, cx) = cx.add_window_view(|_, cx| WorkspaceSidebar::new(cx));
+        let (root, cx) = cx.add_window_view(|window, cx| WorkspaceSidebar::new(window, cx));
         cx.update(|_, app| root.update(app, |view, _cx| view.attach(runtime)));
         (root, cx, fixture)
     }
@@ -1496,8 +1594,8 @@ mod tests {
     crate::orion_test!(
         fn collapse_survives_sidebar_hide_and_show(cx: &mut gpui_kit::TestAppContext) {
             let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture::new(tree_snapshot()));
-            let (root, cx) = cx.add_window_view(|_, cx| MountHarness {
-                sidebar: cx.new(WorkspaceSidebar::new),
+            let (root, cx) = cx.add_window_view(|window, cx| MountHarness {
+                sidebar: cx.new(|cx| WorkspaceSidebar::new(window, cx)),
                 mounted: true,
             });
             let sidebar = cx.update(|_, app| root.read(app).sidebar.clone());
@@ -1553,6 +1651,185 @@ mod tests {
             });
             assert_eq!(f32::from(header.size.height), 30.0);
             assert_eq!(f32::from(pane.size.height), 48.0);
+        }
+    );
+
+    fn type_query(cx: &mut gpui_kit::VisualTestContext, text: &str) {
+        cx.update(|window, cx| {
+            window.click("sidebar-search-input", cx);
+            window.input(text, cx);
+        });
+    }
+
+    crate::orion_test!(
+        fn search_filters_panes_by_title_cwd_and_shell(cx: &mut gpui_kit::TestAppContext) {
+            let (_root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+
+            type_query(cx, "BUILD");
+            assert!(cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some()));
+            assert!(cx.update(|window, _| window.try_find("sidebar-pane-p2").is_none()));
+            assert!(cx.update(|window, _| window.try_find("sidebar-pane-p3").is_none()));
+
+            cx.update(|window, cx| window.click("sidebar-search-clear", cx));
+            type_query(cx, "orion/docs");
+            assert!(cx.update(|window, _| window.try_find("sidebar-pane-p2").is_some()));
+            assert!(cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()));
+
+            cx.update(|window, cx| window.click("sidebar-search-clear", cx));
+            type_query(cx, "bash");
+            assert!(cx.update(|window, _| window.try_find("sidebar-pane-p3").is_some()));
+            assert!(cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()));
+        }
+    );
+
+    crate::orion_test!(
+        fn search_expands_matching_groups_only_in_the_filtered_view(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (_root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+
+            cx.update(|window, cx| window.click("sidebar-workspace-ws-1", cx));
+            assert!(cx.update(|window, _| window.try_find("sidebar-pane-p2").is_none()));
+
+            type_query(cx, "review");
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p2").is_some()),
+                "a matching group expands while filtering"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()),
+                "non-matching panes stay hidden"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-workspace-ws-2").is_none()),
+                "empty groups are hidden"
+            );
+
+            cx.update(|window, cx| window.click("sidebar-workspace-ws-1", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p2").is_some()),
+                "a header click cannot change collapse state while filtering"
+            );
+
+            cx.update(|window, cx| window.click("sidebar-search-clear", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p2").is_none()),
+                "the stored collapse choice returns unchanged"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn search_keeps_selection_and_offers_a_clearable_empty_state(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (_root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-pane-p1").selected()),
+                Some(true)
+            );
+
+            type_query(cx, "deploy");
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-pane-p3").selected()),
+                Some(false),
+                "a result is not selected automatically"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()),
+                "the selected pane can be filtered out"
+            );
+
+            cx.update(|window, cx| window.click("sidebar-search-clear", cx));
+            type_query(cx, "nothing-matches");
+            let _ = cx.update(|window, _| window.find_by_label("No panes match that search."));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-empty-clear").is_some()),
+                "the empty state has a Clear control"
+            );
+
+            cx.update(|window, cx| window.click("sidebar-empty-clear", cx));
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-pane-p1").selected()),
+                Some(true),
+                "clearing restores the original selection"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn escape_clears_search_and_returns_focus_to_the_tree(cx: &mut gpui_kit::TestAppContext) {
+            let (_root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+
+            type_query(cx, "bash");
+            assert!(cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()));
+
+            cx.update(|window, cx| window.press("escape", cx));
+            assert!(cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some()));
+            assert_eq!(
+                cx.update(|window, _| window.find("workspace-sidebar").focused()),
+                Some(true),
+                "Escape hands focus back to the tree"
+            );
+        }
+    );
+
+    struct ShortcutHarness {
+        sidebar: Entity<WorkspaceSidebar>,
+        other: FocusHandle,
+    }
+
+    impl Render for ShortcutHarness {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("shortcut-harness")
+                .on_action(cx.listener(|this, _: &FocusSidebarSearch, window, cx| {
+                    crate::sidebar::focus_search(&this.sidebar, window, cx);
+                }))
+                .child(
+                    div()
+                        .id("other-view")
+                        .test_support()
+                        .track_focus(&self.other),
+                )
+                .child(self.sidebar.clone())
+        }
+    }
+
+    crate::orion_test!(
+        fn slash_and_ctrl_k_focus_search_from_another_view(cx: &mut gpui_kit::TestAppContext) {
+            cx.update(crate::app::register_search_shortcuts);
+            let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture::new(tree_snapshot()));
+            let (root, cx) = cx.add_window_view(|window, cx| ShortcutHarness {
+                sidebar: cx.new(|cx| WorkspaceSidebar::new(window, cx)),
+                other: cx.focus_handle(),
+            });
+            let sidebar = cx.update(|_, app| root.read(app).sidebar.clone());
+            cx.update(|_, app| sidebar.update(app, |view, _cx| view.attach(runtime)));
+            cx.update(|window, cx| window.render_frame(cx));
+
+            let other = cx.update(|_, app| root.read(app).other.clone());
+            for key in ["/", "secondary-k"] {
+                cx.update(|window, app| other.focus(window, app));
+                cx.update(|window, cx| window.press(key, cx));
+                cx.update(|window, app| {
+                    let handle = root
+                        .read(app)
+                        .sidebar
+                        .read(app)
+                        .search_input
+                        .read(app)
+                        .focus_handle(app);
+                    assert!(
+                        handle.is_focused(window),
+                        "{key} focuses the sidebar search input"
+                    );
+                });
+            }
         }
     );
 }
