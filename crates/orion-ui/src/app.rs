@@ -1273,7 +1273,8 @@ impl OrionApp {
                     .min_h(px(TOUCH_TARGET_PX))
                     .tooltip("New Terminal")
                     .accessibility_label("New Terminal")
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let opener = window.focused(cx);
                         let default = this
                             .settings
                             .update(cx, |view, cx| view.prefs(cx).default_shell.clone());
@@ -1284,7 +1285,7 @@ impl OrionApp {
                             .or_else(|| this.cached_workspaces.first())
                             .and_then(|workspace| workspace.cwd.clone());
                         this.shell_picker.update(cx, |view, cx| {
-                            view.open_with_default(&default, cwd, cx);
+                            view.open_with_focus(opener, &default, cwd, cx);
                         });
                         cx.notify();
                     })),

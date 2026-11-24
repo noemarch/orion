@@ -6,8 +6,8 @@
 //! focus the returned pane and force its Terminal lens.
 
 use crate::theme::Theme;
-use gpui_kit::assets::IconName;
 use gpui_kit::base::component_traits::Disableable;
+use gpui_kit::base::StyledExt;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -78,6 +78,7 @@ pub struct ShellPickerModal {
     cwd: Option<String>,
     error: Option<String>,
     focus_handle: FocusHandle,
+    opener_focus: Option<FocusHandle>,
     shell_path_input: Option<Entity<InputState>>,
     _shell_path_subscription: Option<Subscription>,
 }
@@ -92,6 +93,7 @@ impl ShellPickerModal {
             cwd: None,
             error: None,
             focus_handle: cx.focus_handle(),
+            opener_focus: None,
             shell_path_input: None,
             _shell_path_subscription: None,
         }
@@ -107,6 +109,17 @@ impl ShellPickerModal {
 
     pub fn set_open(&mut self, open: bool) {
         self.open = open;
+    }
+
+    pub fn open_with_focus(
+        &mut self,
+        opener: Option<FocusHandle>,
+        default: &str,
+        cwd: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.opener_focus = opener;
+        self.open_with_default(default, cwd, cx);
     }
 
     pub fn close(&mut self) {
@@ -186,6 +199,7 @@ impl ShellPickerModal {
             .and_then(Value::as_str)
             .map(str::to_string);
         self.open = false;
+        self.opener_focus = None;
         if let Some(pane_id) = pane_id {
             cx.emit(ShellPickerEvent::Created(pane_id));
         }
@@ -217,7 +231,7 @@ fn error_message(body: &Value, fallback: &str) -> String {
 
 impl Render for ShellPickerModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.focus_handle.is_focused(window) {
+        if self.open && !self.focus_handle.is_focused(window) {
             self.focus_handle.focus(window, cx);
         }
         let theme = Theme::current();
@@ -269,130 +283,124 @@ impl Render for ShellPickerModal {
                 .checked(selected.as_deref() == Some(shell.kind.as_str()))
         });
 
-        div()
-            .id("shell-picker-modal")
-            .flex()
-            .items_center()
-            .justify_center()
-            .size_full()
-            .bg(theme.scrim)
-            .child(
-                div()
-                    .id("shell-picker-panel")
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0 * scale))
-                    .w(px(420.0))
-                    .p_4()
-                    .rounded_lg()
-                    .bg(theme.surface_panel)
-                    .border_1()
-                    .border_color(theme.border)
-                    .track_focus(&self.focus_handle)
-                    .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
-                        if ev.keystroke.key == "escape" {
-                            this.close();
-                            cx.notify();
-                        }
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(14.0 * scale))
-                                    .text_color(theme.text_strong)
-                                    .child("New Terminal"),
-                            )
-                            .child(
-                                Button::new("shell-picker-close")
-                                    .icon(IconName::X)
-                                    .tooltip("Close")
-                                    .accessibility_label("Close terminal picker")
-                                    .min_h(px(44.0))
-                                    .min_w(px(44.0))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close();
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child("SHELL"),
-                    )
-                    .child(
-                        div()
-                            .id("shell-picker-shells")
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                RadioGroup::new("shell-picker-choices")
-                                    .children(shell_rows)
-                                    .selected_index(selected_index)
-                                    .on_change(cx.listener(|this, index: &usize, _, cx| {
-                                        if let Some(shell) = this.shells.get(*index) {
-                                            if shell.installed {
-                                                this.selected = Some(shell.kind.clone());
-                                                cx.notify();
+        crate::modal_shell::ModalShell::new(
+            "shell-picker",
+            "New terminal",
+            &self.focus_handle,
+            self.opener_focus.clone(),
+            420.0,
+            560.0,
+            div()
+                .v_flex()
+                .gap(px(10.0 * scale))
+                .child(
+                    div()
+                        .v_flex()
+                        .gap(px(8.0 * scale))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .pb(px(8.0 * scale))
+                        .child(
+                            div()
+                                .text_size(px(11.0 * scale))
+                                .text_color(theme.text_dim)
+                                .child("Shell"),
+                        )
+                        .child(
+                            div()
+                                .id("shell-picker-shells")
+                                .debug_selector(|| "shell-picker-shells".to_string())
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    RadioGroup::new("shell-picker-choices")
+                                        .children(shell_rows)
+                                        .selected_index(selected_index)
+                                        .on_change(cx.listener(|this, index: &usize, _, cx| {
+                                            if let Some(shell) = this.shells.get(*index) {
+                                                if shell.installed {
+                                                    this.selected = Some(shell.kind.clone());
+                                                    cx.notify();
+                                                }
                                             }
-                                        }
-                                    })),
-                            ),
-                    )
-                    .child(shell_path_field)
-                    .child(if shells.is_empty() && error.is_none() {
-                        div()
-                            .text_size(px(12.0 * scale))
-                            .text_color(theme.text_dim)
-                            .child("No shells are installed on this machine.")
-                            .into_any_element()
-                    } else {
-                        div().into_any_element()
-                    })
-                    .child(if let Some(error) = error {
-                        Alert::error("shell-picker-error", error).into_any_element()
-                    } else {
-                        div().into_any_element()
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .gap(px(8.0 * scale))
-                            .child(
-                                Button::new("shell-picker-cancel")
-                                    .label("Cancel")
-                                    .secondary()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close();
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("shell-picker-open")
-                                    .label("Open Terminal")
-                                    .primary()
-                                    .disabled(selected.is_none() && !has_path)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.create(cwd.clone(), cx);
-                                    })),
-                            ),
+                                        })),
+                                ),
+                        )
+                        .child(shell_path_field)
+                        .child(if shells.is_empty() && error.is_none() {
+                            div()
+                                .text_size(px(12.0 * scale))
+                                .text_color(theme.text_dim)
+                                .child("No shells are installed on this machine.")
+                                .into_any_element()
+                        } else {
+                            div().into_any_element()
+                        }),
+                )
+                .child(if let Some(error) = error {
+                    Alert::error("shell-picker-error", error).into_any_element()
+                } else {
+                    div().into_any_element()
+                })
+                .child(
+                    div().h_flex().justify_end().gap(px(8.0 * scale)).child(
+                        Button::new("shell-picker-open")
+                            .label("Open terminal")
+                            .primary()
+                            .disabled(selected.is_none() && !has_path)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.create(cwd.clone(), cx);
+                            })),
                     ),
-            )
+                ),
+            {
+                let view = cx.entity();
+                move |_: &mut Window, app: &mut App| {
+                    view.update(app, |this, cx| {
+                        this.close();
+                        cx.notify();
+                    });
+                }
+            },
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    crate::orion_test!(
+        fn modal_has_one_close_control(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::test::TestWindowExt;
+            let (_, cx) = cx.add_window_view(|_, cx| ShellPickerModal::new(cx));
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(cx.debug_bounds("shell-picker-close").is_some());
+            assert!(cx.debug_bounds("shell-picker-cancel").is_none());
+            assert!(cx.debug_bounds("shell-picker-shells").is_some());
+        }
+    );
+
+    crate::orion_test!(
+        fn modal_restores_opener_focus_on_escape(cx: &mut gpui_kit::TestAppContext) {
+            use gpui_kit::test::TestWindowExt;
+            let opener = cx.update(|app| app.focus_handle().tab_stop(true));
+            let (root, cx) = cx.add_window_view(|_, cx| ShellPickerModal::new(cx));
+            cx.update(|window, cx| {
+                root.update(cx, |view, cx| {
+                    view.open_with_focus(Some(opener.clone()), "bash", None, cx);
+                });
+                opener.focus(window, cx);
+                window.render_frame(cx);
+            });
+            cx.simulate_keystrokes("escape");
+            cx.update(|window, app| {
+                assert!(!root.read(app).is_open());
+                assert!(opener.is_focused(window));
+            });
+        }
+    );
 
     #[::core::prelude::v1::test]
     fn shell_choices_reads_the_shells_route() {
