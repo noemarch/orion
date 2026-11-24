@@ -141,6 +141,10 @@ impl WorkspaceSidebar {
         self.refresh();
     }
 
+    pub fn focus_handle(&self) -> &FocusHandle {
+        &self.focus_handle
+    }
+
     /// The snapshot body (`snapshot` object) backing the current render.
     pub fn snapshot(&self) -> Option<Value> {
         self.snapshot.clone()
@@ -239,6 +243,7 @@ impl WorkspaceSidebar {
         rail: bool,
         theme: &Theme,
         scale: f32,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         match row {
@@ -267,8 +272,10 @@ impl WorkspaceSidebar {
                     .items_center()
                     .gap(px(SPACE_2 * scale))
                     .px(px(SPACE_2 * scale))
-                    .role(gpui_kit::Role::Button)
+                    .role(gpui_kit::Role::TreeItem)
                     .aria_expanded(!collapsed)
+                    .aria_selected(workspace.focused)
+                    .when(workspace.focused, |el| el.bg(theme.selected_bg()))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_workspace(&id, cx)))
                     .child(
                         Icon::new(chevron)
@@ -324,9 +331,13 @@ impl WorkspaceSidebar {
             } => {
                 let pane_id = agent.pane_id.clone();
                 let needs_input = matches!(agent.status, AgentStatus::Blocked);
+                let selected = agent.selected;
+                let focused = selected && self.focus_handle.is_focused(window);
                 div()
                     .id(format!("sidebar-pane-{}", agent.pane_id))
                     .test_support()
+                    .role(gpui_kit::Role::Row)
+                    .aria_selected(selected)
                     .h(px(PANE_ROW_PX))
                     .w_full()
                     .flex()
@@ -334,6 +345,23 @@ impl WorkspaceSidebar {
                     .justify_center()
                     .gap(px(SPACE_1 * scale))
                     .px(px(SPACE_3 * scale))
+                    .when(selected, |el| {
+                        el.bg(theme.selected_bg())
+                            .border_1()
+                            .border_color(theme.accent_emphasis)
+                    })
+                    .when(focused, |el| {
+                        el.child(
+                            div()
+                                .id(format!("sidebar-pane-{}-focus-ring", agent.pane_id))
+                                .test_support()
+                                .absolute()
+                                .inset(px(2.0))
+                                .rounded(px(RADIUS_SM))
+                                .flex_none()
+                                .focus_ring_style(window, cx),
+                        )
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.focus_pane(&pane_id);
                         cx.emit(SidebarEvent::PaneFocused(pane_id.clone()));
@@ -880,11 +908,11 @@ impl Render for WorkspaceSidebar {
                     cx.entity(),
                     "sidebar-tree",
                     sizes,
-                    move |this, range, _window, cx| {
+                    move |this, range, window, cx| {
                         range
                             .filter_map(|ix| rows.get(ix))
                             .map(|row| {
-                                this.render_tree_row(row, rail, &theme, scale, cx)
+                                this.render_tree_row(row, rail, &theme, scale, window, cx)
                                     .into_any_element()
                             })
                             .collect()
@@ -909,9 +937,7 @@ impl Render for WorkspaceSidebar {
 
         div()
             .id("workspace-sidebar")
-            .when(self.focus_handle.is_focused(window), |el| {
-                el.focus_ring_style(window, cx)
-            })
+            .test_support()
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
@@ -932,9 +958,63 @@ mod tests {
     use gpui_kit::test::{TestQueryExt, TestWindowExt};
     use orion_core::runtime::PaneHandle;
     use orion_core::FrameSink;
+    use std::sync::Mutex;
 
     struct TreeFixture {
+        state: Mutex<FixtureState>,
+    }
+
+    struct FixtureState {
         snapshot: Value,
+        calls: Vec<(String, String, Value)>,
+    }
+
+    impl TreeFixture {
+        fn new(snapshot: Value) -> Self {
+            Self {
+                state: Mutex::new(FixtureState {
+                    snapshot,
+                    calls: Vec::new(),
+                }),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, String, Value)> {
+            self.state.lock().expect("fixture state").calls.clone()
+        }
+
+        fn focus_pane(&self, pane_id: &str) {
+            let mut state = self.state.lock().expect("fixture state");
+            let mut workspace_id = None;
+            if let Some(panes) = state
+                .snapshot
+                .get_mut("panes")
+                .and_then(Value::as_array_mut)
+            {
+                for pane in panes {
+                    let selected = pane.get("pane_id").and_then(Value::as_str) == Some(pane_id);
+                    if selected {
+                        workspace_id = pane
+                            .get("workspace_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                    }
+                    pane["focused"] = json!(selected);
+                }
+            }
+            if let Some(workspaces) = state
+                .snapshot
+                .get_mut("workspaces")
+                .and_then(Value::as_array_mut)
+            {
+                for workspace in workspaces {
+                    let selected = workspace_id.as_deref()
+                        == workspace.get("workspace_id").and_then(Value::as_str);
+                    workspace["focused"] = json!(selected);
+                }
+            }
+            state.snapshot["focused_pane_id"] = json!(pane_id);
+        }
     }
 
     impl Runtime for TreeFixture {
@@ -942,9 +1022,20 @@ mod tests {
             json!({ "version": "fixture", "protocol": 1 })
         }
 
-        fn http(&self, method: &str, path: &str, _body: &Value) -> (u16, Value) {
+        fn http(&self, method: &str, path: &str, body: &Value) -> (u16, Value) {
+            let mut state = self.state.lock().expect("fixture state");
+            state
+                .calls
+                .push((method.to_string(), path.to_string(), body.clone()));
             if method == "GET" && path == "/api/session" {
-                return (200, json!({ "snapshot": self.snapshot }));
+                return (200, json!({ "snapshot": state.snapshot }));
+            }
+            if method == "POST" && path == "/api/pane/focus" {
+                if let Some(pane_id) = body.get("pane_id").and_then(Value::as_str) {
+                    drop(state);
+                    self.focus_pane(pane_id);
+                }
+                return (200, Value::Null);
             }
             (200, Value::Null)
         }
@@ -970,7 +1061,7 @@ mod tests {
         }
 
         fn snapshot_value(&self) -> Value {
-            self.snapshot.clone()
+            self.state.lock().expect("fixture state").snapshot.clone()
         }
 
         fn restore(&self) {}
@@ -1169,6 +1260,102 @@ mod tests {
         }
     );
 
+    crate::orion_test!(
+        fn clicking_a_pane_activates_it_and_moves_the_tree_selection(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (_root, cx, fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-pane-p1").selected()),
+                Some(true),
+                "the focused pane starts selected"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-pane-p2").selected()),
+                Some(false),
+                "other panes start unselected"
+            );
+
+            cx.update(|window, cx| window.click("sidebar-pane-p3", cx));
+
+            let focus_calls: Vec<_> = fixture
+                .calls()
+                .into_iter()
+                .filter(|(method, path, _)| method == "POST" && path == "/api/pane/focus")
+                .collect();
+            assert_eq!(
+                focus_calls,
+                vec![(
+                    "POST".to_string(),
+                    "/api/pane/focus".to_string(),
+                    json!({ "pane_id": "p3" })
+                )],
+                "the click sends the existing focus route exactly once"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-pane-p3").selected()),
+                Some(true),
+                "the activated pane becomes selected"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-pane-p1").selected()),
+                Some(false),
+                "the previous pane is no longer selected"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-workspace-ws-2").selected()),
+                Some(true),
+                "the activated pane's workspace is evident in the tree"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn tree_focus_puts_a_ring_inside_the_selected_row_only(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1-focus-ring").is_none()),
+                "an unfocused tree has no row ring"
+            );
+
+            let handle = cx.update(|_, app| root.read(app).focus_handle().clone());
+            cx.update(|window, app| handle.focus(window, app));
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert_eq!(
+                cx.update(|window, _| window.find("workspace-sidebar").focused()),
+                Some(true),
+                "the tree holds keyboard focus"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1-focus-ring").is_some()),
+                "the selected row shows the focus ring"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p2-focus-ring").is_none()),
+                "unselected rows do not show a ring"
+            );
+
+            let (row, ring) = cx.update(|window, _| {
+                (
+                    window.find("sidebar-pane-p1").bounds(),
+                    window.find("sidebar-pane-p1-focus-ring").bounds(),
+                )
+            });
+            assert!(
+                ring.top() >= row.top()
+                    && ring.bottom() <= row.bottom()
+                    && ring.left() >= row.left()
+                    && ring.right() <= row.right(),
+                "the ring stays inside the row, not around the sidebar"
+            );
+        }
+    );
+
     fn status_snapshot() -> Value {
         let panes = [
             ("p1", "idle"),
@@ -1196,9 +1383,7 @@ mod tests {
 
     crate::orion_test!(
         fn every_status_uses_the_shared_accessible_name(cx: &mut gpui_kit::TestAppContext) {
-            let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture {
-                snapshot: status_snapshot(),
-            });
+            let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture::new(status_snapshot()));
             let (root, cx) = cx.add_window_view(|_, cx| WorkspaceSidebar::new(cx));
             cx.update(|_, app| root.update(app, |view, _cx| view.attach(Arc::clone(&runtime))));
             cx.update(|window, cx| window.render_frame(cx));
@@ -1214,18 +1399,18 @@ mod tests {
     ) -> (
         Entity<WorkspaceSidebar>,
         &'a mut gpui_kit::VisualTestContext,
+        Arc<TreeFixture>,
     ) {
-        let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture {
-            snapshot: tree_snapshot(),
-        });
+        let fixture = Arc::new(TreeFixture::new(tree_snapshot()));
+        let runtime: Arc<dyn Runtime> = fixture.clone();
         let (root, cx) = cx.add_window_view(|_, cx| WorkspaceSidebar::new(cx));
-        cx.update(|_, app| root.update(app, |view, _cx| view.attach(Arc::clone(&runtime))));
-        (root, cx)
+        cx.update(|_, app| root.update(app, |view, _cx| view.attach(runtime)));
+        (root, cx, fixture)
     }
 
     crate::orion_test!(
         fn workspaces_group_their_panes_and_collapse_together(cx: &mut gpui_kit::TestAppContext) {
-            let (_root, cx) = open_tree_fixture(cx);
+            let (_root, cx, _fixture) = open_tree_fixture(cx);
             cx.update(|window, cx| window.render_frame(cx));
 
             for id in [
@@ -1274,7 +1459,7 @@ mod tests {
 
     crate::orion_test!(
         fn pane_rows_name_status_and_show_a_monospace_subtitle(cx: &mut gpui_kit::TestAppContext) {
-            let (_root, cx) = open_tree_fixture(cx);
+            let (_root, cx, _fixture) = open_tree_fixture(cx);
             cx.update(|window, cx| window.render_frame(cx));
 
             for label in ["Working", "Waiting", "Done", "/work/orion", "/bin/bash"] {
@@ -1310,9 +1495,7 @@ mod tests {
 
     crate::orion_test!(
         fn collapse_survives_sidebar_hide_and_show(cx: &mut gpui_kit::TestAppContext) {
-            let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture {
-                snapshot: tree_snapshot(),
-            });
+            let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture::new(tree_snapshot()));
             let (root, cx) = cx.add_window_view(|_, cx| MountHarness {
                 sidebar: cx.new(WorkspaceSidebar::new),
                 mounted: true,
@@ -1353,7 +1536,7 @@ mod tests {
 
     crate::orion_test!(
         fn tree_rows_use_precomputed_header_and_pane_heights(cx: &mut gpui_kit::TestAppContext) {
-            let (_root, cx) = open_tree_fixture(cx);
+            let (_root, cx, _fixture) = open_tree_fixture(cx);
             cx.update(|window, cx| window.render_frame(cx));
 
             let header = cx.update(|window, _| {
