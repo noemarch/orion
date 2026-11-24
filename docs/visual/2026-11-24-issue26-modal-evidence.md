@@ -38,7 +38,7 @@ change was made to work around the capture limitation.
 ## Confirmation dialogs
 
 The two gpui-kit alert dialogs were verified by API audit and code trace only
-(`task-4-audit.md` in the SDD workspace). Both already satisfy sentence-case
+(`docs/visual/2026-11-24-issue26-confirmation-audit.md`). Both already satisfy sentence-case
 titles, outcome-verb "Close" buttons, specific consequence text, and token-only
 colors, so no source change was made. OS-level screenshots of the confirmations
 were not reachable in the capture harness; this is recorded as an environment
