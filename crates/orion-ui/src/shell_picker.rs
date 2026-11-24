@@ -382,6 +382,56 @@ mod tests {
         }
     );
 
+    fn assert_panel_fits(cx: &mut gpui_kit::TestAppContext, width: f32) {
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::Size;
+        use std::ops::Deref;
+        let window = cx.open_window(
+            Size {
+                width: gpui_kit::px(width),
+                height: gpui_kit::px(800.0),
+            },
+            |_, cx| ShellPickerModal::new(cx),
+        );
+        let root = window.root(cx).expect("the shell picker root");
+        let mut cx = gpui_kit::VisualTestContext::from_window(*window.deref(), cx);
+        cx.update(|_window, app| {
+            root.update(app, |view, cx| {
+                view.open_with_focus(None, "bash", None, cx);
+            });
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        let panel = cx
+            .debug_bounds("shell-picker-panel")
+            .unwrap_or_else(|| panic!("the panel is drawn at {width}px"));
+        let bounds = cx.update(|window, _cx| window.bounds());
+        assert!(
+            f32::from(panel.size.width) > 0.0,
+            "panel has width at {width}px"
+        );
+        assert!(
+            f32::from(panel.origin.x) >= f32::from(bounds.origin.x),
+            "panel inside the left edge at {width}px"
+        );
+        assert!(
+            f32::from(panel.origin.x + panel.size.width)
+                <= f32::from(bounds.origin.x + bounds.size.width),
+            "panel inside the right edge at {width}px"
+        );
+    }
+
+    crate::orion_test!(
+        fn modal_panel_fits_at_desktop_width(cx: &mut gpui_kit::TestAppContext) {
+            assert_panel_fits(cx, 1280.0);
+        }
+    );
+
+    crate::orion_test!(
+        fn modal_panel_fits_at_narrow_width(cx: &mut gpui_kit::TestAppContext) {
+            assert_panel_fits(cx, 480.0);
+        }
+    );
+
     crate::orion_test!(
         fn modal_restores_opener_focus_on_escape(cx: &mut gpui_kit::TestAppContext) {
             use gpui_kit::test::TestWindowExt;
