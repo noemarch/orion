@@ -11,6 +11,7 @@ pub mod file_reader;
 pub mod files_entities;
 pub mod files_view;
 pub mod markdown;
+pub mod modal_shell;
 pub mod new_workspace;
 pub mod pane_seam;
 #[cfg(debug_assertions)]
