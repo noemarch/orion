@@ -111,6 +111,12 @@ enum TreeRow {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TreeCursor {
+    Header(String),
+    Pane(String),
+}
+
 /// The sidebar view. State is the last session snapshot; `refresh()` swaps
 /// it in when the wire body changes (stale rows are swept with it).
 pub struct WorkspaceSidebar {
@@ -122,6 +128,7 @@ pub struct WorkspaceSidebar {
     _search_subscription: Subscription,
     pulse_phase: u32,
     collapsed_workspaces: HashSet<String>,
+    cursor: Option<TreeCursor>,
     scroll: VirtualListScrollHandle,
 }
 
@@ -145,6 +152,7 @@ impl WorkspaceSidebar {
             _search_subscription: subscription,
             pulse_phase: 0,
             collapsed_workspaces: HashSet::new(),
+            cursor: None,
             scroll: VirtualListScrollHandle::new(),
         };
         view.start_poll(cx);
@@ -240,11 +248,117 @@ impl WorkspaceSidebar {
         rows
     }
 
-    fn toggle_workspace(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !self.collapsed_workspaces.remove(id) {
-            self.collapsed_workspaces.insert(id.to_string());
+    fn row_target(row: &TreeRow) -> (TreeCursor, &str) {
+        match row {
+            TreeRow::Header { workspace, .. } => (
+                TreeCursor::Header(workspace.id.clone()),
+                workspace.id.as_str(),
+            ),
+            TreeRow::Pane { agent, .. } => (
+                TreeCursor::Pane(agent.pane_id.clone()),
+                agent.workspace_id.as_str(),
+            ),
         }
-        cx.notify();
+    }
+
+    fn cursor_index(&self, rows: &[TreeRow]) -> Option<usize> {
+        let cursor = self.cursor.as_ref()?;
+        rows.iter()
+            .position(|row| Self::row_target(row).0 == *cursor)
+    }
+
+    fn apply_workspace_collapsed(&mut self, id: &str, collapsed: bool) -> bool {
+        if self.collapsed_workspaces.contains(id) == collapsed {
+            return false;
+        }
+        if collapsed {
+            self.collapsed_workspaces.insert(id.to_string());
+        } else {
+            self.collapsed_workspaces.remove(id);
+        }
+        true
+    }
+
+    fn toggle_workspace(&mut self, id: &str, cx: &mut Context<Self>) {
+        let collapsed = !self.collapsed_workspaces.contains(id);
+        if self.apply_workspace_collapsed(id, collapsed) {
+            cx.notify();
+        }
+    }
+
+    fn move_cursor(&mut self, rows: &[TreeRow], index: usize) {
+        let (cursor, _) = Self::row_target(&rows[index]);
+        self.cursor = Some(cursor);
+        self.scroll.scroll_to_item(index, ScrollStrategy::Top);
+    }
+
+    fn handle_tree_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let query = self.search_input.read(cx).value().to_string();
+        let rows = self.visible_rows(&query);
+        if rows.is_empty() {
+            return;
+        }
+        let searching = !query.trim().is_empty();
+        match event.keystroke.key.as_str() {
+            "down" => {
+                let index = match self.cursor_index(&rows) {
+                    Some(current) => (current + 1).min(rows.len() - 1),
+                    None => 0,
+                };
+                self.move_cursor(&rows, index);
+                cx.notify();
+            }
+            "up" => {
+                let index = match self.cursor_index(&rows) {
+                    Some(current) => current.saturating_sub(1),
+                    None => rows.len() - 1,
+                };
+                self.move_cursor(&rows, index);
+                cx.notify();
+            }
+            "escape" => self.clear_search(window, cx),
+            "enter" => {
+                let Some(index) = self.cursor_index(&rows) else {
+                    return;
+                };
+                match &rows[index] {
+                    TreeRow::Header { workspace, .. } if !searching => {
+                        self.toggle_workspace(&workspace.id, cx);
+                    }
+                    TreeRow::Header { .. } => {}
+                    TreeRow::Pane { agent, .. } => {
+                        let pane_id = agent.pane_id.clone();
+                        self.focus_pane(&pane_id);
+                        cx.emit(SidebarEvent::PaneFocused(pane_id));
+                        cx.notify();
+                    }
+                }
+            }
+            "left" | "right" => {
+                let Some(index) = self.cursor_index(&rows) else {
+                    return;
+                };
+                if searching {
+                    return;
+                }
+                let (_, workspace_id) = Self::row_target(&rows[index]);
+                let workspace_id = workspace_id.to_string();
+                let collapse = event.keystroke.key == "left";
+                if !self.apply_workspace_collapsed(&workspace_id, collapse) {
+                    return;
+                }
+                if collapse && matches!(rows[index], TreeRow::Pane { .. }) {
+                    self.cursor = Some(TreeCursor::Header(workspace_id));
+                }
+                cx.notify();
+            }
+            _ => {}
+        }
     }
 
     fn status_indicator(
@@ -274,12 +388,13 @@ impl WorkspaceSidebar {
     fn render_tree_row(
         &self,
         row: &TreeRow,
+        cursor: Option<&TreeCursor>,
         rail: bool,
         theme: &Theme,
-        scale: f32,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let scale = theme.density_scale();
         match row {
             TreeRow::Header {
                 workspace,
@@ -287,6 +402,8 @@ impl WorkspaceSidebar {
                 collapsed,
             } => {
                 let id = workspace.id.clone();
+                let focused = self.focus_handle.is_focused(window)
+                    && cursor == Some(&TreeCursor::Header(id.clone()));
                 let chevron = if *collapsed {
                     IconName::ChevronRight
                 } else {
@@ -310,6 +427,18 @@ impl WorkspaceSidebar {
                     .aria_expanded(!collapsed)
                     .aria_selected(workspace.focused)
                     .when(workspace.focused, |el| el.bg(theme.selected_bg()))
+                    .when(focused, |el| {
+                        el.child(
+                            div()
+                                .id(format!("sidebar-workspace-{id}-focus-ring"))
+                                .test_support()
+                                .absolute()
+                                .inset(px(2.0))
+                                .rounded(px(RADIUS_SM))
+                                .flex_none()
+                                .focus_ring_style(window, cx),
+                        )
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.search_input.read(cx).value().trim().is_empty() {
                             this.toggle_workspace(&id, cx);
@@ -370,7 +499,12 @@ impl WorkspaceSidebar {
                 let pane_id = agent.pane_id.clone();
                 let needs_input = matches!(agent.status, AgentStatus::Blocked);
                 let selected = agent.selected;
-                let focused = selected && self.focus_handle.is_focused(window);
+                let focused = self.focus_handle.is_focused(window)
+                    && match cursor {
+                        Some(TreeCursor::Pane(id)) => id == &agent.pane_id,
+                        Some(TreeCursor::Header(_)) => false,
+                        None => selected,
+                    };
                 div()
                     .id(format!("sidebar-pane-{}", agent.pane_id))
                     .test_support()
@@ -958,6 +1092,10 @@ impl Render for WorkspaceSidebar {
         let rail = ShellLayout::for_width(f32::from(window.bounds().size.width)).rail;
         let query = self.search_input.read(cx).value().to_string();
         let rows = self.visible_rows(&query);
+        let cursor = self
+            .cursor
+            .clone()
+            .filter(|cursor| rows.iter().any(|row| Self::row_target(row).0 == *cursor));
         let empty = rows.is_empty();
         let searching = !query.trim().is_empty();
         let sizes = Rc::new(
@@ -982,7 +1120,7 @@ impl Render for WorkspaceSidebar {
                         range
                             .filter_map(|ix| rows.get(ix))
                             .map(|row| {
-                                this.render_tree_row(row, rail, &theme, scale, window, cx)
+                                this.render_tree_row(row, cursor.as_ref(), rail, &theme, window, cx)
                                     .into_any_element()
                             })
                             .collect()
@@ -1032,6 +1170,9 @@ impl Render for WorkspaceSidebar {
             .id("workspace-sidebar")
             .test_support()
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.handle_tree_key(event, window, cx);
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -1774,6 +1915,374 @@ mod tests {
                 cx.update(|window, _| window.find("workspace-sidebar").focused()),
                 Some(true),
                 "Escape hands focus back to the tree"
+            );
+        }
+    );
+
+    fn focus_tree(root: &Entity<WorkspaceSidebar>, cx: &mut gpui_kit::VisualTestContext) {
+        let handle = cx.update(|_, app| root.read(app).focus_handle().clone());
+        cx.update(|window, app| handle.focus(window, app));
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+
+    fn focus_calls(fixture: &TreeFixture) -> Vec<(String, String, Value)> {
+        fixture
+            .calls()
+            .into_iter()
+            .filter(|(method, path, _)| method == "POST" && path == "/api/pane/focus")
+            .collect()
+    }
+
+    crate::orion_test!(
+        fn arrow_keys_move_the_focus_cursor_over_headers_and_panes(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            focus_tree(&root, cx);
+
+            cx.update(|window, cx| window.press("down", cx));
+            assert!(
+                cx.update(|window, _| window
+                    .try_find("sidebar-workspace-ws-1-focus-ring")
+                    .is_some()),
+                "the first Down puts the cursor on the first header"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1-focus-ring").is_none()),
+                "the first Down does not skip the header"
+            );
+
+            cx.update(|window, cx| window.press("down", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1-focus-ring").is_some()),
+                "Down advances onto the first pane"
+            );
+            cx.update(|window, cx| window.press("down", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p2-focus-ring").is_some()),
+                "Down walks the visible panes in display order"
+            );
+
+            cx.update(|window, cx| window.press("up", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1-focus-ring").is_some()),
+                "Up moves back one visible row"
+            );
+            assert!(
+                cx.update(|window, _| window
+                    .try_find("sidebar-workspace-ws-1-focus-ring")
+                    .is_none()),
+                "only the cursor row carries a ring"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn enter_activates_the_focused_pane_and_keeps_focus_in_the_tree(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            use std::cell::RefCell;
+            use std::rc::Rc;
+
+            let (root, cx, fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            focus_tree(&root, cx);
+
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let collected = events.clone();
+            let subscription = cx.update(|_window, app| {
+                app.subscribe(&root, move |_entity, event: &SidebarEvent, _cx| {
+                    collected.borrow_mut().push(event.clone());
+                })
+            });
+
+            cx.update(|window, cx| window.press("up", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p3-focus-ring").is_some()),
+                "Up from no cursor parks the cursor on the last visible pane"
+            );
+            cx.update(|window, cx| window.press("enter", cx));
+
+            assert_eq!(
+                focus_calls(&fixture),
+                vec![(
+                    "POST".to_string(),
+                    "/api/pane/focus".to_string(),
+                    json!({ "pane_id": "p3" })
+                )],
+                "Enter activates the pane under the cursor"
+            );
+            assert!(
+                events
+                    .borrow()
+                    .contains(&SidebarEvent::PaneFocused("p3".to_string())),
+                "keyboard activation reports the same event as a click: {:?}",
+                events.borrow()
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find("workspace-sidebar").focused()),
+                Some(true),
+                "keyboard activation leaves focus in the tree"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-pane-p3").selected()),
+                Some(true),
+                "the activated pane and its workspace become selected"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-workspace-ws-2").selected()),
+                Some(true),
+                "the activated pane's workspace is evident in the tree"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p3-focus-ring").is_some()),
+                "the cursor ring stays on the activated pane"
+            );
+            drop(subscription);
+        }
+    );
+
+    crate::orion_test!(
+        fn enter_on_a_header_toggles_the_group(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            focus_tree(&root, cx);
+
+            cx.update(|window, cx| window.press("down", cx));
+            cx.update(|window, cx| window.press("enter", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()),
+                "Enter collapses the group under the cursor"
+            );
+            assert!(
+                cx.update(|window, _| window
+                    .try_find("sidebar-workspace-ws-1-focus-ring")
+                    .is_some()),
+                "the cursor stays on the header"
+            );
+
+            cx.update(|window, cx| window.press("enter", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some()),
+                "Enter expands the group again"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn left_and_right_collapse_and_expand_the_group_under_the_cursor(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            focus_tree(&root, cx);
+
+            cx.update(|window, cx| window.press("down", cx));
+            cx.update(|window, cx| window.press("right", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some()),
+                "Right on an expanded group changes nothing"
+            );
+            assert!(
+                cx.update(|window, _| window
+                    .try_find("sidebar-workspace-ws-1-focus-ring")
+                    .is_some()),
+                "an ineffective collapse key leaves the cursor where it was"
+            );
+
+            cx.update(|window, cx| window.press("left", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()),
+                "Left collapses the group under the cursor"
+            );
+            assert!(
+                cx.update(|window, _| window
+                    .try_find("sidebar-workspace-ws-1-focus-ring")
+                    .is_some()),
+                "the cursor stays on the header after collapsing"
+            );
+
+            cx.update(|window, cx| window.press("left", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()),
+                "Left on an already collapsed group changes nothing"
+            );
+            assert!(
+                cx.update(|window, _| window
+                    .try_find("sidebar-workspace-ws-1-focus-ring")
+                    .is_some()),
+                "an ineffective Left keeps the cursor on the header"
+            );
+
+            cx.update(|window, cx| window.press("right", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some()),
+                "Right expands the group again"
+            );
+
+            cx.update(|window, cx| window.press("down", cx));
+            cx.update(|window, cx| window.press("left", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()),
+                "Left on a pane collapses its Workspace"
+            );
+            assert!(
+                cx.update(|window, _| window
+                    .try_find("sidebar-workspace-ws-1-focus-ring")
+                    .is_some()),
+                "the cursor moves to the group it just collapsed"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p3").is_some()),
+                "another workspace stays expanded"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn navigation_and_activation_respect_the_search_filter(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx, fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            type_query(cx, "bash");
+            focus_tree(&root, cx);
+
+            cx.update(|window, cx| window.press("down", cx));
+            assert!(
+                cx.update(|window, _| window
+                    .try_find("sidebar-workspace-ws-2-focus-ring")
+                    .is_some()),
+                "the cursor walks the filtered header"
+            );
+            cx.update(|window, cx| window.press("down", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p3-focus-ring").is_some()),
+                "the cursor walks the filtered pane"
+            );
+
+            cx.update(|window, cx| window.press("enter", cx));
+            assert_eq!(
+                focus_calls(&fixture),
+                vec![(
+                    "POST".to_string(),
+                    "/api/pane/focus".to_string(),
+                    json!({ "pane_id": "p3" })
+                )],
+                "Enter activates only the visible pane"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_none()),
+                "a hidden pane is never activated"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find("workspace-sidebar").focused()),
+                Some(true),
+                "focus stays in the tree while filtering"
+            );
+        }
+    );
+
+    fn many_panes_snapshot() -> Value {
+        let pane_ids: Vec<String> = (1..=30).map(|i| format!("p{i}")).collect();
+        json!({
+            "workspaces": [{
+                "workspace_id": "ws-1", "label": "Many", "active_tab_id": "tab-1",
+                "focused": true, "agent_status": "idle"
+            }],
+            "tabs": [{
+                "tab_id": "tab-1", "workspace_id": "ws-1", "label": "main",
+                "pane_ids": pane_ids, "active_pane_id": "p1", "focused": true,
+                "agent_status": "idle"
+            }],
+            "panes": (1..=30).map(|i| json!({
+                "pane_id": format!("p{i}"), "workspace_id": "ws-1", "tab_id": "tab-1",
+                "label": format!("Pane {i}"), "display_agent": "claude",
+                "cwd": format!("/work/{i}"), "agent_status": "idle", "focused": false,
+            })).collect::<Vec<_>>(),
+            "focused_pane_id": "p1",
+        })
+    }
+
+    crate::orion_test!(
+        fn the_cursor_scrolls_into_view_when_it_reaches_an_unrendered_row(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture::new(many_panes_snapshot()));
+            let (root, cx) = cx.add_window_view(|window, cx| WorkspaceSidebar::new(window, cx));
+            cx.update(|_, app| root.update(app, |view, _cx| view.attach(runtime)));
+            cx.update(|window, cx| window.render_frame(cx));
+            focus_tree(&root, cx);
+
+            cx.update(|window, cx| window.press("up", cx));
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p30-focus-ring").is_some()),
+                "the cursor row is rendered after navigating to it"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn collapse_keys_do_not_change_hidden_state_while_filtering(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            type_query(cx, "orion");
+            focus_tree(&root, cx);
+
+            cx.update(|window, cx| window.press("down", cx));
+            cx.update(|window, cx| window.press("left", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some())
+                    && cx.update(|window, _| window.try_find("sidebar-pane-p2").is_some()),
+                "collapse keys have no visible effect while filtering"
+            );
+            assert!(
+                cx.update(|window, _| window
+                    .try_find("sidebar-workspace-ws-1-focus-ring")
+                    .is_some()),
+                "ineffective collapse keys leave the cursor on the header"
+            );
+
+            cx.update(|window, cx| window.click("sidebar-search-clear", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some())
+                    && cx.update(|window, _| window.try_find("sidebar-pane-p2").is_some()),
+                "clearing the query restores the unchanged layout"
+            );
+
+            type_query(cx, "orion");
+            focus_tree(&root, cx);
+            cx.update(|window, cx| window.press("down", cx));
+            cx.update(|window, cx| window.press("enter", cx));
+            cx.update(|window, cx| window.click("sidebar-search-clear", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some())
+                    && cx.update(|window, _| window.try_find("sidebar-pane-p2").is_some()),
+                "Enter on a filtered header leaves stored collapse state alone"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn escape_from_the_tree_clears_search_and_keeps_tree_focus(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            type_query(cx, "bash");
+            focus_tree(&root, cx);
+
+            cx.update(|window, cx| window.press("escape", cx));
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some()),
+                "Escape from the tree clears the query"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find("workspace-sidebar").focused()),
+                Some(true),
+                "Escape keeps focus in the tree"
             );
         }
     );
