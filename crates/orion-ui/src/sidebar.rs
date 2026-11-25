@@ -628,7 +628,10 @@ impl WorkspaceSidebar {
         let hovered = self.hovered_row.as_ref() == Some(target);
         let menu_open = self.open_menu.as_ref() == Some(target);
         div()
-            .flex_none()
+            .absolute()
+            .right_0()
+            .top_0()
+            .h(px(TOUCH_TARGET_PX))
             .flex()
             .flex_row()
             .items_center()
@@ -757,7 +760,8 @@ impl WorkspaceSidebar {
                     .flex_row()
                     .items_center()
                     .gap(px(SPACE_2 * scale))
-                    .px(px(SPACE_2 * scale))
+                    .pl(px(SPACE_2 * scale))
+                    .pr(px(140.0 * scale))
                     .role(gpui_kit::Role::TreeItem)
                     .aria_expanded(!collapsed)
                     .aria_selected(workspace.focused)
@@ -901,6 +905,7 @@ impl WorkspaceSidebar {
                             .flex_row()
                             .items_center()
                             .gap(px(SPACE_2 * scale))
+                            .pr(px(96.0 * scale))
                             .child(self.status_indicator(&agent.pane_id, agent.status, theme))
                             .child(
                                 div()
@@ -956,6 +961,8 @@ impl WorkspaceSidebar {
                             .id(format!("sidebar-pane-{}-subtitle", agent.pane_id))
                             .test_support()
                             .aria_label(subtitle.clone())
+                            .flex_none()
+                            .h(px(theme.font_ui_secondary() + 4.0))
                             .w_full()
                             .min_w(px(0.0))
                             .truncate()
@@ -2892,6 +2899,28 @@ mod tests {
                 "Escape sends no rename request"
             );
             let _ = cx.update(|window, _| window.find_by_label("Orion"));
+        }
+    );
+
+    crate::orion_test!(
+        fn pane_subtitle_occupies_the_second_line(cx: &mut gpui_kit::TestAppContext) {
+            let (_root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+
+            let (row, subtitle) = cx.update(|window, _| {
+                (
+                    window.find("sidebar-pane-p1").bounds(),
+                    window.find("sidebar-pane-p1-subtitle").bounds(),
+                )
+            });
+            assert!(
+                subtitle.size.height > px(0.0),
+                "the subtitle line has a positive height"
+            );
+            assert!(
+                subtitle.top() >= row.top() && subtitle.bottom() <= row.bottom(),
+                "the subtitle stays inside the pane row: row={row:?} subtitle={subtitle:?}"
+            );
         }
     );
 
