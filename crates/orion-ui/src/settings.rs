@@ -10,6 +10,9 @@
 //! scope. The covered groups match the web defaults (dark, comfortable,
 //! `["alt"]`, alerts on, input alerts on, done alerts long).
 
+use crate::shell_model::{
+    WindowGeometry, SIDEBAR_WIDTH_MAX_PX, SIDEBAR_WIDTH_MIN_PX, SIDEBAR_WIDTH_WIDE_PX,
+};
 use crate::theme::{Density, Theme, ThemeMode, TOUCH_TARGET_PX};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{FocusTrapElement, StyledExt};
@@ -175,7 +178,7 @@ fn alerts_dependents_disabled(prefs: &Preferences) -> bool {
 }
 
 /// The saved preferences shape: theme, density, key-bar extras, alerts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Preferences {
     pub theme: ThemeMode,
     pub density: Density,
@@ -193,6 +196,8 @@ pub struct Preferences {
     pub default_shell: String,
     /// An optional absolute path to a shell executable, sent to the engine.
     pub shell_path: String,
+    pub window_bounds: Option<WindowGeometry>,
+    pub sidebar_width: f32,
 }
 
 impl Default for Preferences {
@@ -211,6 +216,8 @@ impl Default for Preferences {
             alert_done: "long".to_string(),
             default_shell: DEFAULT_SHELL.to_string(),
             shell_path: String::new(),
+            window_bounds: None,
+            sidebar_width: SIDEBAR_WIDTH_WIDE_PX,
         }
     }
 }
@@ -242,6 +249,15 @@ impl Preferences {
             "alertDone": self.alert_done,
             "defaultShell": self.default_shell,
             "shellPath": self.shell_path,
+            "windowBounds": self.window_bounds.map(|bounds| {
+                json!({
+                    "x": bounds.x,
+                    "y": bounds.y,
+                    "width": bounds.width,
+                    "height": bounds.height,
+                })
+            }),
+            "sidebarWidth": self.sidebar_width,
         })
     }
 
@@ -305,6 +321,23 @@ impl Preferences {
             .and_then(Value::as_str)
             .map(sanitize_shell_path)
             .unwrap_or_default();
+        let finite_number = |value: Option<&Value>| {
+            value
+                .and_then(Value::as_f64)
+                .map(|value| value as f32)
+                .filter(|value| value.is_finite())
+        };
+        let window_bounds = settings.get("windowBounds").and_then(|bounds| {
+            Some(WindowGeometry {
+                x: finite_number(bounds.get("x"))?,
+                y: finite_number(bounds.get("y"))?,
+                width: finite_number(bounds.get("width"))?,
+                height: finite_number(bounds.get("height"))?,
+            })
+        });
+        let sidebar_width = finite_number(settings.get("sidebarWidth"))
+            .map(|width| width.clamp(SIDEBAR_WIDTH_MIN_PX, SIDEBAR_WIDTH_MAX_PX))
+            .unwrap_or(defaults.sidebar_width);
         Self {
             theme,
             density,
@@ -317,6 +350,8 @@ impl Preferences {
             alert_done,
             default_shell,
             shell_path,
+            window_bounds,
+            sidebar_width,
         }
     }
 }
@@ -487,6 +522,14 @@ impl SettingsModal {
         cx.global::<SettingsStore>().prefs.clone()
     }
 
+    pub fn set_window_bounds(&mut self, bounds: WindowGeometry, cx: &mut App) {
+        if cx.global::<SettingsStore>().prefs.window_bounds == Some(bounds) {
+            return;
+        }
+        cx.global_mut::<SettingsStore>().prefs.window_bounds = Some(bounds);
+        save_prefs(cx);
+    }
+
     pub fn is_open(&self) -> bool {
         self.open
     }
@@ -545,6 +588,31 @@ impl Render for SettingsModal {
                         },
                     ),
                 ),
+                SettingItem::new(
+                    "Sidebar width",
+                    SettingField::<SharedString>::dropdown(
+                        vec![
+                            ("264".into(), "Default (264 px)".into()),
+                            ("300".into(), "Wide (300 px)".into()),
+                            ("360".into(), "Extra wide (360 px)".into()),
+                            ("420".into(), "Maximum (420 px)".into()),
+                        ],
+                        |cx: &App| {
+                            SharedString::from(
+                                (cx.global::<SettingsStore>().prefs.sidebar_width.round() as u32)
+                                    .to_string(),
+                            )
+                        },
+                        |value: SharedString, cx: &mut App| {
+                            cx.global_mut::<SettingsStore>().prefs.sidebar_width = value
+                                .parse::<f32>()
+                                .unwrap_or(SIDEBAR_WIDTH_WIDE_PX)
+                                .clamp(SIDEBAR_WIDTH_MIN_PX, SIDEBAR_WIDTH_MAX_PX);
+                            save_prefs(cx);
+                        },
+                    ),
+                )
+                .description("Width of the pane tree on wide windows"),
                 SettingItem::new(
                     "Density",
                     SettingField::<SharedString>::dropdown(
@@ -1024,13 +1092,63 @@ mod tests {
                 "density",
                 "keyBarExtras",
                 "shellPath",
+                "sidebarWidth",
                 "terminalFont",
                 "terminalFontSize",
                 "theme",
                 "uiFontSize",
+                "windowBounds",
             ],
-            "the eleven persisted keys are unchanged"
+            "the thirteen persisted keys are unchanged"
         );
+    }
+
+    #[::core::prelude::v1::test]
+    fn layout_round_trips_through_settings() {
+        let prefs = Preferences {
+            window_bounds: Some(WindowGeometry {
+                x: 40.0,
+                y: 60.0,
+                width: 1440.0,
+                height: 900.0,
+            }),
+            sidebar_width: 312.0,
+            ..Preferences::default()
+        };
+        let restored = Preferences::from_settings(&prefs.settings_value());
+        assert_eq!(restored.window_bounds, prefs.window_bounds);
+        assert_eq!(restored.sidebar_width, 312.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn layout_survives_a_settings_restart() {
+        use orion_core::engine::store::Store;
+        use orion_core::Engine;
+
+        let dir = std::env::temp_dir().join(format!("orion-layout-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let engine = Engine::with_store(Store::at(dir.clone()));
+        let body = json!({ "settings": {
+            "windowBounds": { "x": 40.0, "y": 60.0, "width": 1440.0, "height": 900.0 },
+            "sidebarWidth": 312.0,
+        }});
+        let (status, _) = engine.http("PUT", "/api/preferences", &body);
+        assert_eq!(status, 200);
+
+        let restarted = Engine::with_store(Store::at(dir));
+        let (status, saved) = restarted.http("GET", "/api/preferences", &Value::Null);
+        assert_eq!(status, 200);
+        let prefs = Preferences::from_settings(saved.get("settings").expect("saved settings"));
+        assert_eq!(
+            prefs.window_bounds,
+            Some(WindowGeometry {
+                x: 40.0,
+                y: 60.0,
+                width: 1440.0,
+                height: 900.0,
+            })
+        );
+        assert_eq!(prefs.sidebar_width, 312.0);
     }
 
     #[::core::prelude::v1::test]

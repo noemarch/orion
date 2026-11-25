@@ -11,12 +11,13 @@ use gpui_kit::*;
 use gpui_kit::{
     div, px, App, Context, Entity, Render, Size, Subscription, Window, WindowBounds, WindowOptions,
 };
+use orion_core::engine::store::{default_data_dir, Store};
 use orion_core::runtime::{PaneHandle, Runtime, RuntimeClient, RuntimeStream};
 use orion_core::{Engine, FrameSink, Role};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::chat::{ChatEvent, ChatView};
 use crate::diff_view::ChangesView;
@@ -27,9 +28,9 @@ use crate::review_pane::ReviewPane;
 use crate::session_status;
 use crate::settings::{KeyBarExtras, Preferences, SettingsModal};
 use crate::shell_model::{
-    cycle_lens, cycle_middle_lens, effective_conversation_width, lens_position, reference_layout,
-    review_column_visible_for_terminal, sidebar_visible, HeaderModel, LensBook, ShellLayout,
-    FILES_SURFACE_WIDTH_WIDE,
+    clamp_window_bounds, cycle_lens, cycle_middle_lens, effective_conversation_width,
+    lens_position, reference_layout, review_column_visible_for_terminal, sidebar_visible,
+    HeaderModel, LensBook, ShellLayout, WindowGeometry, FILES_SURFACE_WIDTH_WIDE,
 };
 use crate::shell_picker::{ShellPickerEvent, ShellPickerModal};
 use crate::sidebar::{focus_search, FocusSidebarSearch, SidebarEvent, TabEntry, WorkspaceEntry};
@@ -93,6 +94,7 @@ pub struct OrionApp {
     split_file_tree: Entity<FileTree>,
     split_changes_view: Entity<ChangesView>,
     subscriptions: Vec<Subscription>,
+    bounds_save_generation: u64,
     /// Keyboard focus for the shell chrome (tab rename).
     focus_handle: gpui_kit::FocusHandle,
     /// Roving tab stop for the three-lens segmented switcher. Kit `TabBar`
@@ -545,6 +547,7 @@ impl OrionApp {
             split_file_tree,
             split_changes_view,
             subscriptions: Vec::new(),
+            bounds_save_generation: 0,
             focus_handle: cx.focus_handle().tab_stop(true),
             lens_switch_focus: cx.focus_handle().tab_stop(true),
             middle_switch_focus: cx.focus_handle().tab_stop(true),
@@ -656,6 +659,29 @@ impl OrionApp {
             this.refresh_shell_cache(cx);
             cx.notify();
         });
+        let bounds_observe = cx.observe_window_bounds(window, |this, window, cx| {
+            let bounds = window.bounds();
+            let geometry = WindowGeometry {
+                x: f32::from(bounds.origin.x),
+                y: f32::from(bounds.origin.y),
+                width: f32::from(bounds.size.width),
+                height: f32::from(bounds.size.height),
+            };
+            let generation = this.bounds_save_generation.wrapping_add(1);
+            this.bounds_save_generation = generation;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(400))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.bounds_save_generation == generation {
+                        this.settings
+                            .update(cx, |settings, cx| settings.set_window_bounds(geometry, cx));
+                    }
+                });
+            })
+            .detach();
+        });
         app.subscriptions = vec![
             sidebar_sub,
             modal_sub,
@@ -664,6 +690,7 @@ impl OrionApp {
             split_chat_sub,
             terminal_sub,
             sidebar_observe,
+            bounds_observe,
         ];
 
         // Register before the first pane attaches: an exit that happens while
@@ -1951,7 +1978,10 @@ impl OrionApp {
 impl Render for OrionApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let window_w = f32::from(window.bounds().size.width);
-        let layout = ShellLayout::for_width(window_w);
+        let layout = ShellLayout::for_width_with_preference(
+            window_w,
+            self.settings.read(cx).prefs(cx).sidebar_width,
+        );
         let sidebar_w = layout.sidebar_width_px;
 
         // Shell state is cached from session events (see `refresh_shell_cache`);
@@ -2503,6 +2533,35 @@ pub fn run() {
     gpui_kit::application().with_assets(ShellAssets).run(|cx| {
         gpui_kit::init(cx);
         register_search_shortcuts(cx);
+        let saved = Store::at(default_data_dir())
+            .load_preferences()
+            .get("settings")
+            .cloned();
+        let prefs = saved
+            .as_ref()
+            .map(crate::settings::Preferences::from_settings)
+            .unwrap_or_default();
+        let display = cx
+            .displays()
+            .first()
+            .map(|display| display.bounds())
+            .unwrap_or_else(|| Bounds::new(Point::default(), Size::new(px(1920.0), px(1080.0))));
+        let window_bounds = match prefs.window_bounds {
+            Some(geometry) => {
+                let clamped = clamp_window_bounds(
+                    geometry,
+                    f32::from(display.origin.x),
+                    f32::from(display.origin.y),
+                    f32::from(display.size.width),
+                    f32::from(display.size.height),
+                );
+                WindowBounds::Windowed(Bounds::new(
+                    Point::new(px(clamped.x), px(clamped.y)),
+                    Size::new(px(clamped.width), px(clamped.height)),
+                ))
+            }
+            None => WindowBounds::centered(Size::new(px(1600.0), px(900.0)), cx),
+        };
         gpui_kit::open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
@@ -2510,7 +2569,7 @@ pub fn run() {
                     appears_transparent: true,
                     ..Default::default()
                 }),
-                window_bounds: Some(WindowBounds::centered(Size::new(px(1600.0), px(900.0)), cx)),
+                window_bounds: Some(window_bounds),
                 ..Default::default()
             },
             cx,

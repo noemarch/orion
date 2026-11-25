@@ -17,6 +17,18 @@ pub const NARROW_BREAKPOINT_PX: f32 = 900.0;
 pub const HEADER_HEIGHT_WIDE_PX: f32 = 46.0;
 /// Default wide sidebar width (`--sidebar-w`, DESIGN.md §tokens).
 pub const SIDEBAR_WIDTH_WIDE_PX: f32 = 264.0;
+pub const SIDEBAR_WIDTH_MIN_PX: f32 = 220.0;
+pub const SIDEBAR_WIDTH_MAX_PX: f32 = 420.0;
+pub const MIN_WINDOW_WIDTH_PX: f32 = 900.0;
+pub const MIN_WINDOW_HEIGHT_PX: f32 = 600.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowGeometry {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
 
 impl ShellLayout {
     pub fn for_width(width: f32) -> Self {
@@ -33,6 +45,42 @@ impl ShellLayout {
                 touch_target_px: TOUCH_TARGET_PX,
             }
         }
+    }
+
+    pub fn for_width_with_preference(width: f32, preferred_sidebar_width: f32) -> Self {
+        let mut layout = Self::for_width(width);
+        if !layout.rail {
+            layout.sidebar_width_px =
+                preferred_sidebar_width.clamp(SIDEBAR_WIDTH_MIN_PX, SIDEBAR_WIDTH_MAX_PX);
+        }
+        layout
+    }
+}
+
+pub fn clamp_window_bounds(
+    geometry: WindowGeometry,
+    display_x: f32,
+    display_y: f32,
+    display_width: f32,
+    display_height: f32,
+) -> WindowGeometry {
+    let min_width = MIN_WINDOW_WIDTH_PX.min(display_width);
+    let min_height = MIN_WINDOW_HEIGHT_PX.min(display_height);
+    let width = geometry
+        .width
+        .clamp(min_width, display_width.max(min_width));
+    let height = geometry
+        .height
+        .clamp(min_height, display_height.max(min_height));
+    WindowGeometry {
+        x: geometry
+            .x
+            .clamp(display_x, display_x + display_width - width),
+        y: geometry
+            .y
+            .clamp(display_y, display_y + display_height - height),
+        width,
+        height,
     }
 }
 
@@ -287,6 +335,50 @@ mod tests {
         assert!(layout.rail);
         assert_eq!(layout.sidebar_width_px, 64.0);
         assert!(layout.touch_target_px >= 44.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn remembered_sidebar_width_is_used_only_when_not_rail() {
+        let wide = ShellLayout::for_width_with_preference(1280.0, 320.0);
+        assert!(!wide.rail);
+        assert_eq!(wide.sidebar_width_px, 320.0);
+
+        let clamped = ShellLayout::for_width_with_preference(1280.0, 900.0);
+        assert_eq!(clamped.sidebar_width_px, SIDEBAR_WIDTH_MAX_PX);
+
+        let rail = ShellLayout::for_width_with_preference(800.0, 320.0);
+        assert!(rail.rail);
+        assert_eq!(rail.sidebar_width_px, 64.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn restored_bounds_are_clamped_into_the_display() {
+        let geometry = WindowGeometry {
+            x: 5000.0,
+            y: -200.0,
+            width: 2400.0,
+            height: 1500.0,
+        };
+        let clamped = clamp_window_bounds(geometry, 100.0, 50.0, 1920.0, 1080.0);
+        assert_eq!(clamped.x, 100.0);
+        assert_eq!(clamped.y, 50.0);
+        assert_eq!(clamped.width, 1920.0);
+        assert_eq!(clamped.height, 1080.0);
+
+        let small = clamp_window_bounds(
+            WindowGeometry {
+                x: 100.0,
+                y: 100.0,
+                width: 200.0,
+                height: 200.0,
+            },
+            0.0,
+            0.0,
+            1920.0,
+            1080.0,
+        );
+        assert_eq!(small.width, MIN_WINDOW_WIDTH_PX);
+        assert_eq!(small.height, MIN_WINDOW_HEIGHT_PX);
     }
 
     #[::core::prelude::v1::test]
