@@ -580,6 +580,16 @@ impl OrionApp {
                     this.focused_pane = Some(pane_id.clone());
                     this.attach_pane(cx, pane_id);
                 }
+                SidebarEvent::OpenSettings(opener) => {
+                    let opener = opener.clone();
+                    this.settings.update(cx, |view, cx| {
+                        view.open_with_focus(opener);
+                        cx.notify();
+                    });
+                }
+                SidebarEvent::ToggleSidebar => this.sidebar_open = !this.sidebar_open,
+                SidebarEvent::TerminalLens => this.set_lens(Lens::Terminal, cx),
+                SidebarEvent::ChatLens => this.set_lens(Lens::Chat, cx),
             }
             this.refresh_shell_cache(cx);
             cx.notify();

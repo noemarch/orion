@@ -78,6 +78,10 @@ pub enum SidebarEvent {
     CloseWorkspace(String),
     /// A click focused this pane; the app re-attaches its lens views.
     PaneFocused(String),
+    OpenSettings(Option<FocusHandle>),
+    ToggleSidebar,
+    TerminalLens,
+    ChatLens,
 }
 
 impl gpui_kit::EventEmitter<SidebarEvent> for WorkspaceSidebar {}
@@ -869,8 +873,32 @@ impl WorkspaceSidebar {
         session_status::badge_color(session_status::state_of(status), theme, pulse)
     }
 
-    /// The 40px titlebar: the brand mark, the "Orion" wordmark and two trailing decorative glyphs.
-    fn render_titlebar(&self, rail: bool, theme: &Theme, scale: f32) -> impl IntoElement {
+    fn action_button(
+        id: &'static str,
+        icon: IconName,
+        tooltip: &'static str,
+        event: SidebarEvent,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        Button::new(id)
+            .ghost()
+            .icon(icon)
+            .tooltip(tooltip)
+            .min_h(px(TOUCH_TARGET_PX))
+            .min_w(px(TOUCH_TARGET_PX))
+            .on_click(cx.listener(move |_this, _, _, cx| {
+                cx.emit(event.clone());
+                cx.notify();
+            }))
+    }
+
+    fn render_titlebar(
+        &self,
+        rail: bool,
+        theme: &Theme,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .id("sidebar-titlebar")
             .flex()
@@ -907,19 +935,18 @@ impl WorkspaceSidebar {
                     }),
             )
             .child(div().flex_1())
-            // Decorative only: the real sidebar toggle is `header-sidebar-toggle`
-            // in app.rs. These mirror the reference titlebar glyphs and carry no
-            // click handler or visibility state of their own.
             .child(
                 Icon::new(IconName::Menu)
                     .size(theme.scaled_icon_size())
                     .text_color(theme.text_muted),
             )
-            .child(
-                Icon::new(IconName::PanelLeft)
-                    .size(theme.scaled_icon_size())
-                    .text_color(theme.text_muted),
-            )
+            .child(Self::action_button(
+                "sidebar-header-collapse",
+                IconName::PanelLeft,
+                "Collapse sidebar",
+                SidebarEvent::ToggleSidebar,
+                cx,
+            ))
     }
 
     fn render_search_row(
@@ -981,9 +1008,19 @@ impl WorkspaceSidebar {
                     .items_center()
                     .gap(px(SPACE_1 * scale))
                     .child(
-                        Icon::new(IconName::Settings)
-                            .size(theme.scaled_icon_size())
-                            .text_color(theme.text_muted),
+                        Button::new("sidebar-settings")
+                            .ghost()
+                            .icon(IconName::Settings)
+                            .tooltip("Settings")
+                            .min_h(px(TOUCH_TARGET_PX))
+                            .min_w(px(TOUCH_TARGET_PX))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let opener = window
+                                    .focused(cx)
+                                    .or_else(|| Some(this.focus_handle.clone()));
+                                cx.emit(SidebarEvent::OpenSettings(opener));
+                                cx.notify();
+                            })),
                     )
                     .child(
                         Button::new("new-workspace-button")
@@ -997,16 +1034,18 @@ impl WorkspaceSidebar {
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        Icon::new(IconName::SquareTerminal)
-                            .size(theme.scaled_icon_size())
-                            .text_color(theme.text_muted),
-                    ),
+                    .child(Self::action_button(
+                        "sidebar-terminal-toolbar",
+                        IconName::SquareTerminal,
+                        "Terminal Lens",
+                        SidebarEvent::TerminalLens,
+                        cx,
+                    )),
             )
     }
 
     /// The 40px bottom icon bar.
-    fn render_bottom_bar(&self, theme: &Theme, scale: f32) -> impl IntoElement {
+    fn render_bottom_bar(&self, scale: f32, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("sidebar-bottom-bar")
             .flex()
@@ -1016,16 +1055,20 @@ impl WorkspaceSidebar {
             .h(px(40.0))
             .flex_shrink_0()
             .px(px(SPACE_4 * scale))
-            .child(
-                Icon::new(IconName::SquareTerminal)
-                    .size(theme.scaled_icon_size())
-                    .text_color(theme.token_text_dim()),
-            )
-            .child(
-                Icon::new(IconName::LayoutDashboard)
-                    .size(theme.scaled_icon_size())
-                    .text_color(theme.token_text_dim()),
-            )
+            .child(Self::action_button(
+                "sidebar-terminal-footer",
+                IconName::SquareTerminal,
+                "Terminal Lens",
+                SidebarEvent::TerminalLens,
+                cx,
+            ))
+            .child(Self::action_button(
+                "sidebar-chat-footer",
+                IconName::LayoutDashboard,
+                "Chat Lens",
+                SidebarEvent::ChatLens,
+                cx,
+            ))
     }
 }
 
@@ -1178,10 +1221,10 @@ impl Render for WorkspaceSidebar {
             .size_full()
             .bg(theme.panel_bg())
             .rounded(px(theme.radius_panel()))
-            .child(self.render_titlebar(rail, &theme, scale))
+            .child(self.render_titlebar(rail, &theme, scale, cx))
             .child(self.render_search_row(rail, &theme, scale, &query, cx))
             .child(tree)
-            .child(self.render_bottom_bar(&theme, scale))
+            .child(self.render_bottom_bar(scale, cx))
     }
 }
 
@@ -1932,6 +1975,100 @@ mod tests {
             .filter(|(method, path, _)| method == "POST" && path == "/api/pane/focus")
             .collect()
     }
+
+    fn collect_events(
+        root: &Entity<WorkspaceSidebar>,
+        cx: &mut gpui_kit::VisualTestContext,
+    ) -> (
+        std::rc::Rc<std::cell::RefCell<Vec<SidebarEvent>>>,
+        Subscription,
+    ) {
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        let subscription = cx.update(|_window, app| {
+            app.subscribe(root, move |_entity, event: &SidebarEvent, _cx| {
+                collected.borrow_mut().push(event.clone());
+            })
+        });
+        (events, subscription)
+    }
+
+    crate::orion_test!(
+        fn sidebar_settings_icon_reports_open_settings(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            let (events, subscription) = collect_events(&root, cx);
+
+            cx.update(|window, cx| window.click("sidebar-settings", cx));
+            assert!(
+                events
+                    .borrow()
+                    .iter()
+                    .any(|event| matches!(event, SidebarEvent::OpenSettings(_))),
+                "the settings icon asks the app to open Settings"
+            );
+            assert!(
+                events
+                    .borrow()
+                    .iter()
+                    .any(|event| matches!(event, SidebarEvent::OpenSettings(Some(_)))),
+                "the settings icon passes its focus so Settings can restore it"
+            );
+            drop(subscription);
+        }
+    );
+
+    crate::orion_test!(
+        fn sidebar_header_collapse_reports_toggle_sidebar(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            let (events, subscription) = collect_events(&root, cx);
+
+            cx.update(|window, cx| window.click("sidebar-header-collapse", cx));
+            assert!(
+                events.borrow().contains(&SidebarEvent::ToggleSidebar),
+                "the header collapse button asks the app to toggle the sidebar"
+            );
+            drop(subscription);
+        }
+    );
+
+    crate::orion_test!(
+        fn terminal_icons_report_the_terminal_lens(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            let (events, subscription) = collect_events(&root, cx);
+
+            for id in ["sidebar-terminal-toolbar", "sidebar-terminal-footer"] {
+                cx.update(|window, cx| window.click(id, cx));
+            }
+            assert_eq!(
+                events
+                    .borrow()
+                    .iter()
+                    .filter(|event| **event == SidebarEvent::TerminalLens)
+                    .count(),
+                2,
+                "both terminal icons ask for the Terminal Lens"
+            );
+            drop(subscription);
+        }
+    );
+
+    crate::orion_test!(
+        fn footer_view_icon_reports_the_chat_lens(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            let (events, subscription) = collect_events(&root, cx);
+
+            cx.update(|window, cx| window.click("sidebar-chat-footer", cx));
+            assert!(
+                events.borrow().contains(&SidebarEvent::ChatLens),
+                "the footer view icon asks for the Chat Lens"
+            );
+            drop(subscription);
+        }
+    );
 
     crate::orion_test!(
         fn arrow_keys_move_the_focus_cursor_over_headers_and_panes(
