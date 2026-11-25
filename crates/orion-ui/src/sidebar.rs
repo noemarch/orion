@@ -28,7 +28,7 @@ use crate::theme::{Theme, DOT_SIZE_PX, ICON_SIZE_PX, TOUCH_TARGET_PX};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{v_virtual_list, VirtualListScrollHandle};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{button::Button, button::ButtonVariants, Icon, ThemeStyled};
+use gpui_kit::component::{button::Button, button::ButtonVariants, Icon, ThemeStyled, WindowExt};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::test::TestSupportExt;
 use gpui_kit::*;
@@ -82,6 +82,16 @@ pub enum SidebarEvent {
     ToggleSidebar,
     TerminalLens,
     ChatLens,
+    PaneRenamed(String),
+    WorkspaceRenamed(String),
+    PaneClosed(String),
+    PaneCreated(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RowTarget {
+    Pane(String),
+    Workspace(String),
 }
 
 impl gpui_kit::EventEmitter<SidebarEvent> for WorkspaceSidebar {}
@@ -133,6 +143,11 @@ pub struct WorkspaceSidebar {
     pulse_phase: u32,
     collapsed_workspaces: HashSet<String>,
     cursor: Option<TreeCursor>,
+    open_menu: Option<RowTarget>,
+    inline_edit: Option<RowTarget>,
+    hovered_row: Option<RowTarget>,
+    rename_input: Entity<InputState>,
+    _rename_subscription: Subscription,
     scroll: VirtualListScrollHandle,
 }
 
@@ -141,6 +156,15 @@ impl WorkspaceSidebar {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let subscription = cx.subscribe(
             &search_input,
+            |_this, _input: Entity<InputState>, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        );
+        let rename_input = cx.new(|cx| InputState::new(window, cx));
+        let rename_subscription = cx.subscribe(
+            &rename_input,
             |_this, _input: Entity<InputState>, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
@@ -157,6 +181,11 @@ impl WorkspaceSidebar {
             pulse_phase: 0,
             collapsed_workspaces: HashSet::new(),
             cursor: None,
+            open_menu: None,
+            inline_edit: None,
+            hovered_row: None,
+            rename_input,
+            _rename_subscription: rename_subscription,
             scroll: VirtualListScrollHandle::new(),
         };
         view.start_poll(cx);
@@ -290,6 +319,187 @@ impl WorkspaceSidebar {
         }
     }
 
+    fn http(&self, method: &str, path: &str, body: &Value) {
+        if let Some(engine) = self.engine.clone() {
+            let _ = engine.http(method, path, body);
+        }
+    }
+
+    fn row_info(&self, target: &RowTarget, query: &str) -> Option<(String, AgentStatus)> {
+        let rows = self.visible_rows(query);
+        rows.iter().find_map(|row| match (target, row) {
+            (RowTarget::Pane(id), TreeRow::Pane { agent, .. }) if id == &agent.pane_id => {
+                Some((agent.title.clone(), agent.status))
+            }
+            (RowTarget::Workspace(id), TreeRow::Header { workspace, .. })
+                if id == &workspace.id =>
+            {
+                Some((workspace.label.clone(), workspace.status))
+            }
+            _ => None,
+        })
+    }
+
+    fn set_hovered(&mut self, target: &RowTarget, hovered: bool, cx: &mut Context<Self>) {
+        let next = hovered.then(|| target.clone());
+        if self.hovered_row != next {
+            self.hovered_row = next;
+            cx.notify();
+        }
+    }
+
+    fn open_rename(&mut self, target: RowTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).value().to_string();
+        let title = self
+            .row_info(&target, &query)
+            .map(|(title, _)| title)
+            .unwrap_or_default();
+        self.rename_input.update(cx, |input, cx| {
+            input.set_value(title, window, cx);
+            input.select_all(window, cx);
+        });
+        self.inline_edit = Some(target);
+        self.open_menu = None;
+        self.rename_input
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        self.inline_edit = None;
+        self.open_menu = None;
+        cx.notify();
+    }
+
+    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.inline_edit.take() else {
+            return;
+        };
+        let label = self.rename_input.read(cx).value().trim().to_string();
+        if !label.is_empty() {
+            match &target {
+                RowTarget::Pane(id) => {
+                    self.http(
+                        "POST",
+                        "/api/pane/rename",
+                        &json!({ "pane_id": id, "label": label }),
+                    );
+                    cx.emit(SidebarEvent::PaneRenamed(id.clone()));
+                }
+                RowTarget::Workspace(id) => {
+                    self.http(
+                        "POST",
+                        "/api/workspace/rename",
+                        &json!({ "workspace_id": id, "label": label }),
+                    );
+                    cx.emit(SidebarEvent::WorkspaceRenamed(id.clone()));
+                }
+            }
+            self.refresh();
+        }
+        self.open_menu = None;
+        cx.notify();
+    }
+
+    fn perform_close(&mut self, target: &RowTarget, cx: &mut Context<Self>) {
+        match target {
+            RowTarget::Pane(id) => {
+                self.http("POST", "/api/pane/close", &json!({ "pane_id": id }));
+                self.refresh();
+                cx.emit(SidebarEvent::PaneClosed(id.clone()));
+            }
+            RowTarget::Workspace(id) => {
+                self.http(
+                    "POST",
+                    "/api/workspace/close",
+                    &json!({ "workspace_id": id }),
+                );
+                self.refresh();
+                cx.emit(SidebarEvent::CloseWorkspace(id.clone()));
+            }
+        }
+        cx.notify();
+    }
+
+    fn request_close(&mut self, target: RowTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).value().to_string();
+        let (label, status) = self
+            .row_info(&target, &query)
+            .unwrap_or((String::new(), AgentStatus::Unknown));
+        let running = session_status::state_of(status).is_working();
+        self.open_menu = None;
+        if !running {
+            self.perform_close(&target, cx);
+            return;
+        }
+        let entity = cx.entity();
+        let pane = matches!(target, RowTarget::Pane(_));
+        let title = if pane {
+            "Close running agent?".to_string()
+        } else {
+            "Close running session?".to_string()
+        };
+        let description = if pane {
+            "The agent is still running. Closing it will terminate it.".to_string()
+        } else {
+            format!("{label} is still running. Closing it will terminate the agent.")
+        };
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let entity = entity.clone();
+            let target = target.clone();
+            let title = title.clone();
+            let description = description.clone();
+            alert
+                .title(title)
+                .description(description)
+                .confirm()
+                .ok_text("Close")
+                .on_ok(move |_, _, app| {
+                    entity.update(app, |this, cx| this.perform_close(&target, cx));
+                    true
+                })
+        });
+        cx.notify();
+    }
+
+    fn create_pane(&mut self, workspace_id: &str, cx: &mut Context<Self>) {
+        let workspaces = self.workspaces();
+        let workspace = if workspace_id.is_empty() {
+            workspaces
+                .iter()
+                .find(|workspace| workspace.focused)
+                .or_else(|| workspaces.first())
+        } else {
+            workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+        };
+        let Some(workspace) = workspace.cloned() else {
+            return;
+        };
+        let next = self
+            .tabs(&workspace.id)
+            .iter()
+            .map(|tab| tab.number)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        self.http(
+            "POST",
+            "/api/tab/create",
+            &json!({
+                "workspace_id": workspace.id,
+                "agent": { "kind": workspace.agent },
+                "label": format!("Tab {next}"),
+            }),
+        );
+        self.refresh();
+        cx.emit(SidebarEvent::PaneCreated(workspace.id.clone()));
+        cx.notify();
+    }
+
     fn move_cursor(&mut self, rows: &[TreeRow], index: usize) {
         let (cursor, _) = Self::row_target(&rows[index]);
         self.cursor = Some(cursor);
@@ -389,6 +599,120 @@ impl WorkspaceSidebar {
         }
     }
 
+    fn rename_field(&self, id: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id(format!("{id}-rename-input"))
+            .test_support()
+            .flex_1()
+            .min_w(px(0.0))
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" {
+                    this.cancel_rename(cx);
+                } else if ev.keystroke.key == "enter" {
+                    this.commit_rename(cx);
+                }
+            }))
+            .child(Input::new(&self.rename_input).w_full())
+    }
+
+    fn render_row_controls(
+        &self,
+        target: &RowTarget,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let prefix = match target {
+            RowTarget::Pane(id) => format!("sidebar-pane-{id}"),
+            RowTarget::Workspace(id) => format!("sidebar-workspace-{id}"),
+        };
+        let hovered = self.hovered_row.as_ref() == Some(target);
+        let menu_open = self.open_menu.as_ref() == Some(target);
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0 * scale))
+            .child(
+                Button::new(format!("{prefix}-menu"))
+                    .ghost()
+                    .icon(IconName::Ellipsis)
+                    .tooltip("Actions")
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
+                    .on_click(cx.listener({
+                        let target = target.clone();
+                        move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.open_menu = if this.open_menu.as_ref() == Some(&target) {
+                                None
+                            } else {
+                                Some(target.clone())
+                            };
+                            cx.notify();
+                        }
+                    })),
+            )
+            .child(
+                div().when(!hovered, |el| el.invisible()).child(
+                    Button::new(format!("{prefix}-close"))
+                        .ghost()
+                        .icon(IconName::X)
+                        .tooltip("Close")
+                        .min_h(px(TOUCH_TARGET_PX))
+                        .min_w(px(TOUCH_TARGET_PX))
+                        .on_click(cx.listener({
+                            let target = target.clone();
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.request_close(target.clone(), window, cx);
+                            }
+                        })),
+                ),
+            )
+            .when(menu_open, |el| {
+                el.child(
+                    div()
+                        .id(format!("{prefix}-menu-items"))
+                        .test_support()
+                        .absolute()
+                        .top_full()
+                        .right_0()
+                        .flex()
+                        .flex_col()
+                        .bg(Theme::current().panel_bg())
+                        .child(
+                            Button::new(format!("{prefix}-menu-rename"))
+                                .ghost()
+                                .label("Rename")
+                                .min_h(px(TOUCH_TARGET_PX))
+                                .min_w(px(TOUCH_TARGET_PX))
+                                .on_click(cx.listener({
+                                    let target = target.clone();
+                                    move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.open_rename(target.clone(), window, cx);
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("{prefix}-menu-close"))
+                                .ghost()
+                                .label("Close")
+                                .min_h(px(TOUCH_TARGET_PX))
+                                .min_w(px(TOUCH_TARGET_PX))
+                                .on_click(cx.listener({
+                                    let target = target.clone();
+                                    move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.request_close(target.clone(), window, cx);
+                                    }
+                                })),
+                        ),
+                )
+            })
+    }
+
     fn render_tree_row(
         &self,
         row: &TreeRow,
@@ -406,6 +730,7 @@ impl WorkspaceSidebar {
                 collapsed,
             } => {
                 let id = workspace.id.clone();
+                let editing = self.inline_edit.as_ref() == Some(&RowTarget::Workspace(id.clone()));
                 let focused = self.focus_handle.is_focused(window)
                     && cursor == Some(&TreeCursor::Header(id.clone()));
                 let chevron = if *collapsed {
@@ -420,6 +745,12 @@ impl WorkspaceSidebar {
                 div()
                     .id(format!("sidebar-workspace-{}", workspace.id))
                     .test_support()
+                    .on_hover(cx.listener({
+                        let target = RowTarget::Workspace(id.clone());
+                        move |this, hovered: &bool, _, cx| {
+                            this.set_hovered(&target, *hovered, cx);
+                        }
+                    }))
                     .h(px(HEADER_ROW_PX))
                     .w_full()
                     .flex()
@@ -443,9 +774,12 @@ impl WorkspaceSidebar {
                                 .focus_ring_style(window, cx),
                         )
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.search_input.read(cx).value().trim().is_empty() {
-                            this.toggle_workspace(&id, cx);
+                    .on_click(cx.listener({
+                        let id = id.clone();
+                        move |this, _, _, cx| {
+                            if this.search_input.read(cx).value().trim().is_empty() {
+                                this.toggle_workspace(&id, cx);
+                            }
                         }
                     }))
                     .child(
@@ -453,22 +787,27 @@ impl WorkspaceSidebar {
                             .size(px(12.0))
                             .text_color(theme.token_text_muted()),
                     )
-                    .child(
-                        div()
-                            .id(format!("sidebar-workspace-{}-label", workspace.id))
-                            .test_support()
-                            .aria_label(workspace.label.clone())
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .truncate()
-                            .text_size(px(theme.font_ui_secondary()))
-                            .text_color(theme.text_primary())
-                            .child(if rail {
-                                String::new()
-                            } else {
-                                workspace.label.clone()
-                            }),
-                    )
+                    .when(!editing, |el| {
+                        el.child(
+                            div()
+                                .id(format!("sidebar-workspace-{}-label", workspace.id))
+                                .test_support()
+                                .aria_label(workspace.label.clone())
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .text_size(px(theme.font_ui_secondary()))
+                                .text_color(theme.text_primary())
+                                .child(if rail {
+                                    String::new()
+                                } else {
+                                    workspace.label.clone()
+                                }),
+                        )
+                    })
+                    .when(editing, |el| {
+                        el.child(self.rename_field(&format!("sidebar-workspace-{id}"), cx))
+                    })
                     .child(
                         div()
                             .id(format!("sidebar-workspace-{}-count", workspace.id))
@@ -488,12 +827,15 @@ impl WorkspaceSidebar {
                             .ghost()
                             .icon(IconName::Plus)
                             .tooltip("New pane")
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.stop_propagation();
-                                cx.emit(SidebarEvent::NewWorkspace);
-                                cx.notify();
+                            .on_click(cx.listener({
+                                let workspace_id = id.clone();
+                                move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.create_pane(&workspace_id, cx);
+                                }
                             })),
                     )
+                    .child(self.render_row_controls(&RowTarget::Workspace(id.clone()), scale, cx))
             }
             TreeRow::Pane {
                 agent,
@@ -501,6 +843,7 @@ impl WorkspaceSidebar {
                 brand,
             } => {
                 let pane_id = agent.pane_id.clone();
+                let editing = self.inline_edit.as_ref() == Some(&RowTarget::Pane(pane_id.clone()));
                 let needs_input = matches!(agent.status, AgentStatus::Blocked);
                 let selected = agent.selected;
                 let focused = self.focus_handle.is_focused(window)
@@ -512,6 +855,12 @@ impl WorkspaceSidebar {
                 div()
                     .id(format!("sidebar-pane-{}", agent.pane_id))
                     .test_support()
+                    .on_hover(cx.listener({
+                        let target = RowTarget::Pane(pane_id.clone());
+                        move |this, hovered: &bool, _, cx| {
+                            this.set_hovered(&target, *hovered, cx);
+                        }
+                    }))
                     .role(gpui_kit::Role::Row)
                     .aria_selected(selected)
                     .h(px(PANE_ROW_PX))
@@ -538,10 +887,13 @@ impl WorkspaceSidebar {
                                 .focus_ring_style(window, cx),
                         )
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.focus_pane(&pane_id);
-                        cx.emit(SidebarEvent::PaneFocused(pane_id.clone()));
-                        cx.notify();
+                    .on_click(cx.listener({
+                        let pane_id = pane_id.clone();
+                        move |this, _, _, cx| {
+                            this.focus_pane(&pane_id);
+                            cx.emit(SidebarEvent::PaneFocused(pane_id.clone()));
+                            cx.notify();
+                        }
                     }))
                     .child(
                         div()
@@ -561,22 +913,27 @@ impl WorkspaceSidebar {
                                             .text_color(theme.token_text_muted()),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .id(format!("sidebar-pane-{}-title", agent.pane_id))
-                                    .test_support()
-                                    .aria_label(agent.title.clone())
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .truncate()
-                                    .text_size(px(theme.font_ui_body()))
-                                    .text_color(theme.text_primary())
-                                    .child(if rail {
-                                        String::new()
-                                    } else {
-                                        agent.title.clone()
-                                    }),
-                            )
+                            .when(!editing, |el| {
+                                el.child(
+                                    div()
+                                        .id(format!("sidebar-pane-{}-title", agent.pane_id))
+                                        .test_support()
+                                        .aria_label(agent.title.clone())
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .truncate()
+                                        .text_size(px(theme.font_ui_body()))
+                                        .text_color(theme.text_primary())
+                                        .child(if rail {
+                                            String::new()
+                                        } else {
+                                            agent.title.clone()
+                                        }),
+                                )
+                            })
+                            .when(editing, |el| {
+                                el.child(self.rename_field(&format!("sidebar-pane-{pane_id}"), cx))
+                            })
                             .when(needs_input, |el| {
                                 el.child(
                                     div()
@@ -587,7 +944,12 @@ impl WorkspaceSidebar {
                                         .text_color(theme.state_attention())
                                         .child("Needs Input"),
                                 )
-                            }),
+                            })
+                            .child(self.render_row_controls(
+                                &RowTarget::Pane(pane_id.clone()),
+                                scale,
+                                cx,
+                            )),
                     )
                     .child(
                         div()
@@ -1029,9 +1391,9 @@ impl WorkspaceSidebar {
                             .icon(IconName::Plus)
                             .min_h(px(TOUCH_TARGET_PX))
                             .min_w(px(TOUCH_TARGET_PX))
-                            .on_click(cx.listener(|_this, _, _, cx| {
-                                cx.emit(SidebarEvent::NewWorkspace);
-                                cx.notify();
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.create_pane("", cx);
                             })),
                     )
                     .child(Self::action_button(
@@ -2421,6 +2783,260 @@ mod tests {
                 Some(true),
                 "Escape keeps focus in the tree"
             );
+        }
+    );
+
+    fn route_calls(fixture: &TreeFixture, path: &str) -> Vec<(String, String, Value)> {
+        fixture
+            .calls()
+            .into_iter()
+            .filter(|(_, call_path, _)| call_path == path)
+            .collect()
+    }
+
+    crate::orion_test!(
+        fn row_menus_offer_only_rename_and_close(cx: &mut gpui_kit::TestAppContext) {
+            let (_root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+
+            for (row, menu) in [
+                ("sidebar-pane-p1", "sidebar-pane-p1-menu"),
+                ("sidebar-workspace-ws-1", "sidebar-workspace-ws-1-menu"),
+            ] {
+                assert!(cx.update(|window, _| window.try_find(row).is_some()));
+                cx.update(|window, cx| window.click(menu, cx));
+                assert!(
+                    cx.update(|window, _| {
+                        window.try_find(format!("{row}-menu-rename")).is_some()
+                    }),
+                    "the {row} menu offers Rename"
+                );
+                assert!(
+                    cx.update(|window, _| {
+                        window.try_find(format!("{row}-menu-close")).is_some()
+                    }),
+                    "the {row} menu offers Close"
+                );
+                assert!(
+                    cx.update(|window, _| {
+                        window.try_find(format!("{row}-menu-duplicate")).is_none()
+                    }),
+                    "the {row} menu has no Duplicate item"
+                );
+                assert!(
+                    cx.update(|window, _| {
+                        window.try_find(format!("{row}-menu-copy-path")).is_none()
+                    }),
+                    "the {row} menu has no Copy path item"
+                );
+                assert!(
+                    cx.update(|window, _| window.try_find(format!("{row}-drag-handle")).is_none()),
+                    "the {row} row has no drag handle"
+                );
+                cx.update(|window, cx| window.click(menu, cx));
+            }
+        }
+    );
+
+    crate::orion_test!(
+        fn inline_rename_commits_through_the_existing_route(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx, fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            let (events, subscription) = collect_events(&root, cx);
+
+            cx.update(|window, cx| window.click("sidebar-pane-p1-menu", cx));
+            cx.update(|window, cx| window.click("sidebar-pane-p1-menu-rename", cx));
+            cx.update(|window, cx| {
+                window.click("sidebar-pane-p1-rename-input", cx);
+                for _ in 0..5 {
+                    window.press("backspace", cx);
+                }
+                window.input("Renamed Build", cx);
+                window.press("enter", cx);
+            });
+
+            assert_eq!(
+                route_calls(&fixture, "/api/pane/rename"),
+                vec![(
+                    "POST".to_string(),
+                    "/api/pane/rename".to_string(),
+                    json!({ "pane_id": "p1", "label": "Renamed Build" })
+                )],
+                "Enter sends the pane rename through the existing route"
+            );
+            assert!(
+                events
+                    .borrow()
+                    .contains(&SidebarEvent::PaneRenamed("p1".to_string())),
+                "the rename is reported to the app"
+            );
+            drop(subscription);
+        }
+    );
+
+    crate::orion_test!(
+        fn escape_cancels_inline_rename_without_a_request(cx: &mut gpui_kit::TestAppContext) {
+            let (_root, cx, fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+
+            cx.update(|window, cx| window.click("sidebar-workspace-ws-1-menu", cx));
+            cx.update(|window, cx| window.click("sidebar-workspace-ws-1-menu-rename", cx));
+            cx.update(|window, cx| {
+                window.click("sidebar-workspace-ws-1-rename-input", cx);
+                window.input("Discarded", cx);
+                window.press("escape", cx);
+            });
+
+            assert!(
+                route_calls(&fixture, "/api/workspace/rename").is_empty(),
+                "Escape sends no rename request"
+            );
+            let _ = cx.update(|window, _| window.find_by_label("Orion"));
+        }
+    );
+
+    crate::orion_test!(
+        fn the_close_control_is_hidden_until_the_row_is_hovered(cx: &mut gpui_kit::TestAppContext) {
+            let (_root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-pane-p1-close").visible()),
+                false,
+                "the close control is hidden at rest"
+            );
+            cx.update(|window, cx| window.hover("sidebar-pane-p1", cx));
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-pane-p1-close").visible()),
+                true,
+                "hovering the row reveals the close control"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn closing_a_settled_pane_needs_no_confirmation(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx, fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            let (events, subscription) = collect_events(&root, cx);
+
+            cx.update(|window, cx| window.click("sidebar-pane-p3-menu", cx));
+            cx.update(|window, cx| window.click("sidebar-pane-p3-menu-close", cx));
+
+            assert_eq!(
+                route_calls(&fixture, "/api/pane/close"),
+                vec![(
+                    "POST".to_string(),
+                    "/api/pane/close".to_string(),
+                    json!({ "pane_id": "p3" })
+                )],
+                "a settled pane closes without a dialog"
+            );
+            assert!(
+                events
+                    .borrow()
+                    .contains(&SidebarEvent::PaneClosed("p3".to_string())),
+                "the close is reported to the app"
+            );
+            drop(subscription);
+        }
+    );
+
+    crate::orion_test!(
+        fn closing_a_running_pane_asks_for_confirmation_first(cx: &mut gpui_kit::TestAppContext) {
+            let fixture = Arc::new(TreeFixture::new(tree_snapshot()));
+            let runtime: Arc<dyn Runtime> = fixture.clone();
+            let (handle, root) = cx.update(|cx| {
+                gpui_kit::open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                            Default::default(),
+                            size(px(264.0), px(800.0)),
+                        ))),
+                        ..Default::default()
+                    },
+                    cx,
+                    |window, cx| cx.new(|cx| WorkspaceSidebar::new(window, cx)),
+                )
+                .expect("the sidebar window")
+            });
+            cx.update(|app| root.update(app, |view, _cx| view.attach(runtime)));
+            let _ = cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx));
+            let _ = cx.update_window(handle.into(), |_, window, cx| {
+                window.click("sidebar-pane-p1-menu", cx)
+            });
+            let _ = cx.update_window(handle.into(), |_, window, cx| {
+                window.click("sidebar-pane-p1-menu-close", cx)
+            });
+            assert!(
+                route_calls(&fixture, "/api/pane/close").is_empty(),
+                "a running pane waits for the confirmation instead of closing"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn closing_a_running_workspace_uses_the_session_confirmation(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let mut snapshot = tree_snapshot();
+            snapshot["workspaces"][0]["agent_status"] = json!("working");
+            let fixture = Arc::new(TreeFixture::new(snapshot));
+            let runtime: Arc<dyn Runtime> = fixture.clone();
+            let (handle, root) = cx.update(|cx| {
+                gpui_kit::open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                            Default::default(),
+                            size(px(264.0), px(800.0)),
+                        ))),
+                        ..Default::default()
+                    },
+                    cx,
+                    |window, cx| cx.new(|cx| WorkspaceSidebar::new(window, cx)),
+                )
+                .expect("the sidebar window")
+            });
+            cx.update(|app| root.update(app, |view, _cx| view.attach(runtime)));
+            let _ = cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx));
+            let _ = cx.update_window(handle.into(), |_, window, cx| {
+                window.click("sidebar-workspace-ws-1-menu", cx)
+            });
+            let _ = cx.update_window(handle.into(), |_, window, cx| {
+                window.click("sidebar-workspace-ws-1-menu-close", cx)
+            });
+            assert!(
+                route_calls(&fixture, "/api/workspace/close").is_empty(),
+                "a running workspace waits for the confirmation instead of closing"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn create_controls_use_the_existing_tab_creation_route(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx, fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            let (events, subscription) = collect_events(&root, cx);
+
+            cx.update(|window, cx| window.click("sidebar-workspace-ws-1-create", cx));
+            cx.update(|window, cx| window.click("new-workspace-button", cx));
+
+            let created = route_calls(&fixture, "/api/tab/create");
+            assert_eq!(created.len(), 2, "both plus controls create a pane");
+            for (_, _, body) in &created {
+                assert_eq!(body["workspace_id"], json!("ws-1"));
+                assert_eq!(body["agent"]["kind"], json!("claude"));
+            }
+            assert_eq!(
+                events
+                    .borrow()
+                    .iter()
+                    .filter(|event| matches!(event, SidebarEvent::PaneCreated(_)))
+                    .count(),
+                2,
+                "both creations are reported to the app"
+            );
+            drop(subscription);
         }
     );
 

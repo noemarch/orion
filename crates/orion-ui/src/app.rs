@@ -568,11 +568,11 @@ impl OrionApp {
         let sidebar_sub = cx.subscribe(&sidebar_events, |this, _, event: &SidebarEvent, cx| {
             match event {
                 SidebarEvent::NewWorkspace => this.open_new_workspace(cx, None),
-                SidebarEvent::CloseWorkspace(workspace_id) => {
-                    this.call_route(
-                        "/api/workspace/close",
-                        &json!({ "workspace_id": workspace_id }),
-                    );
+                SidebarEvent::CloseWorkspace(_)
+                | SidebarEvent::PaneRenamed(_)
+                | SidebarEvent::WorkspaceRenamed(_)
+                | SidebarEvent::PaneClosed(_)
+                | SidebarEvent::PaneCreated(_) => {
                     this.workspace_sidebar
                         .update(cx, |view, _cx| view.refresh());
                 }
@@ -1271,6 +1271,22 @@ impl OrionApp {
                     .accessibility_label(review_label)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.review_open = !this.review_open;
+                        cx.notify();
+                    })),
+            )
+            .content(
+                Button::new("header-new-workspace")
+                    .icon(Icon::new(IconName::Plus))
+                    .label("New Workspace")
+                    .secondary()
+                    .small()
+                    .h(px(TOUCH_TARGET_PX))
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .tooltip("New Workspace")
+                    .accessibility_label("New Workspace")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let opener = window.focused(cx);
+                        this.open_new_workspace(cx, opener);
                         cx.notify();
                     })),
             )
