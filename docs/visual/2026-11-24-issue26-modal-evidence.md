@@ -43,3 +43,23 @@ titles, outcome-verb "Close" buttons, specific consequence text, and token-only
 colors, so no source change was made. OS-level screenshots of the confirmations
 were not reachable in the capture harness; this is recorded as an environment
 limitation, not a defect.
+
+## Final verification (2026-11-25)
+
+Re-checked at commit `02ac4b9`, with no source change required:
+
+- `modal_shell::tests` covers one close control, Escape dismissal and opener
+  restoration, and close-control opener restoration.
+- `new_workspace::tests` covers disabled/non-selectable agents, primary-action
+  gating, one close control with no Cancel, panel fit at 1280px and 480px, and
+  opener restoration on Escape.
+- `shell_picker::tests` covers one close control with no Cancel, panel fit at
+  1280px and 480px, and opener restoration on Escape.
+- `cargo fmt --check`, `cargo check -p orion-core`, `cargo check -p orion-ui`,
+  `cargo clippy -p orion-ui -- -D warnings` and `cargo test -p orion-ui --lib`
+  (430 passed) are clean; `git diff --stat -- crates/orion-core` is empty.
+- Confirmation-dialog OS captures remain unreachable: the fixture session in the
+  capture harness contains only a settled shell pane, so no close target is
+  running; the pinned toolkit's alert dialog is also not observable through this
+  repo's render-level query API. The API audit and copy trace above stand as
+  evidence, as the plan permits.
