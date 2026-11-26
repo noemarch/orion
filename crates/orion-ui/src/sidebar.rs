@@ -1761,7 +1761,11 @@ impl Render for WorkspaceSidebar {
                     .px(px(SPACE_4 * scale))
                     .text_size(px(theme.font_ui_secondary()))
                     .text_color(theme.token_text_muted())
-                    .child(if rail { String::new() } else { "Projects".to_string() })
+                    .child(if rail {
+                        String::new()
+                    } else {
+                        "Projects".to_string()
+                    })
                     .when(!rail, |el| {
                         el.child(
                             Button::new("sidebar-new-workspace")
@@ -2603,7 +2607,11 @@ mod tests {
             let (_root, cx, _fixture) = open_tree_fixture(cx);
             cx.update(|window, cx| window.render_frame(cx));
 
-            for id in ["sidebar-terminal-toolbar", "sidebar-terminal-footer", "sidebar-chat-footer"] {
+            for id in [
+                "sidebar-terminal-toolbar",
+                "sidebar-terminal-footer",
+                "sidebar-chat-footer",
+            ] {
                 assert!(
                     cx.update(|window, _| window.try_find(id).is_none()),
                     "{id} is no longer in the sidebar chrome"

@@ -1259,7 +1259,9 @@ impl OrionApp {
             .find(|workspace| workspace.focused)
             .or_else(|| self.cached_workspaces.first());
         let working = focused
-            .map(|workspace| Self::global_status_word(Some(workspace.status.as_wire())) == "working")
+            .map(|workspace| {
+                Self::global_status_word(Some(workspace.status.as_wire())) == "working"
+            })
             .unwrap_or(false);
         let dot = if working {
             theme.status_working
@@ -1308,7 +1310,8 @@ impl OrionApp {
                 self.call_route("/api/pane/close", &json!({ "pane_id": pane_id }));
             }
         }
-        self.workspace_sidebar.update(cx, |view, _cx| view.refresh());
+        self.workspace_sidebar
+            .update(cx, |view, _cx| view.refresh());
         cx.notify();
     }
 
@@ -1318,7 +1321,8 @@ impl OrionApp {
                 "/api/pane/split",
                 &json!({ "pane_id": pane_id, "direction": "right" }),
             );
-            self.workspace_sidebar.update(cx, |view, _cx| view.refresh());
+            self.workspace_sidebar
+                .update(cx, |view, _cx| view.refresh());
         }
         cx.notify();
     }
@@ -1337,7 +1341,8 @@ impl OrionApp {
 
     fn close_tab_by_id(&mut self, tab_id: String, cx: &mut Context<Self>) {
         self.call_route("/api/tab/close", &json!({ "tab_id": tab_id }));
-        self.workspace_sidebar.update(cx, |view, _cx| view.refresh());
+        self.workspace_sidebar
+            .update(cx, |view, _cx| view.refresh());
         cx.notify();
     }
 
@@ -1356,7 +1361,8 @@ impl OrionApp {
                 "label": label,
             }),
         );
-        self.workspace_sidebar.update(cx, |view, _cx| view.refresh());
+        self.workspace_sidebar
+            .update(cx, |view, _cx| view.refresh());
         cx.notify();
     }
 
@@ -1420,10 +1426,7 @@ impl OrionApp {
             .iter()
             .position(|tab| tab.focused)
             .unwrap_or(usize::MAX);
-        let active = tabs
-            .iter()
-            .find(|tab| tab.focused)
-            .or_else(|| tabs.first());
+        let active = tabs.iter().find(|tab| tab.focused).or_else(|| tabs.first());
         let active_id = active.map(|tab| tab.id.clone()).unwrap_or_default();
         let active_label = active.map(|tab| tab.label.clone()).unwrap_or_default();
         TabBar::new("tab-strip")
@@ -1519,9 +1522,11 @@ impl OrionApp {
                                     .tooltip("Close tab")
                                     .accessibility_label("Close tab")
                                     .when(!tab.focused, |button| {
-                                        button.invisible().group_hover(close_group.clone(), |style| {
-                                            style.visible()
-                                        })
+                                        button
+                                            .invisible()
+                                            .group_hover(close_group.clone(), |style| {
+                                                style.visible()
+                                            })
                                     })
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         close_app.update(cx, |this, cx| {
@@ -1603,13 +1608,18 @@ impl OrionApp {
                                         },
                                     ))
                                     .separator()
-                                    .item(PopupMenuItem::new("Zoom pane").on_click(move |_, _, cx| {
-                                        split_app.update(cx, |this, cx| this.zoom_focused_pane(cx));
-                                    }))
-                                    .item(PopupMenuItem::new("Split pane").on_click(move |_, _, cx| {
-                                        close_pane_app
-                                            .update(cx, |this, cx| this.split_focused_pane(cx));
-                                    }))
+                                    .item(PopupMenuItem::new("Zoom pane").on_click(
+                                        move |_, _, cx| {
+                                            split_app
+                                                .update(cx, |this, cx| this.zoom_focused_pane(cx));
+                                        },
+                                    ))
+                                    .item(PopupMenuItem::new("Split pane").on_click(
+                                        move |_, _, cx| {
+                                            close_pane_app
+                                                .update(cx, |this, cx| this.split_focused_pane(cx));
+                                        },
+                                    ))
                                     .item(PopupMenuItem::new("Close pane").on_click(
                                         move |_, window, cx| {
                                             rename_app.update(cx, |this, cx| {
@@ -1636,22 +1646,29 @@ impl OrionApp {
                                             this.set_lens_from_menu(Lens::Chat, cx)
                                         });
                                     }))
-                                    .item(PopupMenuItem::new("Terminal").on_click(move |_, _, cx| {
-                                        changes_app.update(cx, |this, cx| {
-                                            this.set_lens_from_menu(Lens::Terminal, cx)
-                                        });
-                                    }))
-                                    .item(PopupMenuItem::new("Changes").on_click(move |_, _, cx| {
-                                        review_app.update(cx, |this, cx| {
-                                            this.set_lens_from_menu(Lens::Changes, cx)
-                                        });
-                                    }))
-                                    .separator()
-                                    .item(PopupMenuItem::new("Toggle review column").on_click(
+                                    .item(PopupMenuItem::new("Terminal").on_click(
                                         move |_, _, cx| {
-                                            toggle_app.update(cx, |this, cx| this.toggle_review(cx));
+                                            changes_app.update(cx, |this, cx| {
+                                                this.set_lens_from_menu(Lens::Terminal, cx)
+                                            });
                                         },
                                     ))
+                                    .item(PopupMenuItem::new("Changes").on_click(
+                                        move |_, _, cx| {
+                                            review_app.update(cx, |this, cx| {
+                                                this.set_lens_from_menu(Lens::Changes, cx)
+                                            });
+                                        },
+                                    ))
+                                    .separator()
+                                    .item(
+                                        PopupMenuItem::new("Toggle review column").on_click(
+                                            move |_, _, cx| {
+                                                toggle_app
+                                                    .update(cx, |this, cx| this.toggle_review(cx));
+                                            },
+                                        ),
+                                    )
                                 }
                             }),
                     ),
@@ -2301,7 +2318,15 @@ impl Render for OrionApp {
 // outside it, so register just the extras the shell uses and fall back to it.
 gpui_kit::assets::icon_assets!(
     ShellIcons,
-    [X, Pencil, Columns2, ZoomIn, MessageCircle, GitCompare, CircleQuestionMark]
+    [
+        X,
+        Pencil,
+        Columns2,
+        ZoomIn,
+        MessageCircle,
+        GitCompare,
+        CircleQuestionMark
+    ]
 );
 
 struct ShellAssets;
