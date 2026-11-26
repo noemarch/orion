@@ -17,6 +17,7 @@ A tab within a workspace that groups one or more agent panes in a specific layou
 
 #### Pane
 A dedicated, interactive AI agent instance. Orion strictly enforces an **agent-only invariant**: every pane owns a supervised process tree running an identified agent CLI (`claude`, `codex`, `opencode`, etc.) connected to a native PTY. Orion never runs generic shells (`bash`, `powershell`).
+_Avoid_: session row
 
 #### Agent
 An identified AI coding assistant CLI discovered on `PATH`. Orion manages credentials and process lifetimes via bring-your-own-subscription, driving the agent's CLI interface directly.

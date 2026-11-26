@@ -24,7 +24,7 @@
 use crate::agents::{agent_rows, AgentRow};
 use crate::session_status;
 use crate::shell_model::ShellLayout;
-use crate::theme::{Theme, DOT_SIZE_PX, ICON_SIZE_PX, TOUCH_TARGET_PX};
+use crate::theme::{Theme, DOT_SIZE_PX, ICON_SIZE_PX, MARK_SIZE_PX, TOUCH_TARGET_PX};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{v_virtual_list, VirtualListScrollHandle};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -35,6 +35,7 @@ use gpui_kit::*;
 use gpui_kit::{div, px, Context, FocusHandle, Render, Styled, Window};
 use orion_core::protocol::AgentStatus;
 use orion_core::runtime::Runtime;
+use orion_core::session_state::SessionState;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -54,6 +55,33 @@ const RADIUS_SM: f32 = 6.0; // --radius-sm: chips and inner controls
 const HEADER_ROW_PX: f32 = 30.0;
 const PANE_ROW_PX: f32 = 48.0;
 const MONO: &str = "JetBrains Mono";
+
+fn truncate_middle(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        return s.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".chars().take(max_chars).collect();
+    }
+    let inner = max_chars - 1;
+    if let Some(last_sep) = chars.iter().rposition(|c| *c == '\\' || *c == '/') {
+        let tail_len = chars.len() - last_sep;
+        if tail_len < inner {
+            let head_len = inner - tail_len;
+            let mut out: String = chars[..head_len].iter().collect();
+            out.push('…');
+            out.extend(chars[last_sep..].iter());
+            return out;
+        }
+    }
+    let head = inner / 2;
+    let tail = inner - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(chars[chars.len() - tail..].iter());
+    out
+}
 
 /// One workspace row of the sidebar: mark + title + status on a single row.
 #[derive(Debug, Clone)]
@@ -115,14 +143,25 @@ pub struct TabEntry {
 enum TreeRow {
     Header {
         workspace: WorkspaceEntry,
-        pane_count: usize,
         collapsed: bool,
+        state: session_status::RowState,
+        working: usize,
+        agent_count: usize,
     },
     Pane {
         agent: AgentRow,
-        subtitle: String,
         brand: IconName,
+        state: session_status::RowState,
+        status_line: String,
     },
+}
+
+fn header_count(working: usize, agent_count: usize) -> String {
+    if agent_count <= 1 {
+        String::new()
+    } else {
+        working.to_string()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +174,8 @@ enum TreeCursor {
 /// it in when the wire body changes (stale rows are swept with it).
 pub struct WorkspaceSidebar {
     engine: Option<Arc<dyn Runtime>>,
+    runtime_connected: bool,
+    runtime_online: bool,
     snapshot: Option<Value>,
     last_body: Option<String>,
     focus_handle: FocusHandle,
@@ -173,6 +214,8 @@ impl WorkspaceSidebar {
         );
         let view = Self {
             engine: None,
+            runtime_connected: true,
+            runtime_online: true,
             snapshot: None,
             last_body: None,
             focus_handle: cx.focus_handle().tab_stop(true),
@@ -196,6 +239,14 @@ impl WorkspaceSidebar {
     pub fn attach(&mut self, engine: Arc<dyn Runtime>) {
         self.engine = Some(engine);
         self.refresh();
+    }
+
+    pub fn set_runtime_online(&mut self, online: bool, cx: &mut Context<Self>) {
+        self.runtime_connected = online;
+        if self.runtime_online != online {
+            self.runtime_online = online;
+            cx.notify();
+        }
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
@@ -252,29 +303,69 @@ impl WorkspaceSidebar {
                 continue;
             }
             let collapsed = !searching && self.collapsed_workspaces.contains(&ws.id);
+            let is_shell = |pane_id: &str| {
+                pane_field(panes, pane_id, "pane_kind") == Some("shell")
+                    || pane_field(panes, pane_id, "shell_path").is_some()
+                    || matches!(
+                        pane_field(panes, pane_id, "agent"),
+                        Some("powershell" | "pwsh" | "bash" | "cmd" | "zsh")
+                    )
+            };
+            let states: Vec<session_status::RowState> = group
+                .iter()
+                .map(|agent| {
+                    session_status::row_state(
+                        pane_field(panes, &agent.pane_id, "agent_status"),
+                        is_shell(&agent.pane_id),
+                        self.runtime_online,
+                    )
+                })
+                .collect();
+            let agent_count = group
+                .iter()
+                .filter(|agent| !is_shell(&agent.pane_id))
+                .count();
+            let header_state = session_status::aggregate(&states);
+            let working = session_status::working_count(&states);
             rows.push(TreeRow::Header {
                 workspace: ws,
-                pane_count: group.len(),
                 collapsed,
+                state: header_state,
+                working,
+                agent_count,
             });
             if collapsed {
                 continue;
             }
-            for agent in group {
+            for (agent, state) in group.iter().zip(states.iter()) {
                 let subtitle = pane_field(panes, &agent.pane_id, "cwd")
                     .or_else(|| pane_field(panes, &agent.pane_id, "shell_path"))
                     .or_else(|| pane_field(panes, &agent.pane_id, "shell"))
                     .unwrap_or_default()
                     .to_string();
-                let brand = if pane_field(panes, &agent.pane_id, "pane_kind") == Some("shell") {
+                let brand = if is_shell(&agent.pane_id) {
                     IconName::SquareTerminal
                 } else {
                     IconName::Bot
                 };
+                let elapsed = session_status::elapsed_label(
+                    pane_field(panes, &agent.pane_id, "started_at"),
+                    chrono::Utc::now(),
+                );
+                let suffix = elapsed
+                    .map(|value| format!(" · session {value}"))
+                    .unwrap_or_default();
+                let status_line = match state {
+                    session_status::RowState::Working => format!("working{suffix}"),
+                    session_status::RowState::Idle => format!("idle{suffix}"),
+                    session_status::RowState::None => truncate_middle(&subtitle, 10),
+                    session_status::RowState::Offline => "offline".to_string(),
+                };
                 rows.push(TreeRow::Pane {
-                    agent: agent.clone(),
-                    subtitle,
+                    agent: (*agent).clone(),
                     brand,
+                    state: *state,
+                    status_line,
                 });
             }
         }
@@ -586,15 +677,64 @@ impl WorkspaceSidebar {
             .test_support()
             .role(gpui_kit::Role::Image)
             .aria_label(session_status::badge_word(session_status::state_of(status)))
-            .size(px(DOT_SIZE_PX))
-            .rounded_full();
-        match status {
-            AgentStatus::Idle => base
-                .border_1()
-                .border_color(theme.status_idle)
+            .size(px(MARK_SIZE_PX))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center();
+        match session_status::state_of(status) {
+            SessionState::Starting | SessionState::Running | SessionState::NeedsInput => base
+                .child(
+                    div()
+                        .size(px(DOT_SIZE_PX))
+                        .rounded_full()
+                        .bg(Self::status_color(status, theme, self.pulse_phase)),
+                )
                 .into_any_element(),
             _ => base
-                .bg(Self::status_color(status, theme, self.pulse_phase))
+                .child(
+                    div()
+                        .size(px(DOT_SIZE_PX))
+                        .rounded_full()
+                        .bg(theme.status_idle),
+                )
+                .into_any_element(),
+        }
+    }
+
+    fn aggregate_indicator(
+        &self,
+        workspace_id: &str,
+        state: session_status::RowState,
+        theme: &Theme,
+    ) -> gpui_kit::AnyElement {
+        match state {
+            session_status::RowState::Working => div()
+                .id(format!("sidebar-workspace-{workspace_id}-state-status"))
+                .test_support()
+                .role(gpui_kit::Role::Image)
+                .aria_label("Project working")
+                .size(px(DOT_SIZE_PX))
+                .rounded_full()
+                .bg(Self::status_color(
+                    AgentStatus::Working,
+                    theme,
+                    self.pulse_phase,
+                ))
+                .into_any_element(),
+            session_status::RowState::Idle => div()
+                .id(format!("sidebar-workspace-{workspace_id}-state-status"))
+                .test_support()
+                .role(gpui_kit::Role::Image)
+                .aria_label("Project idle")
+                .size(px(DOT_SIZE_PX))
+                .rounded_full()
+                .bg(theme.status_idle)
+                .into_any_element(),
+            session_status::RowState::None => div().into_any_element(),
+            session_status::RowState::Offline => Icon::new(IconName::TriangleAlert)
+                .size(px(ICON_SIZE_PX))
+                .text_color(theme.warning_amber)
                 .into_any_element(),
         }
     }
@@ -619,6 +759,7 @@ impl WorkspaceSidebar {
         &self,
         target: &RowTarget,
         scale: f32,
+        reveal: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let prefix = match target {
@@ -627,6 +768,7 @@ impl WorkspaceSidebar {
         };
         let hovered = self.hovered_row.as_ref() == Some(target);
         let menu_open = self.open_menu.as_ref() == Some(target);
+        let revealed = hovered || menu_open || reveal;
         div()
             .absolute()
             .right_0()
@@ -637,27 +779,29 @@ impl WorkspaceSidebar {
             .items_center()
             .gap(px(2.0 * scale))
             .child(
-                Button::new(format!("{prefix}-menu"))
-                    .ghost()
-                    .icon(IconName::Ellipsis)
-                    .tooltip("Actions")
-                    .min_h(px(TOUCH_TARGET_PX))
-                    .min_w(px(TOUCH_TARGET_PX))
-                    .on_click(cx.listener({
-                        let target = target.clone();
-                        move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.open_menu = if this.open_menu.as_ref() == Some(&target) {
-                                None
-                            } else {
-                                Some(target.clone())
-                            };
-                            cx.notify();
-                        }
-                    })),
+                div().when(!revealed, |el| el.invisible()).child(
+                    Button::new(format!("{prefix}-menu"))
+                        .ghost()
+                        .icon(IconName::Ellipsis)
+                        .tooltip("Actions")
+                        .min_h(px(TOUCH_TARGET_PX))
+                        .min_w(px(TOUCH_TARGET_PX))
+                        .on_click(cx.listener({
+                            let target = target.clone();
+                            move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.open_menu = if this.open_menu.as_ref() == Some(&target) {
+                                    None
+                                } else {
+                                    Some(target.clone())
+                                };
+                                cx.notify();
+                            }
+                        })),
+                ),
             )
             .child(
-                div().when(!hovered, |el| el.invisible()).child(
+                div().when(!revealed, |el| el.invisible()).child(
                     Button::new(format!("{prefix}-close"))
                         .ghost()
                         .icon(IconName::X)
@@ -729,8 +873,10 @@ impl WorkspaceSidebar {
         match row {
             TreeRow::Header {
                 workspace,
-                pane_count,
                 collapsed,
+                state,
+                working,
+                agent_count,
             } => {
                 let id = workspace.id.clone();
                 let editing = self.inline_edit.as_ref() == Some(&RowTarget::Workspace(id.clone()));
@@ -741,10 +887,7 @@ impl WorkspaceSidebar {
                 } else {
                     IconName::ChevronDown
                 };
-                let count = format!(
-                    "{pane_count} {}",
-                    if *pane_count == 1 { "pane" } else { "panes" }
-                );
+                let count = header_count(*working, *agent_count);
                 div()
                     .id(format!("sidebar-workspace-{}", workspace.id))
                     .test_support()
@@ -761,7 +904,7 @@ impl WorkspaceSidebar {
                     .items_center()
                     .gap(px(SPACE_2 * scale))
                     .pl(px(SPACE_2 * scale))
-                    .pr(px(140.0 * scale))
+                    .pr(px(2.0 * TOUCH_TARGET_PX + SPACE_1 * scale))
                     .role(gpui_kit::Role::TreeItem)
                     .aria_expanded(!collapsed)
                     .aria_selected(workspace.focused)
@@ -786,6 +929,16 @@ impl WorkspaceSidebar {
                             }
                         }
                     }))
+                    .child(
+                        div()
+                            .id(format!("sidebar-workspace-{}-state", workspace.id))
+                            .test_support()
+                            .w(px(MARK_SIZE_PX))
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .child(self.aggregate_indicator(&workspace.id, *state, theme)),
+                    )
                     .child(
                         Icon::new(chevron)
                             .size(px(12.0))
@@ -816,15 +969,15 @@ impl WorkspaceSidebar {
                         div()
                             .id(format!("sidebar-workspace-{}-count", workspace.id))
                             .test_support()
-                            .aria_label(count)
+                            .aria_label(if count.is_empty() {
+                                String::new()
+                            } else {
+                                format!("{count} working agents")
+                            })
                             .flex_none()
                             .text_size(px(theme.font_ui_secondary()))
                             .text_color(theme.token_text_muted())
-                            .child(if rail {
-                                String::new()
-                            } else {
-                                pane_count.to_string()
-                            }),
+                            .child(if rail { String::new() } else { count }),
                     )
                     .child(
                         Button::new(format!("sidebar-workspace-{}-create", workspace.id))
@@ -839,12 +992,18 @@ impl WorkspaceSidebar {
                                 }
                             })),
                     )
-                    .child(self.render_row_controls(&RowTarget::Workspace(id.clone()), scale, cx))
+                    .child(self.render_row_controls(
+                        &RowTarget::Workspace(id.clone()),
+                        scale,
+                        focused || rail,
+                        cx,
+                    ))
             }
             TreeRow::Pane {
                 agent,
-                subtitle,
                 brand,
+                state,
+                status_line,
             } => {
                 let pane_id = agent.pane_id.clone();
                 let editing = self.inline_edit.as_ref() == Some(&RowTarget::Pane(pane_id.clone()));
@@ -856,6 +1015,8 @@ impl WorkspaceSidebar {
                         Some(TreeCursor::Header(_)) => false,
                         None => selected,
                     };
+                let keyboard_reveal = self.focus_handle.is_focused(window)
+                    && matches!(cursor, Some(TreeCursor::Pane(id)) if id == &agent.pane_id);
                 div()
                     .id(format!("sidebar-pane-{}", agent.pane_id))
                     .test_support()
@@ -874,11 +1035,7 @@ impl WorkspaceSidebar {
                     .justify_center()
                     .gap(px(SPACE_1 * scale))
                     .px(px(SPACE_3 * scale))
-                    .when(selected, |el| {
-                        el.bg(theme.selected_bg())
-                            .border_1()
-                            .border_color(theme.accent_emphasis)
-                    })
+                    .when(selected, |el| el.bg(theme.selected_bg()))
                     .when(focused, |el| {
                         el.child(
                             div()
@@ -906,7 +1063,30 @@ impl WorkspaceSidebar {
                             .items_center()
                             .gap(px(SPACE_2 * scale))
                             .pr(px(96.0 * scale))
-                            .child(self.status_indicator(&agent.pane_id, agent.status, theme))
+                            .child(
+                                div()
+                                    .id(format!("sidebar-pane-{}-state", agent.pane_id))
+                                    .test_support()
+                                    .w(px(MARK_SIZE_PX))
+                                    .flex_none()
+                                    .flex()
+                                    .justify_center()
+                                    .child(match state {
+                                        session_status::RowState::Working
+                                        | session_status::RowState::Idle => self.status_indicator(
+                                            &agent.pane_id,
+                                            agent.status,
+                                            theme,
+                                        ),
+                                        session_status::RowState::None => div().into_any_element(),
+                                        session_status::RowState::Offline => {
+                                            Icon::new(IconName::TriangleAlert)
+                                                .size(px(ICON_SIZE_PX))
+                                                .text_color(theme.warning_amber)
+                                                .into_any_element()
+                                        }
+                                    }),
+                            )
                             .child(
                                 div()
                                     .id(format!("sidebar-pane-{}-brand", agent.pane_id))
@@ -953,6 +1133,7 @@ impl WorkspaceSidebar {
                             .child(self.render_row_controls(
                                 &RowTarget::Pane(pane_id.clone()),
                                 scale,
+                                keyboard_reveal || rail,
                                 cx,
                             )),
                     )
@@ -960,7 +1141,7 @@ impl WorkspaceSidebar {
                         div()
                             .id(format!("sidebar-pane-{}-subtitle", agent.pane_id))
                             .test_support()
-                            .aria_label(subtitle.clone())
+                            .aria_label(status_line.clone())
                             .flex_none()
                             .h(px(theme.font_ui_secondary() + 4.0))
                             .w_full()
@@ -972,7 +1153,7 @@ impl WorkspaceSidebar {
                             .child(if rail {
                                 String::new()
                             } else {
-                                subtitle.clone()
+                                status_line.clone()
                             }),
                     )
             }
@@ -1155,12 +1336,14 @@ impl WorkspaceSidebar {
 
     fn refresh_session(&mut self) -> bool {
         let Some(engine) = self.engine.clone() else {
-            return false;
+            return self.runtime_online;
         };
         let (status, body) = engine.http("GET", "/api/session", &Value::Null);
         if status != 200 {
-            return false;
+            self.runtime_online = false;
+            return true;
         }
+        self.runtime_online = self.runtime_connected;
         let encoded = body.to_string();
         if self.last_body.as_deref() == Some(encoded.as_str()) {
             return false;
@@ -1292,6 +1475,19 @@ impl WorkspaceSidebar {
                             .bg(theme.surface_canvas),
                     ),
             )
+            .when(!self.runtime_online, |el| {
+                el.child(
+                    Button::new("sidebar-offline-warning")
+                        .ghost()
+                        .icon(Icon::new(IconName::TriangleAlert).size(theme.scaled_icon_size()))
+                        .text_color(theme.warning_amber)
+                        .tooltip(
+                            "Orion could not start or reach its runtime. Terminals end when Orion closes.",
+                        )
+                        .min_h(px(TOUCH_TARGET_PX))
+                        .min_w(px(TOUCH_TARGET_PX)),
+                )
+            })
             .child(
                 div()
                     .text_size(px(14.0 * scale))
@@ -1760,6 +1956,17 @@ mod tests {
     );
 
     #[::core::prelude::v1::test]
+    fn truncate_middle_keeps_both_ends() {
+        assert_eq!(truncate_middle("short", 12), "short");
+        assert_eq!(truncate_middle("abcdef", 3), "a…f");
+        assert_eq!(truncate_middle("abcdefgh", 5), "ab…gh");
+        assert_eq!(
+            truncate_middle("C:\\rust-projects\\orion", 10),
+            "C:\\…\\orion"
+        );
+    }
+
+    #[::core::prelude::v1::test]
     fn status_parses_wire_names() {
         assert_eq!(parse_status(Some("working")), AgentStatus::Working);
         assert_eq!(parse_status(Some("blocked")), AgentStatus::Blocked);
@@ -2076,8 +2283,7 @@ mod tests {
                     "{id} is in the tree"
                 );
             }
-            let _ = cx.update(|window, _| window.find_by_label("2 panes"));
-            let _ = cx.update(|window, _| window.find_by_label("1 pane"));
+            let _ = cx.update(|window, _| window.find_by_label("2 working agents"));
 
             cx.update(|window, cx| window.click("sidebar-workspace-ws-1-create", cx));
             assert!(
@@ -2098,7 +2304,7 @@ mod tests {
                 cx.update(|window, _| window.try_find("sidebar-pane-p3").is_some()),
                 "another workspace stays expanded"
             );
-            let _ = cx.update(|window, _| window.find_by_label("2 panes"));
+            let _ = cx.update(|window, _| window.find_by_label("2 working agents"));
 
             cx.update(|window, cx| window.click("sidebar-workspace-ws-1", cx));
             assert!(
@@ -2113,7 +2319,7 @@ mod tests {
             let (_root, cx, _fixture) = open_tree_fixture(cx);
             cx.update(|window, cx| window.render_frame(cx));
 
-            for label in ["Working", "Waiting", "Done", "/work/orion", "/bin/bash"] {
+            for label in ["Working", "Waiting", "/bin/bash"] {
                 let _ = cx.update(|window, _| window.find_by_label(label));
             }
             assert!(
@@ -2811,6 +3017,7 @@ mod tests {
                 ("sidebar-workspace-ws-1", "sidebar-workspace-ws-1-menu"),
             ] {
                 assert!(cx.update(|window, _| window.try_find(row).is_some()));
+                cx.update(|window, cx| window.hover(row, cx));
                 cx.update(|window, cx| window.click(menu, cx));
                 assert!(
                     cx.update(|window, _| {
@@ -2851,6 +3058,7 @@ mod tests {
             cx.update(|window, cx| window.render_frame(cx));
             let (events, subscription) = collect_events(&root, cx);
 
+            cx.update(|window, cx| window.hover("sidebar-pane-p1", cx));
             cx.update(|window, cx| window.click("sidebar-pane-p1-menu", cx));
             cx.update(|window, cx| window.click("sidebar-pane-p1-menu-rename", cx));
             cx.update(|window, cx| {
@@ -2886,6 +3094,7 @@ mod tests {
             let (_root, cx, fixture) = open_tree_fixture(cx);
             cx.update(|window, cx| window.render_frame(cx));
 
+            cx.update(|window, cx| window.hover("sidebar-workspace-ws-1", cx));
             cx.update(|window, cx| window.click("sidebar-workspace-ws-1-menu", cx));
             cx.update(|window, cx| window.click("sidebar-workspace-ws-1-menu-rename", cx));
             cx.update(|window, cx| {
@@ -2925,8 +3134,37 @@ mod tests {
     );
 
     crate::orion_test!(
+        fn offline_overrides_cached_agent_state(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx, _fixture) = open_tree_fixture(cx);
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.update(|_, app| {
+                root.update(app, |view, cx| {
+                    view.set_runtime_online(false, cx);
+                    view.refresh();
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-offline-warning").is_some()),
+                "the header warns that the runtime is unreachable"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1-status").is_none()),
+                "a cached working state is not painted while offline"
+            );
+            assert!(
+                cx.update(|window, _| window
+                    .try_find("sidebar-workspace-ws-1-state-status")
+                    .is_none()),
+                "the project aggregate is not painted as idle while offline"
+            );
+        }
+    );
+
+    crate::orion_test!(
         fn the_close_control_is_hidden_until_the_row_is_hovered(cx: &mut gpui_kit::TestAppContext) {
-            let (_root, cx, _fixture) = open_tree_fixture(cx);
+            let (root, cx, _fixture) = open_tree_fixture(cx);
             cx.update(|window, cx| window.render_frame(cx));
 
             assert_eq!(
@@ -2940,6 +3178,32 @@ mod tests {
                 true,
                 "hovering the row reveals the close control"
             );
+
+            cx.update(|window, cx| window.hover("sidebar-workspace-ws-1", cx));
+            focus_tree(&root, cx);
+            cx.update(|window, cx| {
+                window.press("down", cx);
+                window.press("down", cx);
+            });
+            assert_eq!(
+                cx.update(|window, _| window.find("sidebar-pane-p1-menu").visible()),
+                true,
+                "a real keyboard cursor reveals the row menu without hover"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn elapsed_status_line_names_session_age(cx: &mut gpui_kit::TestAppContext) {
+            let mut snapshot = tree_snapshot();
+            let started = chrono::Utc::now() - chrono::Duration::minutes(2);
+            snapshot["panes"][0]["started_at"] = json!(started.to_rfc3339());
+            let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture::new(snapshot));
+            let (root, cx) = cx.add_window_view(|window, cx| WorkspaceSidebar::new(window, cx));
+            cx.update(|_, app| root.update(app, |view, _cx| view.attach(runtime)));
+            cx.update(|window, cx| window.render_frame(cx));
+
+            let _ = cx.update(|window, _| window.find_by_label("working · session 2m"));
         }
     );
 
@@ -2949,6 +3213,7 @@ mod tests {
             cx.update(|window, cx| window.render_frame(cx));
             let (events, subscription) = collect_events(&root, cx);
 
+            cx.update(|window, cx| window.hover("sidebar-pane-p3", cx));
             cx.update(|window, cx| window.click("sidebar-pane-p3-menu", cx));
             cx.update(|window, cx| window.click("sidebar-pane-p3-menu-close", cx));
 
@@ -2992,6 +3257,7 @@ mod tests {
             cx.update(|app| root.update(app, |view, _cx| view.attach(runtime)));
             let _ = cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx));
             let _ = cx.update_window(handle.into(), |_, window, cx| {
+                window.hover("sidebar-pane-p1", cx);
                 window.click("sidebar-pane-p1-menu", cx)
             });
             let _ = cx.update_window(handle.into(), |_, window, cx| {
@@ -3029,6 +3295,7 @@ mod tests {
             cx.update(|app| root.update(app, |view, _cx| view.attach(runtime)));
             let _ = cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx));
             let _ = cx.update_window(handle.into(), |_, window, cx| {
+                window.hover("sidebar-workspace-ws-1", cx);
                 window.click("sidebar-workspace-ws-1-menu", cx)
             });
             let _ = cx.update_window(handle.into(), |_, window, cx| {

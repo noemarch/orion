@@ -342,6 +342,8 @@ pub struct PaneInfo {
     pub agent_kind: AgentKind,
     pub status: AgentStatus,
     pub cwd: String,
+    /// RFC 3339 UTC time this pane's process was started.
+    pub started_at: String,
     pub pid: Option<u32>,
     pub git_branch: Option<String>,
     pub worktree_path: Option<String>,
@@ -506,7 +508,30 @@ pub struct PushPayload {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentKind, AgentStatus, ReportedStatus, ShellKind};
+    use super::{AgentKind, AgentStatus, PaneInfo, ReportedStatus, ShellKind};
+
+    #[test]
+    fn pane_info_serializes_started_at() {
+        let info = PaneInfo {
+            id: "p1".to_string(),
+            tab_id: "t1".to_string(),
+            title: "Build".to_string(),
+            agent_kind: AgentKind::Claude,
+            status: AgentStatus::Working,
+            cwd: "/work/orion".to_string(),
+            started_at: "2026-11-25T11:58:00Z".to_string(),
+            pid: None,
+            git_branch: None,
+            worktree_path: None,
+            has_unread: false,
+            plan_summary: None,
+        };
+        let value = serde_json::to_value(&info).expect("pane info serializes");
+        assert_eq!(
+            value.get("started_at").and_then(serde_json::Value::as_str),
+            Some("2026-11-25T11:58:00Z")
+        );
+    }
 
     #[test]
     fn shell_kinds_wire_names_round_trip() {

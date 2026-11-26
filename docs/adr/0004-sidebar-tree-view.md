@@ -1,0 +1,3 @@
+# Sidebar tree uses a custom entity-backed view with virtualized rows
+
+The grouped Workspace → Pane sidebar needs two-line rows, a nested tree with hover-only controls, and mixed 30px/48px row heights. gpui-kit 0.9.1's `Sidebar` renders fixed single-line `h_7` items and has no focus handling; `Tree`/`List` use uniform-height scroll handles. We build a custom entity-backed view in `crates/orion-ui/src/sidebar.rs` that reuses gpui-kit primitives for controls, creates stateful entities in constructors, derives element IDs from workspace/pane IDs rather than render counters, and renders through `v_virtual_list` with precomputed row sizes. The trade-off is owning focus, keyboard and cursor logic, accepted because the kit components cannot express the required row layout.

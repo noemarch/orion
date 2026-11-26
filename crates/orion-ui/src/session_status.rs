@@ -6,9 +6,10 @@
 
 use crate::agents::AgentRow;
 use crate::theme::Theme;
+use chrono::{DateTime, Utc};
 use gpui_kit::Rgba;
 use orion_core::protocol::AgentStatus;
-use orion_core::session_state::SessionState;
+use orion_core::session_state::{aggregate as core_aggregate, SessionState};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -31,6 +32,75 @@ pub fn state_from_wire(raw: Option<&str>) -> SessionState {
         raw.and_then(AgentStatus::from_wire)
             .unwrap_or(AgentStatus::Unknown),
     )
+}
+
+/// What the sidebar may paint in a row's state slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowState {
+    Working,
+    Idle,
+    /// A shell pane, or a project with no agent open.
+    None,
+    /// The runtime is unreachable; no cached state may be trusted.
+    Offline,
+}
+
+pub fn row_state(raw: Option<&str>, is_shell: bool, runtime_online: bool) -> RowState {
+    if !runtime_online {
+        return RowState::Offline;
+    }
+    if is_shell {
+        return RowState::None;
+    }
+    if state_from_wire(raw).is_working() {
+        RowState::Working
+    } else {
+        RowState::Idle
+    }
+}
+
+pub fn aggregate(states: &[RowState]) -> RowState {
+    if states.contains(&RowState::Offline) {
+        return RowState::Offline;
+    }
+    let core: Vec<SessionState> = states
+        .iter()
+        .filter_map(|state| match state {
+            RowState::Working => Some(SessionState::Running),
+            RowState::Idle => Some(SessionState::Idle),
+            RowState::None | RowState::Offline => None,
+        })
+        .collect();
+    if core.is_empty() {
+        return RowState::None;
+    }
+    if core_aggregate(&core).is_working() {
+        RowState::Working
+    } else {
+        RowState::Idle
+    }
+}
+
+pub fn working_count(states: &[RowState]) -> usize {
+    states
+        .iter()
+        .filter(|state| **state == RowState::Working)
+        .count()
+}
+
+pub fn elapsed_label(started_at: Option<&str>, now: DateTime<Utc>) -> Option<String> {
+    let started = chrono::DateTime::parse_from_rfc3339(started_at?).ok()?;
+    let seconds = now
+        .signed_duration_since(started.with_timezone(&Utc))
+        .num_seconds()
+        .max(0);
+    if seconds < 60 {
+        Some(format!("{seconds}s"))
+    } else if seconds < 3600 {
+        Some(format!("{}m", seconds / 60))
+    } else {
+        Some(format!("{}h", seconds / 3600))
+    }
 }
 
 /// The one badge word, shared verbatim by the sidebar and the footer.
@@ -227,5 +297,46 @@ mod tests {
         let duplicates = duplicate_names(&rows);
         assert!(duplicates.contains(&("ws-1".to_string(), "Orion".to_string())));
         assert!(!duplicates.contains(&("ws-2".to_string(), "Orion".to_string())));
+    }
+
+    #[test]
+    fn row_state_maps_shell_idle_working_and_offline() {
+        assert_eq!(row_state(Some("working"), false, true), RowState::Working);
+        assert_eq!(row_state(Some("idle"), false, true), RowState::Idle);
+        assert_eq!(row_state(Some("idle"), true, true), RowState::None);
+        assert_eq!(row_state(Some("working"), false, false), RowState::Offline);
+        assert_eq!(row_state(None, false, true), RowState::Working);
+    }
+
+    #[test]
+    fn aggregate_prioritises_offline_then_working_then_idle() {
+        use RowState::*;
+        assert_eq!(aggregate(&[Working, Idle, None]), Working);
+        assert_eq!(aggregate(&[Idle, None]), Idle);
+        assert_eq!(aggregate(&[None]), None);
+        assert_eq!(aggregate(&[Working, Offline]), Offline);
+        assert_eq!(aggregate(&[]), None);
+    }
+
+    #[test]
+    fn working_count_counts_only_working_rows() {
+        use RowState::*;
+        assert_eq!(working_count(&[Working, Working, Idle, None]), 2);
+    }
+
+    #[test]
+    fn elapsed_label_uses_minutes_and_hours() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            elapsed_label(Some("2026-11-25T11:58:00Z"), now),
+            Some("2m".to_string())
+        );
+        assert_eq!(
+            elapsed_label(Some("2026-11-25T10:00:00Z"), now),
+            Some("2h".to_string())
+        );
+        assert_eq!(elapsed_label(None, now), None);
     }
 }

@@ -516,11 +516,14 @@ impl OrionApp {
             None => (
                 Arc::new(Engine::new()) as Arc<dyn Runtime>,
                 Some(
-                    "The Orion runtime is unavailable, so terminals will end with Orion. Start `orion daemon` and reopen Orion."
+                    "Orion could not start or reach its runtime, so terminals will end when Orion closes. Check that `orion` is installed beside `orion-ui` or on PATH."
                         .to_string(),
                 ),
             ),
         };
+        workspace_sidebar.update(cx, |view, cx| {
+            view.set_runtime_online(notice.is_none(), cx);
+        });
 
         let mut app = Self {
             workspace_sidebar,
@@ -1718,10 +1721,11 @@ impl OrionApp {
             .position(|tab| tab.focused)
             .unwrap_or(usize::MAX);
         TabBar::new("tab-strip")
-            .small()
+            .large()
             .bg(theme.surface_panel)
             .px_3()
             .py_1()
+            .h(px(TOUCH_TARGET_PX))
             .selected_index(selected_index)
             .children(tabs.iter().map(|tab| {
                 let pane_id = tab
@@ -1758,7 +1762,7 @@ impl OrionApp {
                                 .tooltip("Rename tab")
                                 .accessibility_label("Rename tab")
                                 .icon(Icon::new(IconName::Pencil).size(px(MARK_SIZE_PX)))
-                                .min_h(px(TOUCH_TARGET_PX))
+                                .min_h(px(36.0))
                                 .min_w(px(TOUCH_TARGET_PX))
                                 .text()
                                 .xsmall()
@@ -1777,7 +1781,7 @@ impl OrionApp {
                                 .tooltip("Split pane")
                                 .accessibility_label("Split pane")
                                 .icon(Icon::new(IconName::Columns2).size(px(MARK_SIZE_PX)))
-                                .min_h(px(TOUCH_TARGET_PX))
+                                .min_h(px(36.0))
                                 .min_w(px(TOUCH_TARGET_PX))
                                 .text()
                                 .xsmall()
@@ -1804,7 +1808,7 @@ impl OrionApp {
                                 .tooltip("Close tab")
                                 .accessibility_label("Close tab")
                                 .icon(Icon::new(IconName::X).size(px(MARK_SIZE_PX)))
-                                .min_h(px(TOUCH_TARGET_PX))
+                                .min_h(px(36.0))
                                 .min_w(px(TOUCH_TARGET_PX))
                                 .text()
                                 .xsmall()
@@ -1834,7 +1838,7 @@ impl OrionApp {
                     .tooltip("New tab")
                     .accessibility_label("New tab")
                     .icon(Icon::new(IconName::Plus).size(px(MARK_SIZE_PX)))
-                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_h(px(36.0))
                     .min_w(px(TOUCH_TARGET_PX))
                     .secondary()
                     .small()
