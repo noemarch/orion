@@ -5,7 +5,6 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::toolbar::Toolbar;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable, ThemeStyled, WindowExt};
 use gpui_kit::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui_kit::*;
@@ -1245,62 +1244,50 @@ impl OrionApp {
         });
     }
 
-    fn conversation_status_line(agent: &str, status: &str, cwd: &str) -> String {
-        [agent, status, cwd]
-            .iter()
-            .filter(|field| !field.is_empty())
-            .copied()
-            .collect::<Vec<_>>()
-            .join(" · ")
+    fn global_status_word(status: Option<&str>) -> &'static str {
+        match status {
+            Some(raw) if session_status::state_from_wire(Some(raw)).is_working() => "working",
+            _ => "idle",
+        }
     }
 
-    /// The thin bar under the middle column: one `agent · state · cwd` line from
-    /// the live sidebar snapshot. The pane id is available on hover only.
-    fn render_conversation_status(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_global_status_bar(&self) -> impl IntoElement {
         let theme = Theme::current();
-        let workspaces = &self.cached_workspaces;
-        let focused = workspaces
+        let focused = self
+            .cached_workspaces
             .iter()
             .find(|workspace| workspace.focused)
-            .or_else(|| workspaces.first());
-        let label = focused.map(|ws| ws.label.clone()).unwrap_or_default();
-        let cwd = focused.and_then(|ws| ws.cwd.clone()).unwrap_or_default();
-        let agent = focused.map(|ws| ws.agent.clone()).unwrap_or_default();
-        let status = focused
-            .map(|ws| session_status::badge_word(session_status::state_of(ws.status)).to_string())
-            .unwrap_or_default();
-        let location = if cwd.is_empty() { label } else { cwd };
-        let line = Self::conversation_status_line(&agent, &status, &location);
-        let pane_id = self.focused_pane.clone();
-        let mut bar = div()
-            .id("conversation-status")
+            .or_else(|| self.cached_workspaces.first());
+        let working = focused
+            .map(|workspace| Self::global_status_word(Some(workspace.status.as_wire())) == "working")
+            .unwrap_or(false);
+        let dot = if working {
+            theme.status_working
+        } else {
+            theme.status_idle
+        };
+        div()
+            .id("global-status-bar")
             .flex()
             .flex_row()
             .items_center()
             .gap(px(theme.space_2()))
+            .h(px(24.0))
             .flex_shrink_0()
             .px(px(theme.space_3()))
-            .py(px(theme.space_1()))
-            .border_t_1()
-            .border_color(theme.border_subtle())
+            .bg(theme.window_bg())
             .text_size(px(theme.font_ui_secondary()))
             .text_color(theme.token_text_dim())
-            .whitespace_nowrap()
-            .overflow_hidden()
             .child(
                 div()
-                    .id("conversation-status-line")
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(line),
-            );
-        if let Some(pane_id) = pane_id {
-            bar = bar.tooltip(move |window, cx| {
-                Tooltip::new(format!("Pane ID: {pane_id}")).build(window, cx)
-            });
-        }
-        bar
+                    .id("global-status-dot")
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(dot),
+            )
+            .child(if working { "working" } else { "idle" })
+            .child(div().flex_1())
+            .child(format!("Orion {}", env!("CARGO_PKG_VERSION")))
     }
 
     fn zoom_focused_pane(&mut self, cx: &mut Context<Self>) {
@@ -2163,8 +2150,7 @@ impl Render for OrionApp {
                                 .child(message)
                                 .into_any_element()
                         }))
-                        .child(lens_body)
-                        .child(self.render_conversation_status(cx)),
+                        .child(lens_body),
                 )
                 .child(
                     div()
@@ -2275,6 +2261,7 @@ impl Render for OrionApp {
                     .child(self.render_header(window, cx)),
             )
             .child(panels)
+            .child(self.render_global_status_bar())
             .child(if self.settings.update(cx, |view, _cx| view.is_open()) {
                 div()
                     .id("modal-host")
@@ -2406,14 +2393,10 @@ mod tests {
     use std::sync::Mutex;
 
     #[::core::prelude::v1::test]
-    fn footer_single_line_is_agent_state_cwd_without_uuid() {
-        let line = OrionApp::conversation_status_line("claude", "Working", "/work/orion");
-        assert_eq!(line, "claude · Working · /work/orion");
-        assert_eq!(
-            line.matches(" · ").count(),
-            2,
-            "exactly three fields, no pane id"
-        );
+    fn global_status_word_is_working_or_idle() {
+        assert_eq!(OrionApp::global_status_word(Some("working")), "working");
+        assert_eq!(OrionApp::global_status_word(Some("idle")), "idle");
+        assert_eq!(OrionApp::global_status_word(None), "idle");
     }
 
     crate::orion_test!(
