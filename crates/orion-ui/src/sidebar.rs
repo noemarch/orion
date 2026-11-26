@@ -56,7 +56,6 @@ const SPACE_4: f32 = 16.0; // --space-4: section padding
 const RADIUS_SM: f32 = 6.0; // --radius-sm: chips and inner controls
 const HEADER_ROW_PX: f32 = 30.0;
 const PANE_ROW_PX: f32 = 48.0;
-const MONO: &str = "JetBrains Mono";
 
 fn truncate_middle(s: &str, max_chars: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -155,6 +154,7 @@ enum TreeRow {
         brand: IconName,
         state: session_status::RowState,
         status_line: String,
+        display_name: String,
     },
 }
 
@@ -329,6 +329,7 @@ impl WorkspaceSidebar {
                 .count();
             let header_state = session_status::aggregate(&states);
             let working = session_status::working_count(&states);
+            let workspace_label = ws.label.clone();
             rows.push(TreeRow::Header {
                 workspace: ws,
                 collapsed,
@@ -363,11 +364,22 @@ impl WorkspaceSidebar {
                     session_status::RowState::None => truncate_middle(&subtitle, 10),
                     session_status::RowState::Offline => "offline".to_string(),
                 };
+                let display_name = if agent.title == workspace_label {
+                    let fallback = agent.agent_name.trim();
+                    if fallback.is_empty() {
+                        "Session".to_string()
+                    } else {
+                        fallback.to_string()
+                    }
+                } else {
+                    agent.title.clone()
+                };
                 rows.push(TreeRow::Pane {
                     agent: (*agent).clone(),
                     brand,
                     state: *state,
                     status_line,
+                    display_name,
                 });
             }
         }
@@ -771,6 +783,10 @@ impl WorkspaceSidebar {
         let hovered = self.hovered_row.as_ref() == Some(target);
         let menu_open = self.open_menu.as_ref() == Some(target);
         let revealed = hovered || menu_open || reveal;
+        let workspace_id_for_menu = match target {
+            RowTarget::Workspace(id) => Some(id.clone()),
+            RowTarget::Pane(_) => None,
+        };
         div()
             .absolute()
             .right_0()
@@ -830,6 +846,21 @@ impl WorkspaceSidebar {
                         .flex()
                         .flex_col()
                         .bg(Theme::current().panel_bg())
+                        .when_some(workspace_id_for_menu.clone(), |el, id| {
+                            el.child(
+                                Button::new(format!("{prefix}-menu-terminal"))
+                                    .ghost()
+                                    .label("New terminal here")
+                                    .min_h(px(TOUCH_TARGET_PX))
+                                    .min_w(px(TOUCH_TARGET_PX))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.create_pane(&id, cx);
+                                        this.open_menu = None;
+                                        cx.notify();
+                                    })),
+                            )
+                        })
                         .child(
                             Button::new(format!("{prefix}-menu-rename"))
                                 .ghost()
@@ -981,19 +1012,6 @@ impl WorkspaceSidebar {
                             .text_color(theme.token_text_muted())
                             .child(if rail { String::new() } else { count }),
                     )
-                    .child(
-                        Button::new(format!("sidebar-workspace-{}-create", workspace.id))
-                            .ghost()
-                            .icon(IconName::Plus)
-                            .tooltip("New pane")
-                            .on_click(cx.listener({
-                                let workspace_id = id.clone();
-                                move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.create_pane(&workspace_id, cx);
-                                }
-                            })),
-                    )
                     .child(self.render_row_controls(
                         &RowTarget::Workspace(id.clone()),
                         scale,
@@ -1006,6 +1024,7 @@ impl WorkspaceSidebar {
                 brand,
                 state,
                 status_line,
+                display_name,
             } => {
                 let pane_id = agent.pane_id.clone();
                 let editing = self.inline_edit.as_ref() == Some(&RowTarget::Pane(pane_id.clone()));
@@ -1030,6 +1049,7 @@ impl WorkspaceSidebar {
                     }))
                     .role(gpui_kit::Role::Row)
                     .aria_selected(selected)
+                    .aria_label(status_line.clone())
                     .h(px(PANE_ROW_PX))
                     .w_full()
                     .flex()
@@ -1114,7 +1134,7 @@ impl WorkspaceSidebar {
                                         .child(if rail {
                                             String::new()
                                         } else {
-                                            agent.title.clone()
+                                            display_name.clone()
                                         }),
                                 )
                             })
@@ -1138,25 +1158,6 @@ impl WorkspaceSidebar {
                                 keyboard_reveal || rail,
                                 cx,
                             )),
-                    )
-                    .child(
-                        div()
-                            .id(format!("sidebar-pane-{}-subtitle", agent.pane_id))
-                            .test_support()
-                            .aria_label(status_line.clone())
-                            .flex_none()
-                            .h(px(theme.font_ui_secondary() + 4.0))
-                            .w_full()
-                            .min_w(px(0.0))
-                            .truncate()
-                            .font_family(MONO)
-                            .text_size(px(theme.font_ui_secondary()))
-                            .text_color(theme.token_text_muted())
-                            .child(if rail {
-                                String::new()
-                            } else {
-                                status_line.clone()
-                            }),
                     )
             }
         }
@@ -1748,6 +1749,35 @@ impl Render for WorkspaceSidebar {
             .rounded(px(theme.radius_panel()))
             .child(self.render_titlebar(rail, &theme, scale, cx))
             .child(self.render_search_row(rail, &theme, scale, &query, cx))
+            .child(
+                div()
+                    .id("sidebar-projects-header")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(HEADER_ROW_PX))
+                    .flex_shrink_0()
+                    .px(px(SPACE_4 * scale))
+                    .text_size(px(theme.font_ui_secondary()))
+                    .text_color(theme.token_text_muted())
+                    .child(if rail { String::new() } else { "Projects".to_string() })
+                    .when(!rail, |el| {
+                        el.child(
+                            Button::new("sidebar-new-workspace")
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Plus).size(theme.scaled_icon_size()))
+                                .tooltip("New workspace")
+                                .accessibility_label("New workspace")
+                                .min_h(px(TOUCH_TARGET_PX))
+                                .min_w(px(TOUCH_TARGET_PX))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.create_pane("", cx);
+                                })),
+                        )
+                    }),
+            )
             .child(tree)
             .child(self.render_bottom_bar(scale, cx))
     }
@@ -2245,7 +2275,7 @@ mod tests {
             }
             let _ = cx.update(|window, _| window.find_by_label("2 working agents"));
 
-            cx.update(|window, cx| window.click("sidebar-workspace-ws-1-create", cx));
+            cx.update(|window, cx| window.click("sidebar-new-workspace", cx));
             assert!(
                 cx.update(|window, _| window.try_find("sidebar-pane-p1").is_some()),
                 "the create control does not collapse its group"
@@ -2569,37 +2599,40 @@ mod tests {
     );
 
     crate::orion_test!(
-        fn terminal_icons_report_the_terminal_lens(cx: &mut gpui_kit::TestAppContext) {
-            let (root, cx, _fixture) = open_tree_fixture(cx);
+        fn lens_controls_left_the_sidebar_chrome(cx: &mut gpui_kit::TestAppContext) {
+            let (_root, cx, _fixture) = open_tree_fixture(cx);
             cx.update(|window, cx| window.render_frame(cx));
-            let (events, subscription) = collect_events(&root, cx);
 
-            for id in ["sidebar-terminal-toolbar", "sidebar-terminal-footer"] {
-                cx.update(|window, cx| window.click(id, cx));
+            for id in ["sidebar-terminal-toolbar", "sidebar-terminal-footer", "sidebar-chat-footer"] {
+                assert!(
+                    cx.update(|window, _| window.try_find(id).is_none()),
+                    "{id} is no longer in the sidebar chrome"
+                );
             }
-            assert_eq!(
-                events
-                    .borrow()
-                    .iter()
-                    .filter(|event| **event == SidebarEvent::TerminalLens)
-                    .count(),
-                2,
-                "both terminal icons ask for the Terminal Lens"
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-new-workspace").is_some()),
+                "the Projects section owns the single new-workspace control"
             );
-            drop(subscription);
         }
     );
 
     crate::orion_test!(
-        fn footer_view_icon_reports_the_chat_lens(cx: &mut gpui_kit::TestAppContext) {
+        fn footer_settings_reports_open_settings(cx: &mut gpui_kit::TestAppContext) {
             let (root, cx, _fixture) = open_tree_fixture(cx);
             cx.update(|window, cx| window.render_frame(cx));
             let (events, subscription) = collect_events(&root, cx);
 
-            cx.update(|window, cx| window.click("sidebar-chat-footer", cx));
+            cx.update(|window, cx| window.click("sidebar-settings", cx));
             assert!(
-                events.borrow().contains(&SidebarEvent::ChatLens),
-                "the footer view icon asks for the Chat Lens"
+                events
+                    .borrow()
+                    .iter()
+                    .any(|event| matches!(event, SidebarEvent::OpenSettings(_))),
+                "the footer settings control asks the app to open settings"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-help").is_some()),
+                "the footer help control is present"
             );
             drop(subscription);
         }
@@ -3072,23 +3105,13 @@ mod tests {
     );
 
     crate::orion_test!(
-        fn pane_subtitle_occupies_the_second_line(cx: &mut gpui_kit::TestAppContext) {
+        fn pane_rows_are_single_line(cx: &mut gpui_kit::TestAppContext) {
             let (_root, cx, _fixture) = open_tree_fixture(cx);
             cx.update(|window, cx| window.render_frame(cx));
 
-            let (row, subtitle) = cx.update(|window, _| {
-                (
-                    window.find("sidebar-pane-p1").bounds(),
-                    window.find("sidebar-pane-p1-subtitle").bounds(),
-                )
-            });
             assert!(
-                subtitle.size.height > px(0.0),
-                "the subtitle line has a positive height"
-            );
-            assert!(
-                subtitle.top() >= row.top() && subtitle.bottom() <= row.bottom(),
-                "the subtitle stays inside the pane row: row={row:?} subtitle={subtitle:?}"
+                cx.update(|window, _| window.try_find("sidebar-pane-p1-subtitle").is_none()),
+                "the second status line is gone"
             );
         }
     );
@@ -3106,8 +3129,8 @@ mod tests {
             cx.update(|window, cx| window.render_frame(cx));
 
             assert!(
-                cx.update(|window, _| window.try_find("sidebar-offline-warning").is_some()),
-                "the header warns that the runtime is unreachable"
+                cx.update(|window, _| window.try_find("sidebar-offline-warning").is_none()),
+                "offline state is no longer shown in the sidebar header"
             );
             assert!(
                 cx.update(|window, _| window.try_find("sidebar-pane-p1-status").is_none()),
@@ -3269,16 +3292,15 @@ mod tests {
     );
 
     crate::orion_test!(
-        fn create_controls_use_the_existing_tab_creation_route(cx: &mut gpui_kit::TestAppContext) {
+        fn projects_plus_uses_the_existing_tab_creation_route(cx: &mut gpui_kit::TestAppContext) {
             let (root, cx, fixture) = open_tree_fixture(cx);
             cx.update(|window, cx| window.render_frame(cx));
             let (events, subscription) = collect_events(&root, cx);
 
-            cx.update(|window, cx| window.click("sidebar-workspace-ws-1-create", cx));
-            cx.update(|window, cx| window.click("new-workspace-button", cx));
+            cx.update(|window, cx| window.click("sidebar-new-workspace", cx));
 
             let created = route_calls(&fixture, "/api/tab/create");
-            assert_eq!(created.len(), 2, "both plus controls create a pane");
+            assert_eq!(created.len(), 1, "the single plus control creates a pane");
             for (_, _, body) in &created {
                 assert_eq!(body["workspace_id"], json!("ws-1"));
                 assert_eq!(body["agent"]["kind"], json!("claude"));
@@ -3289,8 +3311,8 @@ mod tests {
                     .iter()
                     .filter(|event| matches!(event, SidebarEvent::PaneCreated(_)))
                     .count(),
-                2,
-                "both creations are reported to the app"
+                1,
+                "the creation is reported to the app"
             );
             drop(subscription);
         }
