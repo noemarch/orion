@@ -29,8 +29,8 @@ use crate::session_status;
 use crate::settings::{KeyBarExtras, Preferences, SettingsModal};
 use crate::shell_model::{
     clamp_window_bounds, cycle_lens, cycle_middle_lens, effective_conversation_width,
-    lens_position, reference_layout, review_column_visible_for_terminal, sidebar_visible,
-    HeaderModel, LensBook, ShellLayout, WindowGeometry, FILES_SURFACE_WIDTH_WIDE,
+    lens_position, reference_layout, review_column_visible_for_terminal, sidebar_visible, LensBook,
+    ShellLayout, WindowGeometry, FILES_SURFACE_WIDTH_WIDE,
 };
 use crate::shell_picker::{ShellPickerEvent, ShellPickerModal};
 use crate::sidebar::{focus_search, FocusSidebarSearch, SidebarEvent, TabEntry, WorkspaceEntry};
@@ -1206,37 +1206,10 @@ impl OrionApp {
             )
     }
 
-    fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_header(&self, window: &Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
-        let workspaces = &self.cached_workspaces;
-        let focused = workspaces
-            .iter()
-            .find(|w| w.focused)
-            .or_else(|| workspaces.first());
-        let header = if let Some(ws) = focused {
-            HeaderModel {
-                title: "Orion".to_string(),
-                workspace: ws.label.clone(),
-                connection: "Live".to_string(),
-            }
-        } else {
-            HeaderModel::empty()
-        };
-        let sidebar_label = if self.sidebar_open {
-            "Hide sidebar"
-        } else {
-            "Show sidebar"
-        };
-        let review_label = if self.review_open {
-            "Hide review"
-        } else {
-            "Show review"
-        };
-        // The kit's toolbar: the title and workspace are plain content, and
-        // the flexible spacer pushes the connection and the settings control
-        // to the trailing edge.
         Toolbar::new("app-header")
-            .h(px(40.0))
+            .h(px(32.0))
             .w_full()
             .px(px(theme.space_3()))
             .gap(px(theme.space_3()))
@@ -1245,128 +1218,13 @@ impl OrionApp {
                 div()
                     .id("header-drag-title")
                     .window_control_area(WindowControlArea::Drag)
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .items_center()
                     .text_size(px(theme.font_title()))
                     .text_color(theme.text_primary())
-                    .child(header.title),
-            )
-            .content(
-                div()
-                    .id("header-drag-workspace")
-                    .window_control_area(WindowControlArea::Drag)
-                    .min_w(px(0.0))
-                    .text_size(px(theme.font_ui_secondary()))
-                    .text_color(theme.token_text_dim())
-                    .truncate()
-                    .child(header.workspace),
-            )
-            .content(
-                div()
-                    .id("header-drag-connection")
-                    .window_control_area(WindowControlArea::Drag)
-                    .flex_1()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .child(
-                        div()
-                            .text_size(px(theme.font_ui_secondary()))
-                            .text_color(theme.token_text_dim())
-                            .child(header.connection),
-                    ),
-            )
-            .content(
-                Button::new("header-sidebar-toggle")
-                    .icon(Icon::new(IconName::PanelLeft))
-                    .ghost()
-                    .small()
-                    .h(px(TOUCH_TARGET_PX))
-                    .min_h(px(TOUCH_TARGET_PX))
-                    .min_w(px(TOUCH_TARGET_PX))
-                    .tooltip(sidebar_label)
-                    .accessibility_label(sidebar_label)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar_open = !this.sidebar_open;
-                        cx.notify();
-                    })),
-            )
-            .content(
-                Button::new("header-review-toggle")
-                    .icon(Icon::new(IconName::PanelRight))
-                    .ghost()
-                    .small()
-                    .h(px(TOUCH_TARGET_PX))
-                    .min_h(px(TOUCH_TARGET_PX))
-                    .min_w(px(TOUCH_TARGET_PX))
-                    .tooltip(review_label)
-                    .accessibility_label(review_label)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.review_open = !this.review_open;
-                        cx.notify();
-                    })),
-            )
-            .content(
-                Button::new("header-new-workspace")
-                    .icon(Icon::new(IconName::Plus))
-                    .label("New Workspace")
-                    .secondary()
-                    .small()
-                    .h(px(TOUCH_TARGET_PX))
-                    .min_h(px(TOUCH_TARGET_PX))
-                    .tooltip("New Workspace")
-                    .accessibility_label("New Workspace")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let opener = window.focused(cx);
-                        this.open_new_workspace(cx, opener);
-                        cx.notify();
-                    })),
-            )
-            .content(
-                Button::new("header-new-terminal")
-                    .label("New Terminal")
-                    .secondary()
-                    .small()
-                    .h(px(TOUCH_TARGET_PX))
-                    .min_h(px(TOUCH_TARGET_PX))
-                    .tooltip("New Terminal")
-                    .accessibility_label("New Terminal")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let opener = window.focused(cx);
-                        let default = this
-                            .settings
-                            .update(cx, |view, cx| view.prefs(cx).default_shell.clone());
-                        let cwd = this
-                            .cached_workspaces
-                            .iter()
-                            .find(|workspace| workspace.focused)
-                            .or_else(|| this.cached_workspaces.first())
-                            .and_then(|workspace| workspace.cwd.clone());
-                        this.shell_picker.update(cx, |view, cx| {
-                            view.open_with_focus(opener, &default, cwd, cx);
-                        });
-                        cx.notify();
-                    })),
-            )
-            // content, not child: the toolbar's child() turns a button into a
-            // quiet ghost command, and this one keeps its labeled action look.
-            .content(
-                Button::new("header-settings")
-                    .icon(Icon::new(IconName::Settings))
-                    .ghost()
-                    .small()
-                    .h(px(TOUCH_TARGET_PX))
-                    .min_h(px(TOUCH_TARGET_PX))
-                    .min_w(px(TOUCH_TARGET_PX))
-                    .tooltip("Settings")
-                    .accessibility_label("Settings")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let opener = window.focused(cx);
-                        let settings = this.settings.clone();
-                        settings.update(cx, |view, cx| {
-                            view.open_with_focus(opener);
-                            cx.notify();
-                        });
-                        cx.notify();
-                    })),
+                    .child("Orion"),
             )
             .content(Self::render_window_controls(window, &theme))
     }
@@ -2459,7 +2317,7 @@ impl Render for OrionApp {
                     .flex_row()
                     .items_center()
                     .w_full()
-                    .h(px(40.0))
+                    .h(px(32.0))
                     .flex_shrink_0()
                     .bg(theme.window_bg())
                     .child(self.render_header(window, cx)),
