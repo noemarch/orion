@@ -28,7 +28,9 @@ use crate::theme::{Theme, DOT_SIZE_PX, ICON_SIZE_PX, MARK_SIZE_PX, TOUCH_TARGET_
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{v_virtual_list, VirtualListScrollHandle};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{button::Button, button::ButtonVariants, Icon, ThemeStyled, WindowExt};
+use gpui_kit::component::{
+    button::Button, button::ButtonVariants, Icon, Sizable, ThemeStyled, WindowExt,
+};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::test::TestSupportExt;
 use gpui_kit::*;
@@ -1475,19 +1477,6 @@ impl WorkspaceSidebar {
                             .bg(theme.surface_canvas),
                     ),
             )
-            .when(!self.runtime_online, |el| {
-                el.child(
-                    Button::new("sidebar-offline-warning")
-                        .ghost()
-                        .icon(Icon::new(IconName::TriangleAlert).size(theme.scaled_icon_size()))
-                        .text_color(theme.warning_amber)
-                        .tooltip(
-                            "Orion could not start or reach its runtime. Terminals end when Orion closes.",
-                        )
-                        .min_h(px(TOUCH_TARGET_PX))
-                        .min_w(px(TOUCH_TARGET_PX)),
-                )
-            })
             .child(
                 div()
                     .text_size(px(14.0 * scale))
@@ -1500,11 +1489,6 @@ impl WorkspaceSidebar {
                     }),
             )
             .child(div().flex_1())
-            .child(
-                Icon::new(IconName::Menu)
-                    .size(theme.scaled_icon_size())
-                    .text_color(theme.text_muted),
-            )
             .child(Self::action_button(
                 "sidebar-header-collapse",
                 IconName::PanelLeft,
@@ -1566,74 +1550,50 @@ impl WorkspaceSidebar {
                         })),
                 )
             })
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SPACE_1 * scale))
-                    .child(
-                        Button::new("sidebar-settings")
-                            .ghost()
-                            .icon(IconName::Settings)
-                            .tooltip("Settings")
-                            .min_h(px(TOUCH_TARGET_PX))
-                            .min_w(px(TOUCH_TARGET_PX))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let opener = window
-                                    .focused(cx)
-                                    .or_else(|| Some(this.focus_handle.clone()));
-                                cx.emit(SidebarEvent::OpenSettings(opener));
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("new-workspace-button")
-                            .tooltip("New workspace")
-                            .ghost()
-                            .icon(IconName::Plus)
-                            .min_h(px(TOUCH_TARGET_PX))
-                            .min_w(px(TOUCH_TARGET_PX))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.create_pane("", cx);
-                            })),
-                    )
-                    .child(Self::action_button(
-                        "sidebar-terminal-toolbar",
-                        IconName::SquareTerminal,
-                        "Terminal Lens",
-                        SidebarEvent::TerminalLens,
-                        cx,
-                    )),
-            )
     }
 
-    /// The 40px bottom icon bar.
     fn render_bottom_bar(&self, scale: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::current();
         div()
             .id("sidebar-bottom-bar")
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(SPACE_4 * scale))
+            .gap(px(SPACE_1 * scale))
             .h(px(40.0))
             .flex_shrink_0()
             .px(px(SPACE_4 * scale))
-            .child(Self::action_button(
-                "sidebar-terminal-footer",
-                IconName::SquareTerminal,
-                "Terminal Lens",
-                SidebarEvent::TerminalLens,
-                cx,
-            ))
-            .child(Self::action_button(
-                "sidebar-chat-footer",
-                IconName::LayoutDashboard,
-                "Chat Lens",
-                SidebarEvent::ChatLens,
-                cx,
-            ))
+            .child(
+                Button::new("sidebar-settings")
+                    .ghost()
+                    .small()
+                    .icon(Icon::new(IconName::Settings).size(theme.scaled_icon_size()))
+                    .tooltip("Settings")
+                    .accessibility_label("Settings")
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let opener = window
+                            .focused(cx)
+                            .or_else(|| Some(this.focus_handle.clone()));
+                        cx.emit(SidebarEvent::OpenSettings(opener));
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("sidebar-help")
+                    .ghost()
+                    .small()
+                    .icon(Icon::new(IconName::CircleQuestionMark).size(theme.scaled_icon_size()))
+                    .tooltip("Focus search: / or Ctrl+K")
+                    .accessibility_label("Help")
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.focus_search(window, cx);
+                    })),
+            )
+            .child(div().flex_1())
     }
 }
 

@@ -2314,7 +2314,7 @@ impl Render for OrionApp {
 // outside it, so register just the extras the shell uses and fall back to it.
 gpui_kit::assets::icon_assets!(
     ShellIcons,
-    [X, Pencil, Columns2, ZoomIn, MessageCircle, GitCompare]
+    [X, Pencil, Columns2, ZoomIn, MessageCircle, GitCompare, CircleQuestionMark]
 );
 
 struct ShellAssets;
