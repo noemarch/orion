@@ -2,6 +2,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::toolbar::Toolbar;
 use gpui_kit::component::tooltip::Tooltip;
@@ -28,9 +29,9 @@ use crate::review_pane::ReviewPane;
 use crate::session_status;
 use crate::settings::{KeyBarExtras, Preferences, SettingsModal};
 use crate::shell_model::{
-    clamp_window_bounds, cycle_lens, cycle_middle_lens, effective_conversation_width,
-    lens_position, reference_layout, review_column_visible_for_terminal, sidebar_visible, LensBook,
-    ShellLayout, WindowGeometry, FILES_SURFACE_WIDTH_WIDE,
+    clamp_window_bounds, effective_conversation_width, reference_layout,
+    review_column_visible_for_terminal, sidebar_visible, LensBook, ShellLayout, WindowGeometry,
+    FILES_SURFACE_WIDTH_WIDE,
 };
 use crate::shell_picker::{ShellPickerEvent, ShellPickerModal};
 use crate::sidebar::{focus_search, FocusSidebarSearch, SidebarEvent, TabEntry, WorkspaceEntry};
@@ -97,11 +98,6 @@ pub struct OrionApp {
     bounds_save_generation: u64,
     /// Keyboard focus for the shell chrome (tab rename).
     focus_handle: gpui_kit::FocusHandle,
-    /// Roving tab stop for the three-lens segmented switcher. Kit `TabBar`
-    /// has no focus of its own, so arrow keys on this handle drive it.
-    lens_switch_focus: gpui_kit::FocusHandle,
-    /// Roving tab stop for the compact Chat|Terminal switcher.
-    middle_switch_focus: gpui_kit::FocusHandle,
     /// The last lifecycle command that failed, shown as one plain sentence.
     notice: Option<String>,
     /// Shell state derived from the sidebar snapshot. Refreshed on session
@@ -552,8 +548,6 @@ impl OrionApp {
             subscriptions: Vec::new(),
             bounds_save_generation: 0,
             focus_handle: cx.focus_handle().tab_stop(true),
-            lens_switch_focus: cx.focus_handle().tab_stop(true),
-            middle_switch_focus: cx.focus_handle().tab_stop(true),
             notice,
             last_render_prefs: None,
             cached_live_panes: Vec::new(),
@@ -1229,123 +1223,6 @@ impl OrionApp {
             .content(Self::render_window_controls(window, &theme))
     }
 
-    /// The compact Chat|Terminal switch of the three-panel layout. The review
-    /// column owns the diff there, so the middle column only needs the two
-    /// lenses that share the focused pane's live views.
-    fn render_middle_switcher(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::current();
-        // The Changes lens keeps the conversation on screen in this layout, so
-        // Chat is the selected tab for it too.
-        let lens_index = match self.current_lens() {
-            Lens::Terminal => 1,
-            Lens::Chat | Lens::Changes => 0,
-        };
-        let focused_pane_id = self.focused_pane.clone();
-        let focused_pane_id_zoom = focused_pane_id.clone();
-        let switch_focus = &self.middle_switch_focus;
-        div()
-            .id("middle-switcher")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(40.0))
-            .px_3()
-            .w_full()
-            .bg(theme.panel_bg())
-            .track_focus(switch_focus)
-            .when(switch_focus.is_focused(window), |el| {
-                el.focus_ring_style(window, cx)
-            })
-            .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
-                if matches!(
-                    ev.keystroke.key.as_str(),
-                    "left"
-                        | "arrowleft"
-                        | "right"
-                        | "arrowright"
-                        | "up"
-                        | "arrowup"
-                        | "down"
-                        | "arrowdown"
-                ) {
-                    this.set_lens(cycle_middle_lens(this.current_lens()), cx);
-                    cx.notify();
-                }
-            }))
-            .child(
-                TabBar::new("middle-switch")
-                    .segmented()
-                    .selected_index(lens_index)
-                    .child(
-                        Tab::new()
-                            .debug_selector(|| "middle-chat".into())
-                            .icon(Icon::new(IconName::MessageCircle).size(theme.scaled_icon_size()))
-                            .label("Chat")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_lens(Lens::Chat, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Tab::new()
-                            .debug_selector(|| "middle-terminal".into())
-                            .icon(
-                                Icon::new(IconName::SquareTerminal).size(theme.scaled_icon_size()),
-                            )
-                            .label("Terminal")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_lens(Lens::Terminal, cx);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(div().flex_1())
-            .child(
-                Button::new("middle-pane-zoom")
-                    .icon(Icon::new(IconName::ZoomIn).size(theme.scaled_icon_size()))
-                    .label("Zoom")
-                    .secondary()
-                    .small()
-                    .min_h(px(TOUCH_TARGET_PX))
-                    .min_w(px(TOUCH_TARGET_PX))
-                    .tooltip("Zoom pane")
-                    .accessibility_label("Zoom pane")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(pane_id) = focused_pane_id_zoom.clone() {
-                            this.call_route(
-                                "/api/pane/zoom",
-                                &json!({ "pane_id": pane_id, "mode": "toggle" }),
-                            );
-                        }
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("middle-pane-close")
-                    .icon(Icon::new(IconName::X).size(theme.scaled_icon_size()))
-                    .label("Close")
-                    .secondary()
-                    .small()
-                    .min_h(px(TOUCH_TARGET_PX))
-                    .min_w(px(TOUCH_TARGET_PX))
-                    .tooltip("Close pane")
-                    .accessibility_label("Close pane")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(pane_id) = focused_pane_id.clone() {
-                            if this.terminal_pane.read(cx).is_running() {
-                                this.confirm_close_pane(pane_id, window, cx);
-                            } else {
-                                this.call_route("/api/pane/close", &json!({ "pane_id": pane_id }));
-                            }
-                        }
-                        this.workspace_sidebar
-                            .update(cx, |view, _cx| view.refresh());
-                        cx.notify();
-                    })),
-            )
-    }
-
     fn confirm_close_pane(&self, pane_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let app_entity = cx.entity();
         window.open_alert_dialog(cx, move |alert, _, _| {
@@ -1426,125 +1303,106 @@ impl OrionApp {
         bar
     }
 
-    fn render_lens_toggle(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::current();
-        // The three lenses are one segmented switch: the kit's tab bar owns
-        // the selected pill, and the index is the lens the book holds.
-        let lens_index = lens_position(self.current_lens());
-        let focused_pane_id = self.focused_pane.clone();
-        let focused_pane_id_zoom = focused_pane_id.clone();
-        let switch_focus = &self.lens_switch_focus;
-        div()
-            .id("lens-toggle")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(40.0))
-            .px_3()
-            // The row is as wide as the column: a capped width left the rest
-            // of the line unpainted, which showed the window's own background
-            // as a black strip beside the buttons.
-            .w_full()
-            .bg(theme.surface_panel)
-            .track_focus(switch_focus)
-            .when(switch_focus.is_focused(window), |el| {
-                el.focus_ring_style(window, cx)
-            })
-            .on_key_down(cx.listener(|this, ev: &gpui_kit::KeyDownEvent, _, cx| {
-                let forward = match ev.keystroke.key.as_str() {
-                    "right" | "arrowright" | "down" | "arrowdown" => true,
-                    "left" | "arrowleft" | "up" | "arrowup" => false,
-                    _ => return,
-                };
-                this.set_lens(cycle_lens(this.current_lens(), forward), cx);
-                cx.notify();
-            }))
-            .child(
-                TabBar::new("lens-switch")
-                    .segmented()
-                    .selected_index(lens_index)
-                    .child(
-                        Tab::new()
-                            .debug_selector(|| "lens-chat".into())
-                            .icon(Icon::new(IconName::MessageCircle).size(theme.scaled_icon_size()))
-                            .label("Chat")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_lens(Lens::Chat, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Tab::new()
-                            .debug_selector(|| "lens-terminal".into())
-                            .icon(
-                                Icon::new(IconName::SquareTerminal).size(theme.scaled_icon_size()),
-                            )
-                            .label("Terminal")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_lens(Lens::Terminal, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Tab::new()
-                            .debug_selector(|| "lens-changes".into())
-                            .icon(Icon::new(IconName::GitCompare).size(theme.scaled_icon_size()))
-                            .label("Changes")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_lens(Lens::Changes, cx);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                Button::new("pane-zoom")
-                    .icon(Icon::new(IconName::ZoomIn).size(theme.scaled_icon_size()))
-                    .label("Zoom")
-                    .secondary()
-                    .small()
-                    .min_h(px(TOUCH_TARGET_PX))
-                    .min_w(px(TOUCH_TARGET_PX))
-                    .tooltip("Zoom pane")
-                    .accessibility_label("Zoom pane")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(pane_id) = focused_pane_id_zoom.clone() {
-                            this.call_route(
-                                "/api/pane/zoom",
-                                &json!({ "pane_id": pane_id, "mode": "toggle" }),
-                            );
-                        }
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("pane-close")
-                    .icon(Icon::new(IconName::X).size(theme.scaled_icon_size()))
-                    .label("Close")
-                    .secondary()
-                    .small()
-                    .min_h(px(TOUCH_TARGET_PX))
-                    .min_w(px(TOUCH_TARGET_PX))
-                    .tooltip("Close pane")
-                    .accessibility_label("Close pane")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(pane_id) = focused_pane_id.clone() {
-                            if this.terminal_pane.read(cx).is_running() {
-                                this.confirm_close_pane(pane_id, window, cx);
-                            } else {
-                                this.call_route("/api/pane/close", &json!({ "pane_id": pane_id }));
-                            }
-                        }
-                        this.workspace_sidebar
-                            .update(cx, |view, _cx| view.refresh());
-                        cx.notify();
-                    })),
-            )
+    fn zoom_focused_pane(&mut self, cx: &mut Context<Self>) {
+        if let Some(pane_id) = self.focused_pane.clone() {
+            self.call_route(
+                "/api/pane/zoom",
+                &json!({ "pane_id": pane_id, "mode": "toggle" }),
+            );
+        }
+        cx.notify();
+    }
+
+    fn close_focused_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane_id) = self.focused_pane.clone() {
+            if self.terminal_pane.read(cx).is_running() {
+                self.confirm_close_pane(pane_id, window, cx);
+            } else {
+                self.call_route("/api/pane/close", &json!({ "pane_id": pane_id }));
+            }
+        }
+        self.workspace_sidebar.update(cx, |view, _cx| view.refresh());
+        cx.notify();
+    }
+
+    fn split_focused_pane(&mut self, cx: &mut Context<Self>) {
+        if let Some(pane_id) = self.focused_pane.clone() {
+            self.call_route(
+                "/api/pane/split",
+                &json!({ "pane_id": pane_id, "direction": "right" }),
+            );
+            self.workspace_sidebar.update(cx, |view, _cx| view.refresh());
+        }
+        cx.notify();
+    }
+
+    fn rename_tab_by_id(
+        &mut self,
+        tab_id: String,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editing_tab = Some((tab_id, label));
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_tab_by_id(&mut self, tab_id: String, cx: &mut Context<Self>) {
+        self.call_route("/api/tab/close", &json!({ "tab_id": tab_id }));
+        self.workspace_sidebar.update(cx, |view, _cx| view.refresh());
+        cx.notify();
+    }
+
+    fn create_tab(
+        &mut self,
+        workspace_id: String,
+        agent: String,
+        label: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.call_route(
+            "/api/tab/create",
+            &json!({
+                "workspace_id": workspace_id,
+                "agent": { "kind": agent },
+                "label": label,
+            }),
+        );
+        self.workspace_sidebar.update(cx, |view, _cx| view.refresh());
+        cx.notify();
+    }
+
+    fn open_new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let opener = window.focused(cx);
+        let default = self
+            .settings
+            .update(cx, |view, cx| view.prefs(cx).default_shell.clone());
+        let cwd = self
+            .cached_workspaces
+            .iter()
+            .find(|workspace| workspace.focused)
+            .or_else(|| self.cached_workspaces.first())
+            .and_then(|workspace| workspace.cwd.clone());
+        self.shell_picker.update(cx, |view, cx| {
+            view.open_with_focus(opener, &default, cwd, cx);
+        });
+        cx.notify();
+    }
+
+    fn toggle_review(&mut self, cx: &mut Context<Self>) {
+        self.review_open = !self.review_open;
+        cx.notify();
+    }
+
+    fn set_lens_from_menu(&mut self, lens: Lens, cx: &mut Context<Self>) {
+        self.set_lens(lens, cx);
+        cx.notify();
     }
 
     /// The focused workspace's tabs, above the lens content (TabStrip
     /// behavior): clicking a tab focuses its first pane.
-    fn render_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_tab_strip(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::current();
         let (tabs, ws_id, ws_agent) = {
             let workspaces = &self.cached_workspaces;
@@ -1566,20 +1424,22 @@ impl OrionApp {
             }
         };
         let scale = theme.density_scale();
+        let app = cx.entity();
         let ws_id_for_new = ws_id.clone();
         let ws_agent_for_new = ws_agent.clone();
         let next_tab_number = tabs.iter().map(|tab| tab.number).max().unwrap_or(0) + 1;
         let new_tab_label = format!("Tab {next_tab_number}");
-        // The kit's tab bar owns the strip: each tab carries its own rename,
-        // split and close buttons as its suffix, and the bar's suffix is the
-        // new-tab button. A tab with no focused pane selects nothing, so the
-        // index is the sentinel the bar reads as "no selection".
         let selected_index = tabs
             .iter()
             .position(|tab| tab.focused)
             .unwrap_or(usize::MAX);
+        let active = tabs
+            .iter()
+            .find(|tab| tab.focused)
+            .or_else(|| tabs.first());
+        let active_id = active.map(|tab| tab.id.clone()).unwrap_or_default();
+        let active_label = active.map(|tab| tab.label.clone()).unwrap_or_default();
         TabBar::new("tab-strip")
-            .large()
             .bg(theme.surface_panel)
             .px_3()
             .py_1()
@@ -1590,10 +1450,15 @@ impl OrionApp {
                     .active_pane
                     .clone()
                     .or_else(|| tab.pane_ids.first().cloned());
-                let pane_id_for_split = pane_id.clone();
                 let tab_id = tab.id.clone();
-                let tab_id_for_edit = tab_id.clone();
-                let tab_label_for_edit = tab.label.clone();
+                let close_app = app.clone();
+                let close_id = tab_id.clone();
+                let context_app = app.clone();
+                let context_id = tab_id.clone();
+                let context_label = tab.label.clone();
+                let split_app = app.clone();
+                let group = format!("tab-row-{tab_id}");
+                let close_group = group.clone();
                 let editing = self
                     .editing_tab
                     .as_ref()
@@ -1604,83 +1469,80 @@ impl OrionApp {
                         .as_ref()
                         .map(|(_, text)| text.clone())
                         .unwrap_or_default();
-                    // A visible caret marks the inline rename mode.
                     format!("{draft}▏")
                 } else {
                     tab.label.clone()
                 };
-                let kit_tab = Tab::new().label(label).text_size(px(12.0 * scale)).suffix(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            Button::new(format!("tab-edit-{tab_id}"))
-                                .tooltip("Rename tab")
-                                .accessibility_label("Rename tab")
-                                .icon(Icon::new(IconName::Pencil).size(px(MARK_SIZE_PX)))
-                                .min_h(px(36.0))
-                                .min_w(px(TOUCH_TARGET_PX))
-                                .text()
-                                .xsmall()
-                                .px_1()
-                                .text_size(px(12.0 * scale))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.editing_tab =
-                                        Some((tab_id_for_edit.clone(), tab_label_for_edit.clone()));
-                                    this.focus_handle.focus(window, cx);
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new(format!("tab-split-{tab_id}"))
-                                .tooltip("Split pane")
-                                .accessibility_label("Split pane")
-                                .icon(Icon::new(IconName::Columns2).size(px(MARK_SIZE_PX)))
-                                .min_h(px(36.0))
-                                .min_w(px(TOUCH_TARGET_PX))
-                                .text()
-                                .xsmall()
-                                .px_1()
-                                .text_size(px(12.0 * scale))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    if let Some(pane_id) = pane_id_for_split.clone() {
-                                        this.call_route(
-                                            "/api/pane/split",
-                                            &json!({
-                                                "pane_id": pane_id,
-                                                "direction": "right",
-                                            }),
-                                        );
-                                        this.workspace_sidebar
-                                            .update(cx, |view, _cx| view.refresh());
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new(format!("tab-close-{tab_id}"))
-                                .tooltip("Close tab")
-                                .accessibility_label("Close tab")
-                                .icon(Icon::new(IconName::X).size(px(MARK_SIZE_PX)))
-                                .min_h(px(36.0))
-                                .min_w(px(TOUCH_TARGET_PX))
-                                .text()
-                                .xsmall()
-                                .px_1()
-                                .text_size(px(12.0 * scale))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.call_route("/api/tab/close", &json!({ "tab_id": tab_id }));
-                                    this.workspace_sidebar
-                                        .update(cx, |view, _cx| view.refresh());
-                                    cx.notify();
-                                })),
-                        ),
-                );
+                let kit_tab = Tab::new()
+                    .group(group)
+                    .label(label)
+                    .text_size(px(12.0 * scale))
+                    .suffix(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                Button::new(format!("tab-edit-{tab_id}"))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::Pencil).size(px(MARK_SIZE_PX)))
+                                    .tooltip("Rename tab")
+                                    .accessibility_label("Rename tab")
+                                    .invisible()
+                                    .group_hover(close_group.clone(), |style| style.visible())
+                                    .on_click({
+                                        let app = context_app.clone();
+                                        let id = context_id.clone();
+                                        let label = context_label.clone();
+                                        cx.listener(move |_, _, window, cx| {
+                                            app.update(cx, |this, cx| {
+                                                this.rename_tab_by_id(
+                                                    id.clone(),
+                                                    label.clone(),
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        })
+                                    }),
+                            )
+                            .child(
+                                Button::new(format!("tab-split-{tab_id}"))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::Columns2).size(px(MARK_SIZE_PX)))
+                                    .tooltip("Split pane")
+                                    .accessibility_label("Split pane")
+                                    .invisible()
+                                    .group_hover(close_group.clone(), |style| style.visible())
+                                    .on_click({
+                                        let app = split_app.clone();
+                                        cx.listener(move |_, _, _, cx| {
+                                            app.update(cx, |this, cx| this.split_focused_pane(cx));
+                                        })
+                                    }),
+                            )
+                            .child(
+                                Button::new(format!("tab-close-{tab_id}"))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::X).size(px(MARK_SIZE_PX)))
+                                    .tooltip("Close tab")
+                                    .accessibility_label("Close tab")
+                                    .when(!tab.focused, |button| {
+                                        button.invisible().group_hover(close_group.clone(), |style| {
+                                            style.visible()
+                                        })
+                                    })
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        close_app.update(cx, |this, cx| {
+                                            this.close_tab_by_id(close_id.clone(), cx)
+                                        });
+                                    })),
+                            ),
+                    );
                 if let Some(pane_id) = pane_id {
                     kit_tab.on_click(cx.listener(move |this, _, _, cx| {
                         let sidebar = this.workspace_sidebar.clone();
@@ -1692,28 +1554,120 @@ impl OrionApp {
                 }
             }))
             .suffix(
-                Button::new("tab-new")
-                    .tooltip("New tab")
-                    .accessibility_label("New tab")
-                    .icon(Icon::new(IconName::Plus).size(px(MARK_SIZE_PX)))
-                    .min_h(px(36.0))
-                    .min_w(px(TOUCH_TARGET_PX))
-                    .secondary()
-                    .small()
-                    .text_size(px(12.0 * scale))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.call_route(
-                            "/api/tab/create",
-                            &json!({
-                                "workspace_id": ws_id_for_new,
-                                "agent": { "kind": ws_agent_for_new },
-                                "label": new_tab_label,
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        Button::new("tab-new-terminal")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::Plus).size(px(MARK_SIZE_PX)))
+                            .tooltip("New terminal")
+                            .accessibility_label("New terminal")
+                            .on_click({
+                                let app = app.clone();
+                                cx.listener(move |_, _, window, cx| {
+                                    app.update(cx, |this, cx| this.open_new_terminal(window, cx));
+                                })
                             }),
-                        );
-                        this.workspace_sidebar
-                            .update(cx, |view, _cx| view.refresh());
-                        cx.notify();
-                    })),
+                    )
+                    .child(
+                        Button::new("tab-more")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::Ellipsis).size(px(MARK_SIZE_PX)))
+                            .tooltip("Pane and view actions")
+                            .accessibility_label("Pane and view actions")
+                            .dropdown_menu({
+                                let app = app.clone();
+                                let ws_id = ws_id_for_new.clone();
+                                let ws_agent = ws_agent_for_new.clone();
+                                let new_tab_label = new_tab_label.clone();
+                                let active_id = active_id.clone();
+                                let active_label = active_label.clone();
+                                move |menu, _, _| {
+                                    let app = app.clone();
+                                    let ws_id = ws_id.clone();
+                                    let ws_agent = ws_agent.clone();
+                                    let new_tab_label = new_tab_label.clone();
+                                    let active_id = active_id.clone();
+                                    let active_label = active_label.clone();
+                                    let zoom_app = app.clone();
+                                    let split_app = app.clone();
+                                    let close_pane_app = app.clone();
+                                    let rename_app = app.clone();
+                                    let chat_app = app.clone();
+                                    let terminal_app = app.clone();
+                                    let changes_app = app.clone();
+                                    let review_app = app.clone();
+                                    let toggle_app = app;
+                                    menu.item(PopupMenuItem::new("New tab").on_click(
+                                        move |_, _, cx| {
+                                            zoom_app.update(cx, |this, cx| {
+                                                this.create_tab(
+                                                    ws_id.clone(),
+                                                    ws_agent.clone(),
+                                                    new_tab_label.clone(),
+                                                    cx,
+                                                )
+                                            });
+                                        },
+                                    ))
+                                    .separator()
+                                    .item(PopupMenuItem::new("Zoom pane").on_click(move |_, _, cx| {
+                                        split_app.update(cx, |this, cx| this.zoom_focused_pane(cx));
+                                    }))
+                                    .item(PopupMenuItem::new("Split pane").on_click(move |_, _, cx| {
+                                        close_pane_app
+                                            .update(cx, |this, cx| this.split_focused_pane(cx));
+                                    }))
+                                    .item(PopupMenuItem::new("Close pane").on_click(
+                                        move |_, window, cx| {
+                                            rename_app.update(cx, |this, cx| {
+                                                this.close_focused_pane(window, cx)
+                                            });
+                                        },
+                                    ))
+                                    .item(PopupMenuItem::new("Rename tab").on_click(
+                                        move |_, window, cx| {
+                                            chat_app.update(cx, |this, cx| {
+                                                this.rename_tab_by_id(
+                                                    active_id.clone(),
+                                                    active_label.clone(),
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        },
+                                    ))
+                                    .separator()
+                                    .item(PopupMenuItem::label("View"))
+                                    .item(PopupMenuItem::new("Chat").on_click(move |_, _, cx| {
+                                        terminal_app.update(cx, |this, cx| {
+                                            this.set_lens_from_menu(Lens::Chat, cx)
+                                        });
+                                    }))
+                                    .item(PopupMenuItem::new("Terminal").on_click(move |_, _, cx| {
+                                        changes_app.update(cx, |this, cx| {
+                                            this.set_lens_from_menu(Lens::Terminal, cx)
+                                        });
+                                    }))
+                                    .item(PopupMenuItem::new("Changes").on_click(move |_, _, cx| {
+                                        review_app.update(cx, |this, cx| {
+                                            this.set_lens_from_menu(Lens::Changes, cx)
+                                        });
+                                    }))
+                                    .separator()
+                                    .item(PopupMenuItem::new("Toggle review column").on_click(
+                                        move |_, _, cx| {
+                                            toggle_app.update(cx, |this, cx| this.toggle_review(cx));
+                                        },
+                                    ))
+                                }
+                            }),
+                    ),
             )
     }
 
@@ -2194,7 +2148,10 @@ impl Render for OrionApp {
                         .min_w(px(0.0))
                         .bg(theme.panel_bg())
                         .rounded(px(theme.radius_panel()))
-                        .child(self.render_middle_switcher(window, cx))
+                        .children(
+                            has_workspaces
+                                .then(|| self.render_tab_strip(window, cx).into_any_element()),
+                        )
                         .children(notice.map(|message| {
                             div()
                                 .id("command-notice")
@@ -2245,14 +2202,9 @@ impl Render for OrionApp {
                         .min_w(px(0.0))
                         .bg(theme.panel_bg())
                         .rounded(px(theme.radius_panel()))
-                        // The tab strip and lens switcher act on a selected pane;
-                        // with no workspace they would be dead chrome.
                         .children(
                             has_workspaces
-                                .then(|| self.render_lens_toggle(window, cx).into_any_element()),
-                        )
-                        .children(
-                            has_workspaces.then(|| self.render_tab_strip(cx).into_any_element()),
+                                .then(|| self.render_tab_strip(window, cx).into_any_element()),
                         )
                         .children(notice.map(|message| {
                             div()
