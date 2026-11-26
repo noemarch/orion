@@ -2187,7 +2187,8 @@ impl Render for OrionApp {
                                 .child(message)
                                 .into_any_element()
                         }))
-                        .child(lens_body),
+                        .child(lens_body)
+                        .child(self.render_global_status_bar()),
                 )
                 .child(
                     div()
@@ -2242,7 +2243,8 @@ impl Render for OrionApp {
                                 .child(message)
                                 .into_any_element()
                         }))
-                        .child(lens_body),
+                        .child(lens_body)
+                        .child(self.render_global_status_bar()),
                 );
         }
 
@@ -2298,7 +2300,6 @@ impl Render for OrionApp {
                     .child(self.render_header(window, cx)),
             )
             .child(panels)
-            .child(self.render_global_status_bar())
             .child(if self.settings.update(cx, |view, _cx| view.is_open()) {
                 div()
                     .id("modal-host")
