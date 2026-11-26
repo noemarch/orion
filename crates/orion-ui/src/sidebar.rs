@@ -774,6 +774,7 @@ impl WorkspaceSidebar {
         target: &RowTarget,
         scale: f32,
         reveal: bool,
+        status: Option<String>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let prefix = match target {
@@ -801,7 +802,7 @@ impl WorkspaceSidebar {
                     Button::new(format!("{prefix}-menu"))
                         .ghost()
                         .icon(IconName::Ellipsis)
-                        .tooltip("Actions")
+                        .tooltip(status.unwrap_or_else(|| "Actions".to_string()))
                         .min_h(px(TOUCH_TARGET_PX))
                         .min_w(px(TOUCH_TARGET_PX))
                         .on_click(cx.listener({
@@ -1016,6 +1017,7 @@ impl WorkspaceSidebar {
                         &RowTarget::Workspace(id.clone()),
                         scale,
                         focused || rail,
+                        None,
                         cx,
                     ))
             }
@@ -1156,6 +1158,11 @@ impl WorkspaceSidebar {
                                 &RowTarget::Pane(pane_id.clone()),
                                 scale,
                                 keyboard_reveal || rail,
+                                Some(if status_line.is_empty() {
+                                    "Session".to_string()
+                                } else {
+                                    status_line.clone()
+                                }),
                                 cx,
                             )),
                     )

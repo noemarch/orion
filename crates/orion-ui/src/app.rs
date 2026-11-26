@@ -1315,8 +1315,8 @@ impl OrionApp {
         cx.notify();
     }
 
-    fn split_focused_pane(&mut self, cx: &mut Context<Self>) {
-        if let Some(pane_id) = self.focused_pane.clone() {
+    fn split_pane_by_id(&mut self, pane_id: Option<String>, cx: &mut Context<Self>) {
+        if let Some(pane_id) = pane_id {
             self.call_route(
                 "/api/pane/split",
                 &json!({ "pane_id": pane_id, "direction": "right" }),
@@ -1324,6 +1324,15 @@ impl OrionApp {
             self.workspace_sidebar
                 .update(cx, |view, _cx| view.refresh());
         }
+        cx.notify();
+    }
+
+    fn split_focused_pane(&mut self, cx: &mut Context<Self>) {
+        self.split_pane_by_id(self.focused_pane.clone(), cx);
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_open = !self.sidebar_open;
         cx.notify();
     }
 
@@ -1441,6 +1450,7 @@ impl OrionApp {
                     .clone()
                     .or_else(|| tab.pane_ids.first().cloned());
                 let tab_id = tab.id.clone();
+                let split_pane_id = pane_id.clone();
                 let close_app = app.clone();
                 let close_id = tab_id.clone();
                 let context_app = app.clone();
@@ -1509,8 +1519,11 @@ impl OrionApp {
                                     .group_hover(close_group.clone(), |style| style.visible())
                                     .on_click({
                                         let app = split_app.clone();
+                                        let pane_id = split_pane_id.clone();
                                         cx.listener(move |_, _, _, cx| {
-                                            app.update(cx, |this, cx| this.split_focused_pane(cx));
+                                            app.update(cx, |this, cx| {
+                                                this.split_pane_by_id(pane_id.clone(), cx)
+                                            });
                                         })
                                     }),
                             )
@@ -1594,7 +1607,8 @@ impl OrionApp {
                                     let terminal_app = app.clone();
                                     let changes_app = app.clone();
                                     let review_app = app.clone();
-                                    let toggle_app = app;
+                                    let toggle_app = app.clone();
+                                    let sidebar_app = app;
                                     menu.item(PopupMenuItem::new("New tab").on_click(
                                         move |_, _, cx| {
                                             zoom_app.update(cx, |this, cx| {
@@ -1661,11 +1675,17 @@ impl OrionApp {
                                         },
                                     ))
                                     .separator()
+                                    .item(PopupMenuItem::new("Toggle review column").on_click(
+                                        move |_, _, cx| {
+                                            toggle_app
+                                                .update(cx, |this, cx| this.toggle_review(cx));
+                                        },
+                                    ))
                                     .item(
-                                        PopupMenuItem::new("Toggle review column").on_click(
+                                        PopupMenuItem::new("Toggle sidebar").on_click(
                                             move |_, _, cx| {
-                                                toggle_app
-                                                    .update(cx, |this, cx| this.toggle_review(cx));
+                                                sidebar_app
+                                                    .update(cx, |this, cx| this.toggle_sidebar(cx));
                                             },
                                         ),
                                     )
