@@ -68,3 +68,18 @@ jobs:
             exit 1
           fi
           echo "clean"
+
+  # The timeline test is ignored in the normal gate because a 200 ms wall-clock
+  # budget moves under load. Run it here.
+  real-agent-tests:
+    name: real-agent integration tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: '0.17.1'
+      - uses: Swatinem/rust-cache@v2
+      - name: terminal startup timeline
+        run: cargo test -p orion-ui --test terminal_startup -- --ignored --nocapture
