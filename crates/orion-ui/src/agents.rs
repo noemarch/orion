@@ -12,6 +12,7 @@ pub struct AgentRow {
     pub context: String,
     pub status: AgentStatus,
     pub selected: bool,
+    pub model_label: Option<String>,
 }
 
 impl AgentRow {
@@ -65,6 +66,7 @@ pub fn agent_rows(snapshot: &Value) -> Vec<AgentRow> {
                 .flatten()
                 .collect::<Vec<_>>()
                 .join(" · ");
+            let model_label = str_field(pane, "model").map(str::to_string);
             Some(AgentRow {
                 selected: focused_pane_id == Some(pane_id.as_str()),
                 status,
@@ -73,6 +75,7 @@ pub fn agent_rows(snapshot: &Value) -> Vec<AgentRow> {
                 agent_name,
                 title,
                 context,
+                model_label,
             })
         })
         .collect()
@@ -105,5 +108,32 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "p1");
         assert_eq!(rows[0].status, AgentStatus::Unknown);
+    }
+
+    #[::core::prelude::v1::test]
+    fn model_label_is_none_when_no_model_is_reported() {
+        let snapshot = serde_json::json!({
+            "panes": [{ "pane_id": "p1", "display_agent": "claude", "agent": "claude" }],
+            "tabs": [],
+            "workspaces": [],
+        });
+        let rows = agent_rows(&snapshot);
+        assert_eq!(rows[0].model_label, None);
+        assert_eq!(rows[0].agent_name, "claude");
+    }
+
+    #[::core::prelude::v1::test]
+    fn model_label_uses_only_the_explicit_model_field() {
+        let snapshot = serde_json::json!({
+            "panes": [{
+                "pane_id": "p1",
+                "display_agent": "claude",
+                "model": "claude-sonnet-4-5",
+            }],
+            "tabs": [],
+            "workspaces": [],
+        });
+        let rows = agent_rows(&snapshot);
+        assert_eq!(rows[0].model_label.as_deref(), Some("claude-sonnet-4-5"));
     }
 }
