@@ -154,6 +154,7 @@ enum TreeRow {
         brand: IconName,
         state: session_status::RowState,
         status_line: String,
+        model_line: String,
         display_name: String,
     },
 }
@@ -358,12 +359,23 @@ impl WorkspaceSidebar {
                 let suffix = elapsed
                     .map(|value| format!(" · session {value}"))
                     .unwrap_or_default();
+                let location = pane_location_line(panes, &agent.pane_id, &workspace_label);
                 let status_line = match state {
                     session_status::RowState::Working => format!("working{suffix}"),
                     session_status::RowState::Idle => format!("idle{suffix}"),
                     session_status::RowState::None => truncate_middle(&subtitle, 10),
                     session_status::RowState::Offline => "offline".to_string(),
                 };
+                let status_line =
+                    if location.is_empty() || matches!(state, session_status::RowState::None) {
+                        status_line
+                    } else {
+                        format!("{status_line} · {location}")
+                    };
+                let model_line = agent
+                    .model_label
+                    .clone()
+                    .unwrap_or_else(|| "model unavailable".to_string());
                 let display_name = if agent.title == workspace_label {
                     let fallback = agent.agent_name.trim();
                     if fallback.is_empty() {
@@ -379,6 +391,7 @@ impl WorkspaceSidebar {
                     brand,
                     state: *state,
                     status_line,
+                    model_line,
                     display_name,
                 });
             }
@@ -1026,6 +1039,7 @@ impl WorkspaceSidebar {
                 brand,
                 state,
                 status_line,
+                model_line,
                 display_name,
             } => {
                 let pane_id = agent.pane_id.clone();
@@ -1140,6 +1154,21 @@ impl WorkspaceSidebar {
                                         }),
                                 )
                             })
+                            .child(
+                                div()
+                                    .id(format!("sidebar-pane-{}-model", agent.pane_id))
+                                    .test_support()
+                                    .aria_label(model_line.clone())
+                                    .flex_none()
+                                    .truncate()
+                                    .text_size(px(theme.font_ui_secondary()))
+                                    .text_color(theme.token_text_muted())
+                                    .child(if rail {
+                                        String::new()
+                                    } else {
+                                        model_line.clone()
+                                    }),
+                            )
                             .when(editing, |el| {
                                 el.child(self.rename_field(&format!("sidebar-pane-{pane_id}"), cx))
                             })
@@ -1496,6 +1525,26 @@ impl WorkspaceSidebar {
                         "Orion".to_string()
                     }),
             )
+            .when(!self.runtime_online, |el| {
+                el.child(
+                    div()
+                        .id("sidebar-offline-warning")
+                        .test_support()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(SPACE_1 * scale))
+                        .aria_label("Runtime offline")
+                        .text_size(px(theme.font_ui_secondary()))
+                        .text_color(theme.warning_amber)
+                        .child(
+                            Icon::new(IconName::TriangleAlert)
+                                .size(px(ICON_SIZE_PX))
+                                .text_color(theme.warning_amber),
+                        )
+                        .when(!rail, |el| el.child("Offline")),
+                )
+            })
             .child(div().flex_1())
             .child(Self::action_button(
                 "sidebar-header-collapse",
@@ -1642,6 +1691,22 @@ fn pane_field<'a>(panes: Option<&'a Vec<Value>>, pane_id: &str, field: &str) -> 
         .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))?
         .get(field)?
         .as_str()
+}
+
+fn pane_location_line(panes: Option<&Vec<Value>>, pane_id: &str, workspace_label: &str) -> String {
+    let branch = pane_field(panes, pane_id, "git_branch").filter(|value| !value.is_empty());
+    let worktree = pane_field(panes, pane_id, "worktree_path").filter(|value| !value.is_empty());
+    if branch.is_none() && worktree.is_none() {
+        return String::new();
+    }
+    let path = worktree
+        .or_else(|| pane_field(panes, pane_id, "cwd"))
+        .unwrap_or(workspace_label);
+    let path = truncate_middle(path, 10);
+    match branch {
+        Some(branch) => format!("{path} · {branch}"),
+        None => path,
+    }
 }
 
 fn matches_query(agent: &AgentRow, panes: Option<&Vec<Value>>, needle: &str) -> bool {
@@ -1810,6 +1875,7 @@ mod tests {
     struct FixtureState {
         snapshot: Value,
         calls: Vec<(String, String, Value)>,
+        session_status: u16,
     }
 
     impl TreeFixture {
@@ -1818,8 +1884,13 @@ mod tests {
                 state: Mutex::new(FixtureState {
                     snapshot,
                     calls: Vec::new(),
+                    session_status: 200,
                 }),
             }
+        }
+
+        fn fail_session(&self) {
+            self.state.lock().expect("fixture state").session_status = 503;
         }
 
         fn calls(&self) -> Vec<(String, String, Value)> {
@@ -1871,6 +1942,9 @@ mod tests {
                 .calls
                 .push((method.to_string(), path.to_string(), body.clone()));
             if method == "GET" && path == "/api/session" {
+                if state.session_status != 200 {
+                    return (state.session_status, Value::Null);
+                }
                 return (200, json!({ "snapshot": state.snapshot }));
             }
             if method == "POST" && path == "/api/pane/focus" {
@@ -1966,6 +2040,53 @@ mod tests {
             "C:\\…\\orion"
         );
     }
+
+    #[::core::prelude::v1::test]
+    fn pane_location_line_middle_truncates_worktree_and_keeps_branch() {
+        let panes = serde_json::json!([{
+            "pane_id": "p1",
+            "cwd": "/work/orion",
+            "worktree_path": "C:/work/orion-wt",
+            "git_branch": "feature/checkout-flow-v2",
+        }]);
+        assert_eq!(
+            pane_location_line(panes.as_array(), "p1", "Orion"),
+            "C:/w…on-wt · feature/checkout-flow-v2"
+        );
+    }
+
+    crate::orion_test!(
+        fn pane_second_line_names_branch_worktree_and_model_state(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let mut snapshot = tree_snapshot();
+            snapshot["panes"][0]["worktree_path"] = json!("C:/work/orion-wt");
+            snapshot["panes"][0]["git_branch"] = json!("feature/checkout-flow-v2");
+            snapshot["panes"][0]["model"] = json!("claude-sonnet-4-5");
+            let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture::new(snapshot));
+            let (root, cx) = cx.add_window_view(WorkspaceSidebar::new);
+            cx.update(|_, app| root.update(app, |view, _cx| view.attach(runtime)));
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert!(
+                cx.update(|window, _| {
+                    window.try_find_by_label("working · C:/w…on-wt · feature/checkout-flow-v2")
+                })
+                .is_some(),
+                "the row's second line carries the middle-truncated worktree and exact branch"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find_by_label("claude-sonnet-4-5"))
+                    .is_some(),
+                "the row renders the explicitly reported model"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find_all_by_label("model unavailable").len()),
+                2,
+                "panes without a reported model show the plain-language unavailable state"
+            );
+        }
+    );
 
     #[::core::prelude::v1::test]
     fn status_parses_wire_names() {
@@ -2074,7 +2195,7 @@ mod tests {
                 "focused_pane_id": "p1",
             });
             let runtime: Arc<dyn Runtime> = Arc::new(FixtureRuntime { snapshot });
-            let (root, cx) = cx.add_window_view(|window, cx| WorkspaceSidebar::new(window, cx));
+            let (root, cx) = cx.add_window_view(WorkspaceSidebar::new);
             cx.update(|_, app| {
                 root.update(app, |view, _cx| view.attach(Arc::clone(&runtime)));
             });
@@ -2243,7 +2364,7 @@ mod tests {
     crate::orion_test!(
         fn every_status_uses_the_shared_accessible_name(cx: &mut gpui_kit::TestAppContext) {
             let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture::new(status_snapshot()));
-            let (root, cx) = cx.add_window_view(|window, cx| WorkspaceSidebar::new(window, cx));
+            let (root, cx) = cx.add_window_view(WorkspaceSidebar::new);
             cx.update(|_, app| root.update(app, |view, _cx| view.attach(Arc::clone(&runtime))));
             cx.update(|window, cx| window.render_frame(cx));
 
@@ -2253,16 +2374,16 @@ mod tests {
         }
     );
 
-    fn open_tree_fixture<'a>(
-        cx: &'a mut gpui_kit::TestAppContext,
+    fn open_tree_fixture(
+        cx: &mut gpui_kit::TestAppContext,
     ) -> (
         Entity<WorkspaceSidebar>,
-        &'a mut gpui_kit::VisualTestContext,
+        &mut gpui_kit::VisualTestContext,
         Arc<TreeFixture>,
     ) {
         let fixture = Arc::new(TreeFixture::new(tree_snapshot()));
         let runtime: Arc<dyn Runtime> = fixture.clone();
-        let (root, cx) = cx.add_window_view(|window, cx| WorkspaceSidebar::new(window, cx));
+        let (root, cx) = cx.add_window_view(WorkspaceSidebar::new);
         cx.update(|_, app| root.update(app, |view, _cx| view.attach(runtime)));
         (root, cx, fixture)
     }
@@ -2411,6 +2532,171 @@ mod tests {
             });
             assert_eq!(f32::from(header.size.height), 30.0);
             assert_eq!(f32::from(pane.size.height), 48.0);
+        }
+    );
+
+    fn project_first_snapshot() -> Value {
+        json!({
+            "workspaces": [
+                { "workspace_id": "ws-1", "label": "Orion", "active_tab_id": "tab-1",
+                  "focused": true, "agent_status": "working" },
+                { "workspace_id": "ws-2", "label": "Side project", "active_tab_id": "tab-2",
+                  "focused": false, "agent_status": "idle" },
+            ],
+            "tabs": [
+                { "tab_id": "tab-1", "workspace_id": "ws-1", "label": "main",
+                  "pane_ids": ["p1", "p2"], "active_pane_id": "p1", "focused": true,
+                  "agent_status": "working" },
+                { "tab_id": "tab-2", "workspace_id": "ws-2", "label": "side",
+                  "pane_ids": ["p3", "p4"], "active_pane_id": "p3", "focused": false,
+                  "agent_status": "idle" },
+            ],
+            "panes": [
+                { "pane_id": "p1", "workspace_id": "ws-1", "tab_id": "tab-1",
+                  "label": "Build", "display_agent": "claude", "cwd": "/work/orion",
+                  "agent_status": "working", "focused": true },
+                { "pane_id": "p2", "workspace_id": "ws-1", "tab_id": "tab-1",
+                  "label": "Review", "display_agent": "codex", "cwd": "/work/orion/docs",
+                  "agent_status": "working", "focused": false },
+                { "pane_id": "p3", "workspace_id": "ws-2", "tab_id": "tab-2",
+                  "label": "Deploy", "display_agent": "opencode", "cwd": "/work/side",
+                  "agent_status": "idle", "focused": false },
+                { "pane_id": "p4", "workspace_id": "ws-2", "tab_id": "tab-2",
+                  "label": "Docs", "display_agent": "claude", "cwd": "/work/side/docs",
+                  "agent_status": "working", "focused": false },
+            ],
+            "focused_pane_id": "p1",
+        })
+    }
+
+    crate::orion_test!(
+        fn project_first_rows_and_offline_warning(cx: &mut gpui_kit::TestAppContext) {
+            let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture::new(project_first_snapshot()));
+            let (root, cx) = cx.add_window_view(WorkspaceSidebar::new);
+            cx.update(|_, app| root.update(app, |view, _cx| view.attach(runtime)));
+            cx.update(|window, cx| window.render_frame(cx));
+
+            let order = [
+                "sidebar-workspace-ws-1",
+                "sidebar-pane-p1",
+                "sidebar-pane-p2",
+                "sidebar-workspace-ws-2",
+                "sidebar-pane-p3",
+                "sidebar-pane-p4",
+            ];
+            let tops: Vec<f32> = order
+                .iter()
+                .map(|id| {
+                    f32::from(
+                        cx.update(|window, _| {
+                            window
+                                .try_find(*id)
+                                .unwrap_or_else(|| panic!("{id} is rendered"))
+                        })
+                        .bounds()
+                        .origin
+                        .y,
+                    )
+                })
+                .collect();
+            assert!(
+                tops.windows(2).all(|pair| pair[0] < pair[1]),
+                "each project header precedes its panes: {tops:?}"
+            );
+
+            for id in [
+                "sidebar-pane-p1",
+                "sidebar-pane-p2",
+                "sidebar-pane-p3",
+                "sidebar-pane-p4",
+            ] {
+                let height = cx.update(|window, _| f32::from(window.find(id).bounds().size.height));
+                assert_eq!(height, PANE_ROW_PX, "{id} keeps the 48px pane bound");
+            }
+            for id in ["sidebar-workspace-ws-1", "sidebar-workspace-ws-2"] {
+                let height = cx.update(|window, _| f32::from(window.find(id).bounds().size.height));
+                assert_eq!(height, HEADER_ROW_PX, "{id} keeps the 30px header bound");
+            }
+
+            assert_eq!(
+                cx.update(|window, _| window.find_all_by_role(gpui_kit::Role::TreeItem).len()),
+                2,
+                "exactly two project headers, no host group"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find_all_by_role(gpui_kit::Role::Row).len()),
+                4,
+                "exactly four session rows, no host group"
+            );
+            let host_paths: Vec<String> = cx.update(|window, _| {
+                window
+                    .elements()
+                    .iter()
+                    .map(|element| format!("{:?}", element.path()))
+                    .filter(|path| path.to_ascii_lowercase().contains("host"))
+                    .collect()
+            });
+            assert!(host_paths.is_empty(), "no host-group ids: {host_paths:?}");
+
+            focus_tree(&root, cx);
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-pane-p1-focus-ring").is_some()),
+                "the focused row owns the rose ring"
+            );
+            for id in [
+                "sidebar-pane-p2-focus-ring",
+                "sidebar-pane-p3-focus-ring",
+                "sidebar-pane-p4-focus-ring",
+                "sidebar-workspace-ws-1-focus-ring",
+                "sidebar-workspace-ws-2-focus-ring",
+            ] {
+                assert!(
+                    cx.update(|window, _| window.try_find(id).is_none()),
+                    "{id} is absent"
+                );
+            }
+            let ring_paths: Vec<String> = cx.update(|window, _| {
+                window
+                    .elements()
+                    .iter()
+                    .map(|element| format!("{:?}", element.path()))
+                    .filter(|path| path.contains("focus-ring"))
+                    .collect()
+            });
+            assert_eq!(ring_paths.len(), 1, "one rose ring only: {ring_paths:?}");
+
+            assert_eq!(
+                cx.update(|window, _| window.find_all_by_label("working").len()),
+                3,
+                "three cached working rows while online"
+            );
+            cx.update(|_, app| {
+                root.update(app, |view, cx| {
+                    view.set_runtime_online(false, cx);
+                    view.refresh();
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert_eq!(
+                cx.update(|window, _| window.find_all_by_label("offline").len()),
+                4,
+                "every row reads offline when the runtime is unreachable"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find_all_by_label("working").len()),
+                0,
+                "no cached working text survives the offline override"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find_all("sidebar-offline-warning").len()),
+                1,
+                "exactly one offline warning id"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find_by_label("Runtime offline").is_some()),
+                "the warning carries a plain-language accessible name"
+            );
         }
     );
 
@@ -2928,7 +3214,7 @@ mod tests {
             cx: &mut gpui_kit::TestAppContext,
         ) {
             let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture::new(many_panes_snapshot()));
-            let (root, cx) = cx.add_window_view(|window, cx| WorkspaceSidebar::new(window, cx));
+            let (root, cx) = cx.add_window_view(WorkspaceSidebar::new);
             cx.update(|_, app| root.update(app, |view, _cx| view.attach(runtime)));
             cx.update(|window, cx| window.render_frame(cx));
             focus_tree(&root, cx);
@@ -3144,8 +3430,8 @@ mod tests {
             cx.update(|window, cx| window.render_frame(cx));
 
             assert!(
-                cx.update(|window, _| window.try_find("sidebar-offline-warning").is_none()),
-                "offline state is no longer shown in the sidebar header"
+                cx.update(|window, _| window.try_find("sidebar-offline-warning").is_some()),
+                "an unreachable runtime shows a plain-language warning in the sidebar header"
             );
             assert!(
                 cx.update(|window, _| window.try_find("sidebar-pane-p1-status").is_none()),
@@ -3161,19 +3447,70 @@ mod tests {
     );
 
     crate::orion_test!(
+        fn a_failed_session_request_reports_offline_over_cached_working(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let fixture = Arc::new(TreeFixture::new(project_first_snapshot()));
+            let runtime: Arc<dyn Runtime> = fixture.clone();
+            let (root, cx) = cx.add_window_view(WorkspaceSidebar::new);
+            cx.update(|_, app| root.update(app, |view, _cx| view.attach(runtime)));
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert_eq!(
+                cx.update(|window, _| window.find_all_by_label("working").len()),
+                3,
+                "the cached snapshot has working rows before the failure"
+            );
+            assert!(
+                cx.update(|window, _| window.find_all_by_label("idle").len()) > 0,
+                "the cached snapshot has an idle row before the failure"
+            );
+
+            fixture.fail_session();
+            cx.update(|_, app| {
+                root.update(app, |view, _cx| {
+                    assert!(
+                        view.refresh(),
+                        "a failed snapshot request is reported as a real change"
+                    );
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert!(
+                cx.update(|window, _| window.try_find("sidebar-offline-warning").is_some()),
+                "a failed /api/session request marks the runtime offline"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find_all_by_label("offline").len()),
+                4,
+                "every row reads offline when the snapshot request fails"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find_all_by_label("working").len()),
+                0,
+                "no cached working state survives the failed request"
+            );
+            assert_eq!(
+                cx.update(|window, _| window.find_all_by_label("idle").len()),
+                0,
+                "no idle word is shown while the runtime is unreachable"
+            );
+        }
+    );
+
+    crate::orion_test!(
         fn the_close_control_is_hidden_until_the_row_is_hovered(cx: &mut gpui_kit::TestAppContext) {
             let (root, cx, _fixture) = open_tree_fixture(cx);
             cx.update(|window, cx| window.render_frame(cx));
 
-            assert_eq!(
-                cx.update(|window, _| window.find("sidebar-pane-p1-close").visible()),
-                false,
+            assert!(
+                !cx.update(|window, _| window.find("sidebar-pane-p1-close").visible()),
                 "the close control is hidden at rest"
             );
             cx.update(|window, cx| window.hover("sidebar-pane-p1", cx));
-            assert_eq!(
+            assert!(
                 cx.update(|window, _| window.find("sidebar-pane-p1-close").visible()),
-                true,
                 "hovering the row reveals the close control"
             );
 
@@ -3183,9 +3520,8 @@ mod tests {
                 window.press("down", cx);
                 window.press("down", cx);
             });
-            assert_eq!(
+            assert!(
                 cx.update(|window, _| window.find("sidebar-pane-p1-menu").visible()),
-                true,
                 "a real keyboard cursor reveals the row menu without hover"
             );
         }
@@ -3197,7 +3533,7 @@ mod tests {
             let started = chrono::Utc::now() - chrono::Duration::minutes(2);
             snapshot["panes"][0]["started_at"] = json!(started.to_rfc3339());
             let runtime: Arc<dyn Runtime> = Arc::new(TreeFixture::new(snapshot));
-            let (root, cx) = cx.add_window_view(|window, cx| WorkspaceSidebar::new(window, cx));
+            let (root, cx) = cx.add_window_view(WorkspaceSidebar::new);
             cx.update(|_, app| root.update(app, |view, _cx| view.attach(runtime)));
             cx.update(|window, cx| window.render_frame(cx));
 
@@ -3253,12 +3589,12 @@ mod tests {
                 .expect("the sidebar window")
             });
             cx.update(|app| root.update(app, |view, _cx| view.attach(runtime)));
-            let _ = cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx));
-            let _ = cx.update_window(handle.into(), |_, window, cx| {
+            let _ = cx.update_window(handle, |_, window, cx| window.render_frame(cx));
+            let _ = cx.update_window(handle, |_, window, cx| {
                 window.hover("sidebar-pane-p1", cx);
                 window.click("sidebar-pane-p1-menu", cx)
             });
-            let _ = cx.update_window(handle.into(), |_, window, cx| {
+            let _ = cx.update_window(handle, |_, window, cx| {
                 window.click("sidebar-pane-p1-menu-close", cx)
             });
             assert!(
@@ -3291,12 +3627,12 @@ mod tests {
                 .expect("the sidebar window")
             });
             cx.update(|app| root.update(app, |view, _cx| view.attach(runtime)));
-            let _ = cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx));
-            let _ = cx.update_window(handle.into(), |_, window, cx| {
+            let _ = cx.update_window(handle, |_, window, cx| window.render_frame(cx));
+            let _ = cx.update_window(handle, |_, window, cx| {
                 window.hover("sidebar-workspace-ws-1", cx);
                 window.click("sidebar-workspace-ws-1-menu", cx)
             });
-            let _ = cx.update_window(handle.into(), |_, window, cx| {
+            let _ = cx.update_window(handle, |_, window, cx| {
                 window.click("sidebar-workspace-ws-1-menu-close", cx)
             });
             assert!(
