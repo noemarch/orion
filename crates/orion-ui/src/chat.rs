@@ -33,12 +33,14 @@ use crate::markdown::{
 };
 use crate::pane_seam::PaneSeam;
 use crate::prompt_card::{answer_hint, PromptCard, PromptCardEvent};
+use crate::session_status;
 use crate::terminal_tree::status_token;
 use crate::theme::{Theme, CHAT_INLINE_CODE_RATIO, CHAT_LINE_HEIGHT};
 use crate::tool_card::{
     clipped_output, lines_with_paths, part_card, tool_object, tool_verb, DiffLine, PartCard,
     ToolCard, ToolStatus, MAX_FILE_LINKS,
 };
+use chrono::{DateTime, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -184,6 +186,12 @@ pub struct ChatView {
     /// The agent's name for the role label. The pane handle does not name its
     /// agent; the runtime's session snapshot does.
     agent_name: Option<String>,
+    /// When this pane's process started, RFC 3339. The pane's own snapshot
+    /// field, not a per-turn guess: the work-duration line measures from it.
+    started_at: Option<String>,
+    /// The clock the work-duration line reads. The app leaves it unset, so the
+    /// real clock is what runs; a test pins it so a duration is exact.
+    now: Option<DateTime<Utc>>,
     /// What the transcript column shows: phase, turns, thinking rows, follow.
     model: ChatModel,
     last_body: Option<String>,
@@ -207,6 +215,10 @@ pub struct ChatView {
     /// re-read: the route reads the agent's whole transcript from disk, and a
     /// poll for a lens nobody is looking at is not worth the round-trip.
     visible: bool,
+    /// A transcript-mode column reads turns and tool cards but offers no way
+    /// to drive the agent: no composer, no stop control. The center chat leaves
+    /// this false and keeps its full composer behavior.
+    read_only: bool,
     /// How many fetches this view has started. The poll is what costs a socket
     /// round-trip, so the count is worth having.
     reads: u64,
@@ -246,28 +258,56 @@ fn source_label(source: &str) -> &'static str {
     }
 }
 
+/// The one line the agent's turn shows for the time it worked: how long the
+/// pane has been running, read from the pane's own `started_at` snapshot
+/// field. A pane that never reported a readable start time says so in plain
+/// language instead of guessing one.
+pub fn worked_line(started_at: Option<&str>, now: DateTime<Utc>) -> String {
+    match session_status::elapsed_label(started_at, now) {
+        Some(elapsed) => format!("Worked for {elapsed}"),
+        None => "Work time unavailable".to_string(),
+    }
+}
+
 /// The three answers one poll gathers, carried back to the frame thread.
 struct RefreshFetch {
     agent_name: Option<String>,
+    started_at: Option<String>,
     terminals: Option<Value>,
     status: u16,
     body: Value,
 }
 
-/// The agent's name for the role label, from the runtime's session snapshot.
-fn fetch_agent_name(engine: &Arc<dyn Runtime>, pane_id: &str) -> Option<String> {
+/// The pane's own snapshot fields the chat draws from: the agent's name for
+/// the role label, and when the pane started, for the work-duration line.
+fn fetch_pane_facts(engine: &Arc<dyn Runtime>, pane_id: &str) -> (Option<String>, Option<String>) {
     let (status, body) = engine.http("GET", "/api/session", &Value::Null);
     if status != 200 {
-        return None;
+        return (None, None);
     }
-    body.get("snapshot")?
-        .get("panes")?
-        .as_array()?
-        .iter()
-        .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))
-        .and_then(|pane| pane.get("display_agent"))
+    let pane = body
+        .get("snapshot")
+        .and_then(|snapshot| snapshot.get("panes"))
+        .and_then(Value::as_array)
+        .and_then(|panes| {
+            panes
+                .iter()
+                .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+                .cloned()
+        });
+    let pane = match pane {
+        Some(pane) => pane,
+        None => return (None, None),
+    };
+    let name = pane
+        .get("display_agent")
         .and_then(Value::as_str)
-        .map(str::to_string)
+        .map(str::to_string);
+    let started_at = pane
+        .get("started_at")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    (name, started_at)
 }
 
 impl ChatView {
@@ -279,6 +319,8 @@ impl ChatView {
             seam: None,
             pane_id: "pane-1".to_string(),
             agent_name: None,
+            started_at: None,
+            now: None,
             model: ChatModel::new(),
             last_body: None,
             composer,
@@ -289,6 +331,7 @@ impl ChatView {
             last_terminals: None,
             focus_wanted: FocusWanted::None,
             visible: true,
+            read_only: false,
             reads: 0,
             scroll_handle,
             focus_handle: cx.focus_handle(),
@@ -322,6 +365,8 @@ impl ChatView {
         self.pane_id = pane_id;
         // The new pane is a new agent: its name belongs to the new transcript.
         self.agent_name = None;
+        // The new pane's own start time belongs to the new transcript.
+        self.started_at = None;
         // A new pane is a new transcript: neither the old answer nor the old
         // thinking rows may linger.
         self.last_body = None;
@@ -389,6 +434,26 @@ impl ChatView {
         self.model.apply(response);
     }
 
+    /// When the pane's process started, from its own snapshot. The shell feeds
+    /// this from the focused pane; the chat also fills it from the session
+    /// snapshot it reads for the agent's name.
+    pub fn set_started_at(&mut self, started_at: Option<String>) {
+        self.started_at = started_at;
+    }
+
+    /// Pin the clock the work-duration line reads. The app leaves it unset; a
+    /// test pins it so a duration is exact.
+    #[cfg(test)]
+    pub fn set_now(&mut self, now: DateTime<Utc>) {
+        self.now = Some(now);
+    }
+
+    /// The clock the work-duration line reads: the pinned test clock when one
+    /// is set, the real wall clock otherwise.
+    fn now(&self) -> DateTime<Utc> {
+        self.now.unwrap_or_else(Utc::now)
+    }
+
     /// A read failed: the message is plain language and a Retry is offered.
     pub fn fail_conversation(&mut self, message: String) {
         self.model.fail(message);
@@ -409,7 +474,7 @@ impl ChatView {
             return;
         };
         let pane_id = self.pane_id.clone();
-        let need_agent_name = self.agent_name.is_none();
+        let need_pane_facts = self.agent_name.is_none() || self.started_at.is_none();
         self.reads += 1;
         self.refresh_generation += 1;
         let generation = self.refresh_generation;
@@ -417,10 +482,10 @@ impl ChatView {
             let fetched = cx
                 .background_executor()
                 .spawn(async move {
-                    let agent_name = if need_agent_name {
-                        fetch_agent_name(&engine, &pane_id)
+                    let (agent_name, started_at) = if need_pane_facts {
+                        fetch_pane_facts(&engine, &pane_id)
                     } else {
-                        None
+                        (None, None)
                     };
                     // A delegation can appear while the conversation body
                     // stands still, so the terminals share this one fetch.
@@ -432,6 +497,7 @@ impl ChatView {
                     let (status, body) = engine.http("GET", &path, &Value::Null);
                     RefreshFetch {
                         agent_name,
+                        started_at,
                         terminals,
                         status,
                         body,
@@ -451,6 +517,9 @@ impl ChatView {
         }
         if self.agent_name.is_none() {
             self.agent_name = fetched.agent_name;
+        }
+        if self.started_at.is_none() {
+            self.started_at = fetched.started_at;
         }
         let encoded = fetched.terminals.as_ref().map(Value::to_string);
         if self.last_terminals != encoded {
@@ -512,6 +581,12 @@ impl ChatView {
         if visible {
             self.refresh(cx);
         }
+    }
+
+    /// Public API documentation: switch this lens into transcript mode, where
+    /// it reads turns and tool cards but offers no composer or stop control.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
     }
 
     /// Whether the agent owes the reader an answer: it says it is working, or
@@ -982,18 +1057,23 @@ impl Render for ChatView {
             );
         }
 
-        root = root.child(
-            div()
-                .id("chat-composer-slot")
-                .debug_selector(|| "chat-composer-slot".to_string())
-                .flex()
-                .justify_center()
-                .w_full()
-                .child(self.composer.clone()),
-        );
+        // A transcript column reads the conversation but cannot drive it: no
+        // composer, and therefore no stop control. The center chat keeps both.
+        if !self.read_only {
+            root = root.child(
+                div()
+                    .id("chat-composer-slot")
+                    .debug_selector(|| "chat-composer-slot".to_string())
+                    .flex()
+                    .justify_center()
+                    .w_full()
+                    .child(self.composer.clone()),
+            );
+        }
 
         // The focus follows the conversation: the card when the agent asks, the
-        // composer's box when it is the reader's turn again.
+        // composer's box when it is the reader's turn again. A read-only lens
+        // has no composer on screen to take the focus.
         match self.focus_wanted {
             FocusWanted::Prompt => {
                 if let Some(card) = &prompt_card {
@@ -1001,11 +1081,11 @@ impl Render for ChatView {
                     handle.focus(window, cx);
                 }
             }
-            FocusWanted::Composer => {
+            FocusWanted::Composer if !self.read_only => {
                 let handle = self.composer.read(cx).focus_handle().clone();
                 handle.focus(window, cx);
             }
-            FocusWanted::None => {}
+            FocusWanted::Composer | FocusWanted::None => {}
         }
         self.focus_wanted = FocusWanted::None;
 
@@ -1116,6 +1196,16 @@ impl ChatView {
         // whole turns every frame.
         let turns = recent_turns(self.model.turns(), MAX_RECENT_TURNS);
         let total = self.model.turns().len();
+        // The work-duration line belongs to the agent's latest word. The
+        // pane's start is one value for the whole session, so repeating it on
+        // every older turn would read as several different durations for one
+        // stretch of work: it goes on the newest agent turn only.
+        let mut latest_agent_index: Option<usize> = None;
+        for (offset, turn) in turns.iter().enumerate() {
+            if turn.role == ChatRole::Assistant {
+                latest_agent_index = Some(total - turns.len() + offset);
+            }
+        }
         let mut column = div()
             .id("chat-turns")
             .flex()
@@ -1124,7 +1214,8 @@ impl ChatView {
             .p_3();
         for (offset, turn) in turns.iter().enumerate() {
             let index = total - turns.len() + offset;
-            column = column.child(self.render_turn(index, turn, cx));
+            let show_worked_for = Some(index) == latest_agent_index;
+            column = column.child(self.render_turn(index, turn, show_worked_for, cx));
         }
         column.into_any_element()
     }
@@ -1133,6 +1224,7 @@ impl ChatView {
         &self,
         index: usize,
         turn: &ChatTurn,
+        show_worked_for: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = Theme::current();
@@ -1174,6 +1266,24 @@ impl ChatView {
                 .child(div().min_w(px(0.0)).truncate().child(role_label))
                 .child(stamp),
         );
+
+        // The time the pane has worked, from the pane's own start: the one
+        // line that says how long the agent's work has run. It sits under the
+        // agent's newest turn and names the duration, or says plainly that the
+        // start time is unavailable.
+        if show_worked_for && !is_user {
+            let line = worked_line(self.started_at.as_deref(), self.now());
+            card = card.child(
+                div()
+                    .id(self.next_row_id())
+                    .debug_selector(|| "chat-worked".to_string())
+                    .test_support()
+                    .text_size(px(11.0 * theme.density_scale()))
+                    .text_color(theme.token_text_dim())
+                    .aria_label(line.clone())
+                    .child(line),
+            );
+        }
 
         for (part_index, part) in turn.parts.iter().enumerate() {
             card = card.child(self.render_part(index, part_index, part, cx));
@@ -1331,6 +1441,8 @@ impl ChatView {
         let mut row = div()
             .id(self.next_row_id())
             .debug_selector(|| "chat-tool".to_string())
+            .test_support()
+            .aria_label(card.name.clone())
             .flex()
             .flex_col()
             .gap(px(SPACE_1))
@@ -1742,6 +1854,7 @@ mod tests {
     use super::*;
     use crate::chat_model::ChatPhase;
     use crate::pane_seam::test_doubles::{menu_prompt, RecordingPane, SeamCall};
+    use gpui_kit::test::TestQueryExt;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::Window;
     use orion_core::engine::store::Store;
@@ -2337,6 +2450,150 @@ let x = 1;
         }
     );
 
+    #[::core::prelude::v1::test]
+    fn worked_line_measures_from_the_pane_start_and_says_so_plainly_when_there_is_none() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:04Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let started = (now - chrono::Duration::seconds(4)).to_rfc3339();
+        assert_eq!(
+            worked_line(Some(&started), now),
+            "Worked for 4s",
+            "the pane's start four seconds back reads four seconds of work"
+        );
+        assert_eq!(
+            worked_line(None, now),
+            "Work time unavailable",
+            "a pane with no reported start never guesses a duration"
+        );
+        assert_eq!(
+            worked_line(Some("not-a-time"), now),
+            "Work time unavailable",
+            "a malformed start never becomes a guessed duration"
+        );
+    }
+
+    crate::orion_test!(
+        fn an_agent_turn_shows_the_time_it_worked_and_its_tool_rows(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    // A pinned clock four seconds after the pane's start.
+                    let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:04Z")
+                        .unwrap()
+                        .with_timezone(&chrono::Utc);
+                    view.set_now(now);
+                    view.set_started_at(Some("2026-01-01T00:00:00Z".to_string()));
+                    view.apply_conversation(response(json!({
+                        "source": "claude-transcript",
+                        "turns": [
+                            { "role": "user", "ts": "2026-01-01T00:00:00Z",
+                              "parts": [{ "kind": "text", "text": "read the file" }] },
+                            { "role": "assistant", "ts": "2026-01-01T00:00:02Z",
+                              "parts": [
+                                { "kind": "tool", "name": "Read",
+                                  "summary": "Read: C:/work/src/main.rs",
+                                  "input": "{\"file_path\":\"C:/work/src/main.rs\"}",
+                                  "output": "fn main() {}", "error": false },
+                              ],
+                            },
+                        ],
+                    })));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.update(|window, _| window.try_find_by_label("Worked for 4s"))
+                    .is_some(),
+                "the agent's newest turn names the time it has worked"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find_by_label("Read"))
+                    .is_some(),
+                "a tool row keeps its Read-style label"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn an_agent_turn_without_a_start_time_says_the_time_is_unavailable(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    // No reported start: the duration line says so plainly.
+                    view.set_started_at(None);
+                    view.apply_conversation(response(json!({
+                        "source": "claude-transcript",
+                        "turns": [
+                            { "role": "assistant", "ts": "2026-01-01T00:00:02Z",
+                              "parts": [{ "kind": "text", "text": "done" }] },
+                        ],
+                    })));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.update(|window, _| window.try_find_by_label("Work time unavailable"))
+                    .is_some(),
+                "a pane without a start time shows the plain-language state, not a guess"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find_by_label("Worked for 0s"))
+                    .is_none(),
+                "no duration is guessed when the start time is absent"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn a_read_tool_output_beyond_the_bound_still_clips_through_clipped_output(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let oversized =
+                "fn main() {}".to_string() + &"x".repeat(crate::tool_card::MAX_TOOL_CHARS);
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.apply_conversation(response(json!({
+                        "source": "claude-transcript",
+                        "turns": [
+                            { "role": "assistant", "ts": "2026-01-01T00:00:02Z",
+                              "parts": [
+                                { "kind": "tool", "name": "Read",
+                                  "summary": "Read: C:/work/src/main.rs",
+                                  "input": "{\"file_path\":\"C:/work/src/main.rs\"}",
+                                  "output": oversized, "error": false },
+                              ],
+                            },
+                        ],
+                    })));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.debug_bounds("chat-tool").is_some(),
+                "the tool row is drawn"
+            );
+            assert!(
+                cx.debug_bounds("chat-terminal-path").is_some(),
+                "the oversized output still points at the Terminal Lens through clipped_output"
+            );
+        }
+    );
+
     crate::orion_test!(
         fn output_beyond_the_bound_points_at_the_terminal(cx: &mut gpui_kit::TestAppContext) {
             let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
@@ -2894,12 +3151,131 @@ let x = 1;
         }
     );
 
+    crate::orion_test!(
+        fn a_read_only_chat_shows_tool_rows_but_no_composer(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, _cx| {
+                    view.set_read_only(true);
+                    view.apply_conversation(response(json!({
+                        "source": "claude-transcript",
+                        "turns": [
+                            { "role": "assistant", "ts": "2026-01-01T00:00:02Z",
+                              "parts": [
+                                { "kind": "tool", "name": "Read",
+                                  "summary": "Read: C:/work/src/main.rs",
+                                  "input": "{\"file_path\":\"C:/work/src/main.rs\"}",
+                                  "output": "fn main() {}", "error": false },
+                              ],
+                            },
+                        ],
+                    })));
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert!(
+                cx.update(|window, _| window.try_find_by_label("Read"))
+                    .is_some(),
+                "a transcript column still renders tool rows"
+            );
+            assert!(
+                cx.debug_bounds("chat-composer").is_none(),
+                "a transcript column has no composer id"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("composer-affordance-mention"))
+                    .is_none(),
+                "a transcript column has no composer controls"
+            );
+            assert!(
+                cx.debug_bounds("composer-stop").is_none(),
+                "a transcript column has no stop control"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn a_writable_chat_keeps_its_composer_and_stop_control(cx: &mut gpui_kit::TestAppContext) {
+            let seam = Arc::new(RecordingPane::new());
+            seam.set_working(true);
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            attach_agent(cx, &root, seam.clone());
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert!(
+                cx.debug_bounds("chat-composer").is_some(),
+                "the center chat keeps its composer"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("composer-affordance-mention"))
+                    .is_some(),
+                "the center chat keeps its composer controls"
+            );
+            assert!(
+                cx.debug_bounds("composer-stop").is_some(),
+                "the center chat keeps its stop control"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn a_read_only_chat_shows_the_plain_language_failure_on_a_500(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let runtime: Arc<dyn Runtime> = Arc::new(FakeRuntime {
+                terminals: json!({ "terminals": [] }),
+                conversation_status: 500,
+            });
+            let (root, cx) = cx.add_window_view(|_, cx| ChatRoot {
+                view: cx.new(ChatView::new),
+            });
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                chat.update(app, |view, cx| {
+                    view.set_read_only(true);
+                    let seam: Arc<dyn PaneSeam> = Arc::new(RecordingPane::new());
+                    view.attach(Some(Arc::clone(&runtime)), seam, "p1".to_string(), cx);
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert!(
+                cx.debug_bounds("chat-error").is_some(),
+                "a failed read shows its failure state"
+            );
+            assert!(
+                cx.debug_bounds("chat-retry").is_some(),
+                "a failed read still offers a Retry"
+            );
+            cx.update(|_window, app| {
+                let chat = root.read(app).view.clone();
+                assert_eq!(
+                    chat.read(app).model().failure(),
+                    Some("Couldn't load the conversation."),
+                    "a 500 is a plain-language failure, not a status code"
+                );
+            });
+            assert!(
+                cx.debug_bounds("chat-composer").is_none(),
+                "the failure does not bring back a composer in transcript mode"
+            );
+        }
+    );
+
     /// A runtime that answers the conversation route and the terminal list.
     ///
     /// The chat asks the runtime it already holds, so a fake that answers
     /// those two questions is enough to bring the cards on screen.
     struct FakeRuntime {
         terminals: Value,
+        conversation_status: u16,
     }
 
     impl Runtime for FakeRuntime {
@@ -2909,6 +3285,9 @@ let x = 1;
 
         fn http(&self, _method: &str, path: &str, _body: &Value) -> (u16, Value) {
             if path.starts_with("/api/pane/conversation") {
+                if self.conversation_status != 200 {
+                    return (self.conversation_status, Value::Null);
+                }
                 return (200, json!({ "source": "claude-transcript", "turns": [] }));
             }
             (200, Value::Null)
@@ -2960,6 +3339,7 @@ let x = 1;
                           "program": "omp", "status": "working" },
                     ],
                 }),
+                conversation_status: 200,
             });
             cx.update(|_window, app| {
                 let chat = root.read(app).view.clone();
@@ -3021,6 +3401,7 @@ let x = 1;
                           "program": "omp" },
                     ],
                 }),
+                conversation_status: 200,
             });
             cx.update(|_window, app| {
                 let chat = root.read(app).view.clone();
