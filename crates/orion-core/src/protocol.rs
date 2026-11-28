@@ -347,6 +347,10 @@ pub struct PaneInfo {
     pub pid: Option<u32>,
     pub git_branch: Option<String>,
     pub worktree_path: Option<String>,
+    /// Model the pane's agent explicitly reported, if any. Never inferred from
+    /// `agent_kind` or `display_agent`; absent means the agent did not report one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub has_unread: bool,
     pub plan_summary: Option<PlanSummary>,
 }
@@ -509,6 +513,7 @@ pub struct PushPayload {
 #[cfg(test)]
 mod tests {
     use super::{AgentKind, AgentStatus, PaneInfo, ReportedStatus, ShellKind};
+    use serde::Deserialize;
 
     #[test]
     fn pane_info_serializes_started_at() {
@@ -523,6 +528,7 @@ mod tests {
             pid: None,
             git_branch: None,
             worktree_path: None,
+            model: None,
             has_unread: false,
             plan_summary: None,
         };
@@ -531,6 +537,55 @@ mod tests {
             value.get("started_at").and_then(serde_json::Value::as_str),
             Some("2026-11-25T11:58:00Z")
         );
+    }
+
+    #[test]
+    fn pane_info_model_is_additive_and_never_inferred() {
+        let mut info = PaneInfo {
+            id: "p1".to_string(),
+            tab_id: "t1".to_string(),
+            title: "Build".to_string(),
+            agent_kind: AgentKind::Claude,
+            status: AgentStatus::Working,
+            cwd: "/work/orion".to_string(),
+            started_at: "2026-11-25T11:58:00Z".to_string(),
+            pid: None,
+            git_branch: None,
+            worktree_path: None,
+            model: None,
+            has_unread: false,
+            plan_summary: None,
+        };
+        let value = serde_json::to_value(&info).expect("pane info serializes");
+        assert!(
+            value.get("model").is_none(),
+            "an unreported model is omitted, not guessed from the agent kind"
+        );
+
+        info.model = Some("claude-sonnet-4-5".to_string());
+        let value = serde_json::to_value(&info).expect("pane info serializes");
+        assert_eq!(
+            value.get("model").and_then(serde_json::Value::as_str),
+            Some("claude-sonnet-4-5")
+        );
+    }
+
+    #[test]
+    fn older_reader_ignores_additive_model_field() {
+        #[derive(Deserialize)]
+        struct LegacyPaneInfo {
+            pane_id: String,
+            started_at: String,
+        }
+
+        let wire = serde_json::json!({
+            "pane_id": "p1",
+            "started_at": "2026-11-25T11:58:00Z",
+            "model": "claude-sonnet-4-5",
+        });
+        let legacy: LegacyPaneInfo = serde_json::from_value(wire).expect("an older reader parses");
+        assert_eq!(legacy.pane_id, "p1");
+        assert_eq!(legacy.started_at, "2026-11-25T11:58:00Z");
     }
 
     #[test]
