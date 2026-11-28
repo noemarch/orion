@@ -74,34 +74,24 @@ orion/
 
 ## 4. Verification & Testing Standards
 
-Before submitting any code change:
-1. **Rust Quality:**
-   ```bash
-   cargo check -p orion-core
-   cargo test -p orion-core
-   cargo clippy -p orion-core -- -D warnings
-   cargo fmt --check
-   ```
-   A change in `crates/orion-ui` (the native GPUI shell) runs the same gates for that crate:
-   ```bash
-   cargo check -p orion-ui
-   cargo test -p orion-ui
-   cargo clippy -p orion-ui -- -D warnings
-   ```
-2. **Smoke Proof:** Any change touching agent launching or PTY streaming must verify that the spawned process is an identified AI agent CLI and that stdin/stdout/resize function properly.
+Before submitting any code change, run the gates in [`.github/workflows/ci.yml`](.github/workflows/ci.yml). That workflow is the source of truth for what CI runs; do not keep a copy of its command list here.
+
+1. **Host tool limits:** this workstation is not CI. When the LSP daemon stalls, a stale daemon locks the build, or cargo runs out of memory, apply the local workarounds in [`docs/agents/host-tool-constraints.md`](docs/agents/host-tool-constraints.md).
+2. **Named tests:** when an acceptance criterion or evidence file names a test ID, confirm the filter matches a real test with [`scripts/check-named-tests.ps1`](scripts/check-named-tests.ps1) before trusting a pass.
+3. **Smoke Proof:** Any change touching agent launching or PTY streaming must verify that the spawned process is an identified AI agent CLI and that stdin/stdout/resize function properly.
 
 ---
 
 ## Agent skills
-
 ### Issue tracker
 
 Issues and specs live in GitHub Issues for `noemarch/orion`. See `docs/agents/issue-tracker.md`.
-
 ### Triage labels
 
 The default five-role triage vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
-
 ### Domain docs
 
 Single-context layout using root `GLOSSARY.md` and `docs/adr/`. See `docs/agents/domain.md`.
+
+### Coding standards
+When reviewing a diff, apply `CODING_STANDARDS.md`: it states which test assertions count.
