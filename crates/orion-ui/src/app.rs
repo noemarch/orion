@@ -29,8 +29,8 @@ use crate::session_status;
 use crate::settings::{KeyBarExtras, Preferences, SettingsModal};
 use crate::shell_model::{
     clamp_window_bounds, effective_conversation_width, reference_layout,
-    review_column_visible_for_terminal, sidebar_visible, LensBook, ShellLayout, WindowGeometry,
-    FILES_SURFACE_WIDTH_WIDE,
+    review_column_visible_for_terminal, sidebar_visible, LensBook, RightColumnMode, ShellLayout,
+    WindowGeometry, FILES_SURFACE_WIDTH_WIDE,
 };
 use crate::shell_picker::{ShellPickerEvent, ShellPickerModal};
 use crate::sidebar::{focus_search, FocusSidebarSearch, SidebarEvent, TabEntry, WorkspaceEntry};
@@ -67,6 +67,12 @@ pub struct OrionApp {
     /// Whether the review column is wanted; it still collapses when the window
     /// is too narrow or a split pane is up.
     review_open: bool,
+    /// What the right-hand column shows: the diff review or the focused pane's
+    /// read-only transcript. Defaults to Review.
+    right_column_mode: RightColumnMode,
+    /// The read-only transcript in the right column. It shares the focused
+    /// pane with the center chat but never offers a composer or stop control.
+    transcript_view: Entity<ChatView>,
     /// Whether the left sidebar is mounted. When false the sidebar div is not
     /// mounted at all (zero width); the entity stays alive so selection and
     /// scroll survive a hide/show cycle. Distinct from the narrow-width rail.
@@ -114,6 +120,12 @@ pub struct OrionApp {
     /// Last sidebar session-body token seen by the observer. Pulse ticks leave
     /// it unchanged, so the observer skips the cache rebuild and repaint.
     cached_sidebar_fingerprint: Option<String>,
+    /// Locally derived status counts. `None` means the read failed: no number
+    /// is invented for a host or a pane the shell could not observe.
+    cached_host_count: Option<usize>,
+    cached_working_agents: usize,
+    cached_pane_count: usize,
+    cached_session_available: bool,
 }
 
 /// The runtime session this shell belongs to.
@@ -484,19 +496,6 @@ fn pane_is_shell(pane: &Value) -> bool {
 
 impl OrionApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let workspace_sidebar = cx.new(|cx| WorkspaceSidebar::new(window, cx));
-        let terminal_pane = cx.new(TerminalPane::new);
-        let chat_view = cx.new(ChatView::new);
-        let file_tree = cx.new(FileTree::new);
-        let changes_view = cx.new(ChangesView::new);
-        let review_pane = cx.new(|cx| ReviewPane::new(changes_view.clone(), cx));
-        let settings = cx.new(SettingsModal::new);
-        let new_workspace = cx.new(NewWorkspaceModal::new);
-        let shell_picker = cx.new(ShellPickerModal::new);
-        let split_chat_view = cx.new(ChatView::new);
-        let split_terminal_pane = cx.new(TerminalPane::new);
-        let split_file_tree = cx.new(FileTree::new);
-        let split_changes_view = cx.new(ChangesView::new);
         let session = runtime_session();
         let runtime = tokio::runtime::Runtime::new()
             .ok()
@@ -516,6 +515,33 @@ impl OrionApp {
                 ),
             ),
         };
+        Self::with_runtime(window, cx, engine, notice)
+    }
+
+    /// Build the shell around a chosen runtime. `new` connects the real one;
+    /// tests pass a fake so the status counts and transcript are driven without
+    /// a daemon.
+    fn with_runtime(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        engine: Arc<dyn Runtime>,
+        notice: Option<String>,
+    ) -> Self {
+        let workspace_sidebar = cx.new(|cx| WorkspaceSidebar::new(window, cx));
+        let terminal_pane = cx.new(TerminalPane::new);
+        let chat_view = cx.new(ChatView::new);
+        let transcript_view = cx.new(ChatView::new);
+        transcript_view.update(cx, |view, _cx| view.set_read_only(true));
+        let file_tree = cx.new(FileTree::new);
+        let changes_view = cx.new(ChangesView::new);
+        let review_pane = cx.new(|cx| ReviewPane::new(changes_view.clone(), cx));
+        let settings = cx.new(SettingsModal::new);
+        let new_workspace = cx.new(NewWorkspaceModal::new);
+        let shell_picker = cx.new(ShellPickerModal::new);
+        let split_chat_view = cx.new(ChatView::new);
+        let split_terminal_pane = cx.new(TerminalPane::new);
+        let split_file_tree = cx.new(FileTree::new);
+        let split_changes_view = cx.new(ChangesView::new);
         workspace_sidebar.update(cx, |view, cx| {
             view.set_runtime_online(notice.is_none(), cx);
         });
@@ -524,10 +550,12 @@ impl OrionApp {
             workspace_sidebar,
             terminal_pane,
             chat_view,
+            transcript_view,
             file_tree,
             changes_view,
             review_pane,
             review_open: true,
+            right_column_mode: RightColumnMode::Review,
             sidebar_open: true,
             settings,
             new_workspace,
@@ -558,6 +586,10 @@ impl OrionApp {
             cached_tabs: Vec::new(),
             cached_tabs_workspace_id: None,
             cached_sidebar_fingerprint: None,
+            cached_host_count: None,
+            cached_working_agents: 0,
+            cached_pane_count: 0,
+            cached_session_available: false,
         };
 
         // Lifecycle clicks are events, so the shell re-renders at once instead
@@ -824,6 +856,28 @@ impl OrionApp {
             let seam = seam_of(&pane);
             view.attach(Some(Arc::clone(&engine)), seam, pane_id.to_string(), cx);
         });
+        // The right column's transcript is the same pane, read-only: it shows
+        // the same turns and tool cards but never offers a composer.
+        self.transcript_view.update(cx, |view, cx| {
+            let seam = seam_of(&pane);
+            view.attach(Some(Arc::clone(&engine)), seam, pane_id.to_string(), cx);
+        });
+        // The work-duration line reads the pane's own start time, not a guess.
+        let started_at = engine
+            .snapshot_value()
+            .get("panes")
+            .and_then(Value::as_array)
+            .and_then(|panes| {
+                panes
+                    .iter()
+                    .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+            })
+            .and_then(|pane| pane.get("started_at").and_then(Value::as_str))
+            .map(str::to_string);
+        self.chat_view
+            .update(cx, |view, _cx| view.set_started_at(started_at.clone()));
+        self.transcript_view
+            .update(cx, |view, _cx| view.set_started_at(started_at));
         // The Changes lens shares the same pane: the file tree starts at
         // the pane's cwd, the diff runs from the pane's repository.
         self.file_tree.update(cx, |view, cx| {
@@ -1244,29 +1298,26 @@ impl OrionApp {
         });
     }
 
-    fn global_status_word(status: Option<&str>) -> &'static str {
-        match status {
-            Some(raw) if session_status::state_from_wire(Some(raw)).is_working() => "working",
-            _ => "idle",
-        }
-    }
-
     fn render_global_status_bar(&self) -> impl IntoElement {
         let theme = Theme::current();
-        let focused = self
-            .cached_workspaces
-            .iter()
-            .find(|workspace| workspace.focused)
-            .or_else(|| self.cached_workspaces.first());
-        let working = focused
-            .map(|workspace| {
-                Self::global_status_word(Some(workspace.status.as_wire())) == "working"
-            })
-            .unwrap_or(false);
-        let dot = if working {
+        let dot = if self.cached_working_agents > 0 {
             theme.status_working
         } else {
             theme.status_idle
+        };
+        let hosts = match self.cached_host_count {
+            Some(count) => format!("{count} host"),
+            None => "hosts unavailable".to_string(),
+        };
+        let counts = if self.cached_session_available {
+            format!("{} working · {hosts}", self.cached_working_agents)
+        } else {
+            "status unavailable locally".to_string()
+        };
+        let panes = if self.cached_session_available {
+            format!("{} panes", self.cached_pane_count)
+        } else {
+            "panes unavailable".to_string()
         };
         div()
             .id("global-status-bar")
@@ -1287,8 +1338,28 @@ impl OrionApp {
                     .rounded_full()
                     .bg(dot),
             )
-            .child(if working { "working" } else { "idle" })
+            .child(
+                div()
+                    .id("global-status-counts")
+                    .test_support()
+                    .aria_label(counts.clone())
+                    .child(counts),
+            )
+            .child(
+                div()
+                    .id("global-status-panes")
+                    .test_support()
+                    .aria_label(panes.clone())
+                    .child(panes),
+            )
             .child(div().flex_1())
+            .child(
+                div()
+                    .id("global-status-cost")
+                    .test_support()
+                    .aria_label("usage unavailable locally")
+                    .child("usage unavailable locally"),
+            )
             .child(format!("Orion {}", env!("CARGO_PKG_VERSION")))
     }
 
@@ -1812,6 +1883,52 @@ impl OrionApp {
         self.cached_workspaces = workspaces;
         self.cached_tabs = tabs;
         self.cached_tabs_workspace_id = tabs_ws_id;
+        self.refresh_local_status();
+    }
+
+    /// Derive the status bar's counts from the two local reads. A failed or
+    /// malformed answer is an explicit unavailable state, never a zero or a
+    /// guessed number. Cost is not available locally at all.
+    fn refresh_local_status(&mut self) {
+        let engine = Arc::clone(&self.engine);
+        let (session_status, session_body) = engine.http("GET", "/api/session", &Value::Null);
+        let (machines_status, machines_body) = engine.http("GET", "/api/machines", &Value::Null);
+
+        self.cached_session_available =
+            session_status == 200 && session_body.get("snapshot").is_some();
+        let panes = self
+            .cached_session_available
+            .then(|| {
+                session_body["snapshot"]
+                    .get("panes")
+                    .and_then(Value::as_array)
+            })
+            .flatten();
+        self.cached_pane_count = panes.map_or(0, Vec::len);
+        let states = panes
+            .map(|panes| {
+                panes
+                    .iter()
+                    .map(|pane| {
+                        session_status::row_state(
+                            pane.get("agent_status").and_then(Value::as_str),
+                            pane_is_shell(pane),
+                            true,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.cached_working_agents = session_status::working_count(&states);
+
+        self.cached_host_count = if machines_status == 200 {
+            machines_body
+                .get("machines")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        } else {
+            None
+        };
     }
 }
 
@@ -1931,6 +2048,10 @@ impl Render for OrionApp {
         let chat_on_screen = chat_active || (review_visible && changes_active);
         self.chat_view
             .update(cx, |view, cx| view.set_visible(cx, chat_on_screen));
+        let transcript_on_screen =
+            review_visible && self.right_column_mode == RightColumnMode::Transcript;
+        self.transcript_view
+            .update(cx, |view, cx| view.set_visible(cx, transcript_on_screen));
 
         let lens_body = if review_visible {
             // The review column owns the diff here; the middle column keeps
@@ -2193,13 +2314,56 @@ impl Render for OrionApp {
                 .child(
                     div()
                         .id("review-column")
+                        .test_support()
                         .flex()
                         .flex_col()
                         .flex_1()
                         .min_w(px(0.0))
                         .bg(theme.panel_bg())
                         .rounded(px(theme.radius_panel()))
-                        .child(self.review_pane.clone()),
+                        .child(
+                            div()
+                                .id("right-column-header")
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .h(px(TOUCH_TARGET_PX))
+                                .flex_shrink_0()
+                                .px(px(theme.space_2()))
+                                .child(
+                                    div()
+                                        .id("right-column-mode-control")
+                                        .test_support()
+                                        .aria_label("right column mode")
+                                        .h(px(TOUCH_TARGET_PX))
+                                        .min_w(px(TOUCH_TARGET_PX))
+                                        .child(
+                                            Button::new("right-column-mode-button")
+                                                .label(match self.right_column_mode {
+                                                    RightColumnMode::Review => "Review",
+                                                    RightColumnMode::Transcript => "Transcript",
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.right_column_mode =
+                                                        match this.right_column_mode {
+                                                            RightColumnMode::Review => {
+                                                                RightColumnMode::Transcript
+                                                            }
+                                                            RightColumnMode::Transcript => {
+                                                                RightColumnMode::Review
+                                                            }
+                                                        };
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                ),
+                        )
+                        .child(match self.right_column_mode {
+                            RightColumnMode::Review => self.review_pane.clone().into_any_element(),
+                            RightColumnMode::Transcript => {
+                                self.transcript_view.clone().into_any_element()
+                            }
+                        }),
                 );
         } else {
             // The classic two-column shell, unchanged: narrow windows and
@@ -2431,19 +2595,15 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane_seam::test_doubles::RecordingPane;
+    use crate::pane_seam::PaneSeam;
+    use gpui_kit::test::{TestQueryExt, TestWindowExt};
     use orion_core::agents::LaunchSpec;
     use orion_core::engine::pane::{Pane, PaneConfig, PaneEvent};
     use orion_core::protocol::{AgentKind, TerminalSize};
     use orion_core::runtime::{FrameConnection, PROTOCOL_VERSION};
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
-
-    #[::core::prelude::v1::test]
-    fn global_status_word_is_working_or_idle() {
-        assert_eq!(OrionApp::global_status_word(Some("working")), "working");
-        assert_eq!(OrionApp::global_status_word(Some("idle")), "idle");
-        assert_eq!(OrionApp::global_status_word(None), "idle");
-    }
 
     crate::orion_test!(
         fn the_pump_feeds_chunks_and_notifies_only_on_revision_change(
@@ -2945,6 +3105,333 @@ mod tests {
             assert_eq!(
                 attach["keep_size"], true,
                 "the split keeps the pane's size: the attach does not resize it"
+            );
+        }
+    );
+
+    /// A runtime that answers the shell's local reads and the transcript poll.
+    struct ShellFixture {
+        snapshot: Value,
+        machines: Value,
+        machines_status: u16,
+        conversation: Value,
+    }
+
+    impl Runtime for ShellFixture {
+        fn identity(&self) -> Value {
+            json!({ "version": "fixture", "protocol": PROTOCOL_VERSION })
+        }
+
+        fn http(&self, method: &str, path: &str, _body: &Value) -> (u16, Value) {
+            if method == "GET" && path == "/api/session" {
+                return (200, json!({ "snapshot": self.snapshot }));
+            }
+            if method == "GET" && path == "/api/machines" {
+                return (self.machines_status, self.machines.clone());
+            }
+            if method == "GET" && path == "/api/preferences" {
+                return (200, json!({}));
+            }
+            if method == "GET" && path.starts_with("/api/pane/conversation") {
+                return (200, self.conversation.clone());
+            }
+            (200, Value::Null)
+        }
+
+        fn pane_by_id(&self, _pane_id: &str) -> Option<Arc<dyn PaneHandle>> {
+            None
+        }
+
+        fn connect(&self, _sink: FrameSink) -> String {
+            "fixture".to_string()
+        }
+
+        fn send_to(&self, _connection: &str, _frame: Value) {}
+
+        fn disconnect(&self, _connection: &str) {}
+
+        fn dispatch_from(
+            &self,
+            _connection: Option<&str>,
+            _request: &Value,
+        ) -> std::result::Result<Option<Value>, String> {
+            Ok(None)
+        }
+
+        fn snapshot_value(&self) -> Value {
+            self.snapshot.clone()
+        }
+
+        fn restore(&self) {}
+    }
+
+    fn shell_snapshot() -> Value {
+        json!({
+            "workspaces": [{
+                "workspace_id": "ws-1", "label": "Orion", "active_tab_id": "tab-1",
+                "focused": true, "agent_status": "working",
+            }],
+            "tabs": [{
+                "tab_id": "tab-1", "workspace_id": "ws-1", "label": "main",
+                "layout": "single", "pane_ids": ["p1"], "active_pane_id": "p1",
+                "focused": true, "agent_status": "working",
+            }],
+            "panes": [
+                { "pane_id": "p1", "workspace_id": "ws-1", "tab_id": "tab-1",
+                  "label": "Build", "display_agent": "claude", "agent_status": "working",
+                  "started_at": "2026-11-27T00:00:00Z", "focused": true },
+                { "pane_id": "p2", "workspace_id": "ws-1", "tab_id": "tab-1",
+                  "label": "Review", "display_agent": "codex", "agent_status": "working",
+                  "started_at": "2026-11-27T00:00:00Z" },
+                { "pane_id": "p3", "workspace_id": "ws-1", "tab_id": "tab-1",
+                  "label": "Idle", "display_agent": "claude", "agent_status": "idle" },
+            ],
+            "focused_pane_id": "p1",
+        })
+    }
+
+    fn one_host() -> Value {
+        json!({ "machines": [{
+            "id": "local", "name": "This PC", "kind": "local",
+            "enabled": true, "state": "connected",
+        }] })
+    }
+
+    fn tool_conversation() -> Value {
+        json!({
+            "source": "claude-transcript",
+            "turns": [{
+                "role": "assistant", "ts": "2026-11-27T00:00:00Z",
+                "parts": [{
+                    "kind": "tool", "name": "Read", "summary": "Read: C:/work/src/main.rs",
+                    "input": "{\"file_path\":\"C:/work/src/main.rs\"}",
+                    "output": "fn main() {}", "error": false,
+                }],
+            }],
+        })
+    }
+
+    fn open_shell(
+        cx: &mut gpui_kit::TestAppContext,
+        runtime: Arc<dyn Runtime>,
+    ) -> (gpui_kit::AnyWindowHandle, Entity<OrionApp>) {
+        cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        Default::default(),
+                        size(px(1280.0), px(800.0)),
+                    ))),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| cx.new(|cx| OrionApp::with_runtime(window, cx, runtime, None)),
+            )
+            .expect("the shell window")
+        })
+    }
+
+    crate::orion_test!(
+        fn right_column_switches_modes_and_status_counts_are_local(
+            cx: &mut gpui_kit::TestAppContext,
+        ) {
+            let fixture = Arc::new(ShellFixture {
+                snapshot: shell_snapshot(),
+                machines: one_host(),
+                machines_status: 200,
+                conversation: tool_conversation(),
+            });
+            let runtime: Arc<dyn Runtime> = fixture.clone();
+            let (handle, root) = open_shell(cx, Arc::clone(&runtime));
+            // Only the transcript view carries this conversation; attaching it
+            // by hand keeps the center chat out of the tool-row assertion.
+            cx.update_window(handle, |_, _, app| {
+                root.update(app, |app, cx| {
+                    let transcript = app.transcript_view.clone();
+                    transcript.update(cx, |view, cx| {
+                        let seam: Arc<dyn PaneSeam> = Arc::new(RecordingPane::new());
+                        view.attach(Some(Arc::clone(&runtime)), seam, "p1".to_string(), cx);
+                    });
+                });
+            })
+            .expect("the window");
+            cx.run_until_parked();
+            let _ = cx.update_window(handle, |_, window, cx| window.render_frame(cx));
+
+            assert!(
+                cx.update_window(handle, |_, window, _| window
+                    .try_find("review-column")
+                    .is_some())
+                    .expect("the window"),
+                "the right column is mounted under its stable id"
+            );
+            assert_eq!(
+                cx.update(|app| root.read(app).right_column_mode),
+                RightColumnMode::Review,
+                "the right column defaults to Review"
+            );
+            let control_height = cx
+                .update_window(handle, |_, window, _| {
+                    f32::from(
+                        window
+                            .try_find("right-column-mode-control")
+                            .unwrap_or_else(|| panic!("the mode control is rendered"))
+                            .bounds()
+                            .size
+                            .height,
+                    )
+                })
+                .expect("the window");
+            assert_eq!(control_height, TOUCH_TARGET_PX, "the mode control is 44px");
+
+            assert!(
+                cx.update_window(handle, |_, window, _| window
+                    .try_find_by_label("2 working · 1 host")
+                    .is_some())
+                    .expect("the window"),
+                "the bar reads the locally derived working and host counts"
+            );
+            assert!(
+                cx.update_window(handle, |_, window, _| window
+                    .try_find_by_label("3 panes")
+                    .is_some())
+                    .expect("the window"),
+                "the bar reads the locally derived pane count"
+            );
+            assert!(
+                cx.update_window(handle, |_, window, _| window
+                    .try_find_by_label("usage unavailable locally")
+                    .is_some())
+                    .expect("the window"),
+                "cost is an explicit local-unavailable state"
+            );
+            assert!(
+                cx.update_window(handle, |_, window, _| window
+                    .try_find_by_label("Read")
+                    .is_none())
+                    .expect("the window"),
+                "Review mode does not mount the transcript"
+            );
+
+            let _ = cx.update_window(handle, |_, window, cx| {
+                window.click("right-column-mode-button", cx)
+            });
+            cx.run_until_parked();
+            let _ = cx.update_window(handle, |_, window, cx| window.render_frame(cx));
+
+            assert_eq!(
+                cx.update(|app| root.read(app).right_column_mode),
+                RightColumnMode::Transcript,
+                "the user-visible control switched to Transcript"
+            );
+            assert!(
+                cx.update_window(handle, |_, window, _| window
+                    .try_find_by_label("Read")
+                    .is_some())
+                    .expect("the window"),
+                "Transcript mode renders the read-only chat's tool row"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn a_failed_machines_read_says_hosts_are_unavailable(cx: &mut gpui_kit::TestAppContext) {
+            let fixture = Arc::new(ShellFixture {
+                snapshot: shell_snapshot(),
+                machines: json!({ "machines": [] }),
+                machines_status: 500,
+                conversation: tool_conversation(),
+            });
+            let runtime: Arc<dyn Runtime> = fixture.clone();
+            let (handle, _root) = open_shell(cx, runtime);
+            cx.run_until_parked();
+            let _ = cx.update_window(handle, |_, window, cx| window.render_frame(cx));
+
+            assert!(
+                cx.update_window(handle, |_, window, _| window
+                    .try_find_by_label("2 working · hosts unavailable")
+                    .is_some())
+                    .expect("the window"),
+                "a failed machines read is an explicit plain-language unavailable state"
+            );
+            assert!(
+                cx.update_window(handle, |_, window, _| window
+                    .try_find_by_label("0 hosts")
+                    .is_none())
+                    .expect("the window"),
+                "a failed read never fabricates a zero host count"
+            );
+            assert!(
+                cx.update_window(handle, |_, window, _| window
+                    .try_find_by_label("2 working · 1 host")
+                    .is_none())
+                    .expect("the window"),
+                "a failed read never fabricates a host count"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn a_lens_switch_keeps_the_readers_draft(cx: &mut gpui_kit::TestAppContext) {
+            let fixture = Arc::new(ShellFixture {
+                snapshot: shell_snapshot(),
+                machines: one_host(),
+                machines_status: 200,
+                conversation: tool_conversation(),
+            });
+            let runtime: Arc<dyn Runtime> = fixture.clone();
+            let (handle, root) = open_shell(cx, Arc::clone(&runtime));
+            cx.update_window(handle, |_, _, app| {
+                root.update(app, |app, cx| {
+                    let chat = app.chat_view.clone();
+                    chat.update(cx, |view, cx| {
+                        let seam: Arc<dyn PaneSeam> = Arc::new(RecordingPane::new());
+                        view.attach(Some(Arc::clone(&runtime)), seam, "p1".to_string(), cx);
+                    });
+                });
+            })
+            .expect("the window");
+            cx.run_until_parked();
+            let _ = cx.update_window(handle, |_, window, cx| window.render_frame(cx));
+
+            cx.simulate_input(handle, "keep this draft");
+            assert_eq!(
+                cx.update(|app| {
+                    root.read(app)
+                        .chat_view
+                        .read(app)
+                        .composer()
+                        .read(app)
+                        .model()
+                        .draft()
+                        .to_string()
+                }),
+                "keep this draft",
+                "the reader's words are in the draft"
+            );
+
+            cx.update_window(handle, |_, _, app| {
+                root.update(app, |app, cx| {
+                    app.set_lens(Lens::Terminal, cx);
+                    app.set_lens(Lens::Chat, cx);
+                });
+            })
+            .expect("the window");
+            let _ = cx.update_window(handle, |_, window, cx| window.render_frame(cx));
+
+            assert_eq!(
+                cx.update(|app| {
+                    root.read(app)
+                        .chat_view
+                        .read(app)
+                        .composer()
+                        .read(app)
+                        .model()
+                        .draft()
+                        .to_string()
+                }),
+                "keep this draft",
+                "a lens switch keeps the draft"
             );
         }
     );
