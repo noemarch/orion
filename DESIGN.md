@@ -6,8 +6,8 @@ value. When a component needs a value that is not here, add it to both first.
 
 ## 1. Atmosphere & Identity
 
-The base world is Quiet Slate: a chat surface first, an operations console second. Near-black
-plum ground (dark) or rose-tinted paper (light), porcelain text, and ONE muted rose reserved for
+The base world is Quiet Slate (Quiet Canvas in the generated token table): a chat surface first, an operations console second. Near-black
+blue-gray ground (dark) or rose-tinted paper (light), porcelain text, and ONE muted rose reserved for
 the action: focus, the chosen lens, the terminal cursor, the chosen sidebar row, and the user's
 own action (Send, primary buttons). Agent states carry the remaining saturated colors and none of
 them is rose. The user's chat turns stay neutral raised cards, so a long thread never turns into a
