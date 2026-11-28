@@ -1,8 +1,9 @@
 //! Theme tokens (DESIGN.md §2, the generated table — the source of truth;
 //! values mirrored value-for-value). The default dark palette is the blue-gray
-//! "Quiet Canvas" generation; the earlier plum values were replaced as the
-//! default while the additive `surface_canvas`/`diff_*` tokens keep their own
-//! names for callers that want the reference palette explicitly.
+//! near-black "Quiet Slate" family, called "Quiet Canvas" in the generated
+//! token table; the earlier plum values were replaced as the default while the
+//! additive `surface_canvas`/`diff_*` tokens keep their own names for callers
+//! that want the reference palette explicitly.
 //!
 //! Usage: views call [`Theme::current()`] in `render` and bind its tokens to
 //! backgrounds/text. The app sets the current theme from saved preferences.
