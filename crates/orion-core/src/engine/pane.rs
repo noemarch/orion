@@ -98,6 +98,7 @@ struct PaneState {
     grid_seq: u64,
     prompt: Option<DetectedPrompt>,
     exit: Option<i32>,
+    reported_model: Option<String>,
 }
 
 /// A live agent pane.
@@ -133,6 +134,7 @@ impl Pane {
             grid_seq: 0,
             prompt: None,
             exit: None,
+            reported_model: None,
         }));
 
         // Prompt detection scans the whole visible screen, so it must not run per PTY chunk under
@@ -577,6 +579,7 @@ impl Pane {
             "pane_kind": if self.agent.is_shell() { "shell" } else { "agent" },
             "agent_kind": self.agent.wire_kind(),
             "shell_path": self.shell_path,
+            "model": state.reported_model.clone(),
         })
     }
 
@@ -604,7 +607,12 @@ impl Pane {
             "pane_kind": if self.agent.is_shell() { "shell" } else { "agent" },
             "agent_kind": self.agent.wire_kind(),
             "shell_path": self.shell_path,
+            "model": state.reported_model.clone(),
         })
+    }
+
+    pub fn set_reported_model(&self, model: Option<String>) {
+        self.state.lock().reported_model = model;
     }
 
     /// Whether this pane runs a user-invoked shell rather than an AI agent CLI.
@@ -893,7 +901,105 @@ mod tests {
             grid_seq: 0,
             prompt: None,
             exit: None,
+            reported_model: None,
         }
+    }
+
+    #[test]
+    fn snapshot_carries_started_at() {
+        let spec = LaunchSpec {
+            program: std::env::current_exe().expect("the test binary's path"),
+            args: vec!["--list".to_string()],
+        };
+        let events: Arc<dyn Fn(PaneEvent) + Send + Sync> = Arc::new(|_| {});
+        let pane = Pane::spawn(
+            PaneConfig {
+                id: "p1".to_string(),
+                workspace_id: "ws-1".to_string(),
+                tab_id: "t1".to_string(),
+                agent: AgentKind::Claude,
+                label: "Build".to_string(),
+                cwd: std::env::current_dir().expect("a working directory"),
+                spec,
+                args: Vec::new(),
+                shell_path: None,
+                launch_command: None,
+                size: TerminalSize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+            },
+            events,
+        )
+        .expect("a stand-in pane spawns");
+
+        let info = pane.info(false);
+        let agent = pane.agent_info(false);
+        let started = info
+            .get("started_at")
+            .and_then(Value::as_str)
+            .expect("info carries started_at");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(started).is_ok(),
+            "started_at is an RFC 3339 timestamp"
+        );
+        assert_eq!(
+            agent.get("started_at"),
+            info.get("started_at"),
+            "both snapshots report the same start time"
+        );
+    }
+
+    #[test]
+    fn snapshots_report_only_an_explicitly_reported_model() {
+        let spec = LaunchSpec {
+            program: std::env::current_exe().expect("the test binary's path"),
+            args: vec!["--list".to_string()],
+        };
+        let events: Arc<dyn Fn(PaneEvent) + Send + Sync> = Arc::new(|_| {});
+        let pane = Pane::spawn(
+            PaneConfig {
+                id: "p1".to_string(),
+                workspace_id: "ws-1".to_string(),
+                tab_id: "t1".to_string(),
+                agent: AgentKind::Claude,
+                label: "Build".to_string(),
+                cwd: std::env::current_dir().expect("a working directory"),
+                spec,
+                args: Vec::new(),
+                shell_path: None,
+                launch_command: None,
+                size: TerminalSize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+            },
+            events,
+        )
+        .expect("a stand-in pane spawns");
+
+        let info = pane.info(false);
+        let agent = pane.agent_info(false);
+        assert_eq!(info.get("model"), Some(&Value::Null));
+        assert_eq!(agent.get("model"), info.get("model"));
+        assert_ne!(
+            info.get("model").and_then(Value::as_str),
+            info.get("display_agent").and_then(Value::as_str),
+            "the agent name is never promoted to a model"
+        );
+
+        pane.set_reported_model(Some("claude-sonnet-4-5".to_string()));
+        let info = pane.info(false);
+        let agent = pane.agent_info(false);
+        assert_eq!(
+            info.get("model").and_then(Value::as_str),
+            Some("claude-sonnet-4-5")
+        );
+        assert_eq!(agent.get("model"), info.get("model"));
     }
 
     #[test]
