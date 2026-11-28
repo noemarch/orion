@@ -274,6 +274,7 @@ mod tests {
                 context: String::new(),
                 status: AgentStatus::Working,
                 selected: false,
+                model_label: None,
             },
             AgentRow {
                 pane_id: "p2".into(),
@@ -283,6 +284,7 @@ mod tests {
                 context: String::new(),
                 status: AgentStatus::Working,
                 selected: false,
+                model_label: None,
             },
             AgentRow {
                 pane_id: "p3".into(),
@@ -292,6 +294,7 @@ mod tests {
                 context: String::new(),
                 status: AgentStatus::Working,
                 selected: false,
+                model_label: None,
             },
         ];
         let duplicates = duplicate_names(&rows);
@@ -338,5 +341,20 @@ mod tests {
             Some("2h".to_string())
         );
         assert_eq!(elapsed_label(None, now), None);
+    }
+
+    #[test]
+    fn offline_override_beats_cached_idle_and_working() {
+        assert_eq!(row_state(Some("idle"), false, false), RowState::Offline);
+        assert_eq!(row_state(Some("working"), false, false), RowState::Offline);
+    }
+
+    #[test]
+    fn elapsed_label_ignores_malformed_started_at() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(elapsed_label(Some("not-a-timestamp"), now), None);
+        assert_eq!(elapsed_label(Some(""), now), None);
     }
 }
