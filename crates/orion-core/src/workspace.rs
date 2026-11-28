@@ -51,6 +51,7 @@ impl WorkspaceManager {
             pid: None,
             git_branch: Self::detect_git_branch(working_dir),
             worktree_path: None,
+            model: None,
             has_unread: false,
             plan_summary: None,
         };
@@ -120,6 +121,7 @@ impl WorkspaceManager {
             pid: None,
             git_branch: Self::detect_git_branch(&ws.working_dir),
             worktree_path: None,
+            model: None,
             has_unread: false,
             plan_summary: None,
         };
