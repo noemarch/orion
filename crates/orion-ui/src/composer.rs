@@ -67,8 +67,8 @@ pub enum ComposerKey {
     Ignored,
 }
 
-/// The composer's state: the draft, the send on its way, and the failure that
-/// keeps the words for a retry.
+/// The composer's state: the draft, the send on its way, the failure that
+/// keeps the words for a retry, and the local-only affordance state.
 #[derive(Debug, Clone)]
 pub struct ComposerModel {
     draft: String,
@@ -76,6 +76,16 @@ pub struct ComposerModel {
     /// The words the pending or failed send carries, so a retry sends the same
     /// message rather than whatever the draft has become since.
     sending: Option<String>,
+    /// The last token inserted through the `@` mention affordance. Local UI
+    /// state: never sent on its own and never stored outside this model.
+    mention: Option<String>,
+    /// The last token inserted through the `/` command affordance. Local UI
+    /// state: never sent on its own and never stored outside this model.
+    slash_command: Option<String>,
+    /// Plain-language label for the current access mode. Local UI state only.
+    access_mode_label: String,
+    /// Plain-language label for the selected model. Local UI state only.
+    model_label: String,
 }
 
 impl Default for ComposerModel {
@@ -91,6 +101,10 @@ impl ComposerModel {
             draft: String::new(),
             state: SendState::Idle,
             sending: None,
+            mention: None,
+            slash_command: None,
+            access_mode_label: String::new(),
+            model_label: String::new(),
         }
     }
 
@@ -139,6 +153,53 @@ impl ComposerModel {
     /// The reader typed something.
     pub fn type_text(&mut self, text: &str) {
         self.draft.push_str(text);
+    }
+
+    /// Insert a mention token through the `@` affordance, e.g. `@file`.
+    ///
+    /// Only the draft and the local mention state change: nothing is sent.
+    pub fn insert_mention(&mut self, token: &str) {
+        self.draft.push_str(token);
+        self.mention = Some(token.to_string());
+    }
+
+    /// Insert a slash command through the `/` affordance, e.g. `/review`.
+    ///
+    /// Only the draft and the local command state change: nothing is sent.
+    pub fn insert_slash_command(&mut self, token: &str) {
+        self.draft.push_str(token);
+        self.slash_command = Some(token.to_string());
+    }
+
+    /// The last token inserted through the `@` affordance, when there is one.
+    pub fn mention(&self) -> Option<&str> {
+        self.mention.as_deref()
+    }
+
+    /// The last token inserted through the `/` affordance, when there is one.
+    pub fn slash_command(&self) -> Option<&str> {
+        self.slash_command.as_deref()
+    }
+
+    /// The access-mode label, readable without touching the draft.
+    pub fn access_mode_label(&self) -> &str {
+        &self.access_mode_label
+    }
+
+    /// Set the access-mode label. Local UI state only: the draft is untouched.
+    pub fn set_access_mode_label(&mut self, label: String) {
+        self.access_mode_label = label;
+    }
+
+    /// The model-selector label, readable without touching the draft.
+    pub fn model_label(&self) -> &str {
+        &self.model_label
+    }
+
+    /// Set the model-selector label. Local UI state only: the draft is
+    /// untouched.
+    pub fn set_model_label(&mut self, label: String) {
+        self.model_label = label;
     }
 
     /// The reader typed: one key is applied to the draft.
@@ -311,6 +372,10 @@ pub struct Composer {
     model: ComposerModel,
     seam: Option<Arc<dyn PaneSeam>>,
     focus_handle: FocusHandle,
+    /// The two read-only affordance labels are tab stops so a keyboard or
+    /// screen reader can reach them in the same order as the two buttons.
+    access_mode_focus: FocusHandle,
+    model_focus: FocusHandle,
     /// A prompt card is waiting: the agent wants an answer, not a message.
     blocked: bool,
     /// How the box says to answer the agent's question.
@@ -326,6 +391,8 @@ impl Composer {
             model: ComposerModel::new(),
             seam: None,
             focus_handle: cx.focus_handle().tab_stop(true),
+            access_mode_focus: cx.focus_handle().tab_stop(true),
+            model_focus: cx.focus_handle().tab_stop(true),
             blocked: false,
             answer_hint: None,
             running: false,
@@ -522,6 +589,141 @@ impl Composer {
         }
     }
 
+    /// The local-only affordance row: mention, command, access mode and model.
+    /// The buttons insert tokens into the draft; the labels only read local
+    /// state. Nothing here fetches data, stores a secret, or sends a message.
+    fn render_affordances(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let theme = Theme::current();
+        let access = if self.model.access_mode_label().is_empty() {
+            "Access mode unavailable".to_string()
+        } else {
+            self.model.access_mode_label().to_string()
+        };
+        let model = if self.model.model_label().is_empty() {
+            "Model unavailable".to_string()
+        } else {
+            self.model.model_label().to_string()
+        };
+
+        let mention = div()
+            .id("composer-affordance-mention")
+            .debug_selector(|| "composer-affordance-mention".to_string())
+            .test_support()
+            .aria_label("Insert mention")
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(px(TOUCH_TARGET_PX))
+            .min_w(px(TOUCH_TARGET_PX))
+            .child(
+                Button::new("composer-affordance-mention-button")
+                    .label("@")
+                    .text()
+                    .h(px(TOUCH_TARGET_PX))
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
+                    .accessibility_label("Insert mention")
+                    .tooltip("Insert mention")
+                    .disabled(self.blocked)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.blocked {
+                            return;
+                        }
+                        this.model.insert_mention("@file");
+                        cx.notify();
+                    })),
+            );
+
+        let command = div()
+            .id("composer-affordance-command")
+            .debug_selector(|| "composer-affordance-command".to_string())
+            .test_support()
+            .aria_label("Insert slash command")
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(px(TOUCH_TARGET_PX))
+            .min_w(px(TOUCH_TARGET_PX))
+            .child(
+                Button::new("composer-affordance-command-button")
+                    .label("/")
+                    .text()
+                    .h(px(TOUCH_TARGET_PX))
+                    .min_h(px(TOUCH_TARGET_PX))
+                    .min_w(px(TOUCH_TARGET_PX))
+                    .accessibility_label("Insert slash command")
+                    .tooltip("Insert slash command")
+                    .disabled(self.blocked)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.blocked {
+                            return;
+                        }
+                        this.model.insert_slash_command("/review");
+                        cx.notify();
+                    })),
+            );
+
+        let access_label = div()
+            .id("composer-affordance-access")
+            .debug_selector(|| "composer-affordance-access".to_string())
+            .test_support()
+            .track_focus(&self.access_mode_focus)
+            .aria_label(format!("Access mode: {access}"))
+            .flex()
+            .items_center()
+            .h(px(TOUCH_TARGET_PX))
+            .px(px(theme.space_2()))
+            .rounded(px(theme.radius_control()))
+            .bg(theme.panel_bg())
+            .text_size(px(theme.font_ui_secondary()))
+            .text_color(theme.token_text_muted())
+            .child(access);
+
+        let model_label = div()
+            .id("composer-affordance-model")
+            .debug_selector(|| "composer-affordance-model".to_string())
+            .test_support()
+            .track_focus(&self.model_focus)
+            .aria_label(format!("Model: {model}"))
+            .flex()
+            .items_center()
+            .h(px(TOUCH_TARGET_PX))
+            .px(px(theme.space_2()))
+            .rounded(px(theme.radius_control()))
+            .bg(theme.panel_bg())
+            .text_size(px(theme.font_ui_secondary()))
+            .text_color(theme.token_text_muted())
+            .child(model);
+
+        div()
+            .id("composer-affordances")
+            .debug_selector(|| "composer-affordances".to_string())
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(theme.space_2()))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(theme.space_2()))
+                    .child(mention)
+                    .child(command),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(theme.space_2()))
+                    .child(access_label)
+                    .child(model_label),
+            )
+            .into_any_element()
+    }
+
     /// The note under the box: why a send failed, or what the box is waiting
     /// for.
     fn render_note(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
@@ -567,6 +769,8 @@ impl Composer {
                 div()
                     .id("composer-note-blocked")
                     .debug_selector(|| "composer-blocked".to_string())
+                    .test_support()
+                    .aria_label("Answer the question above to continue.")
                     .px_3()
                     .text_size(px(12.0 * theme.density_scale()))
                     .text_color(theme.text_dim)
@@ -657,7 +861,7 @@ impl Render for Composer {
             .h(px(TOUCH_TARGET_PX));
         if can_send {
             send = send.child(
-                Button::new("composer-send")
+                Button::new("composer-send-button")
                     .icon(Icon::new(IconName::ArrowUp).size(theme.scaled_icon_size()))
                     .small()
                     .primary()
@@ -715,6 +919,7 @@ impl Render for Composer {
 
         column = column.child(div().w_full().h(px(1.0)).bg(theme.border_subtle()));
         column = column.child(input);
+        column = column.child(self.render_affordances(cx));
         if let Some(note) = self.render_note(cx) {
             column = column.child(note);
         }
@@ -737,6 +942,7 @@ impl Render for Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::test::TestWindowExt;
     #[::core::prelude::v1::test]
     fn an_empty_draft_cannot_be_sent() {
         let mut model = ComposerModel::new();
@@ -927,6 +1133,68 @@ mod tests {
         assert!(!model.state().is_pending());
     }
 
+    #[::core::prelude::v1::test]
+    fn a_mention_insertion_only_touches_the_draft() {
+        let mut model = ComposerModel::new();
+        model.insert_mention("@file");
+        assert_eq!(model.draft(), "@file", "the token lands in the draft");
+        assert_eq!(model.mention(), Some("@file"));
+        assert!(!model.state().is_pending(), "insertion never sends");
+        assert!(
+            model.can_send(),
+            "the inserted words are the reader's to send"
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_slash_command_insertion_only_touches_the_draft() {
+        let mut model = ComposerModel::new();
+        model.insert_slash_command("/review");
+        assert_eq!(model.draft(), "/review", "the command lands in the draft");
+        assert_eq!(model.slash_command(), Some("/review"));
+        assert!(!model.state().is_pending(), "insertion never sends");
+    }
+
+    #[::core::prelude::v1::test]
+    fn affordance_labels_are_readable_without_mutating_the_draft() {
+        let mut model = ComposerModel::new();
+        model.set_access_mode_label("Read-write".to_string());
+        model.set_model_label("claude-sonnet-4".to_string());
+        assert_eq!(model.access_mode_label(), "Read-write");
+        assert_eq!(model.model_label(), "claude-sonnet-4");
+        assert_eq!(model.draft(), "", "reading labels leaves the draft empty");
+        assert!(!model.can_send(), "labels alone are not a message");
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_failed_send_keeps_affordance_state_and_never_auto_sends() {
+        let mut model = ComposerModel::new();
+        model.insert_mention("@file");
+        model.set_access_mode_label("Read-write".to_string());
+        model.set_model_label("claude-sonnet-4".to_string());
+        model.type_text(" please review");
+        let original = model.begin_send().expect("the draft has words");
+        assert_eq!(original, "@file please review");
+
+        settle_send(&mut model, Err("pty closed".to_string()));
+
+        assert!(model.state().is_failed());
+        assert_eq!(
+            model.draft(),
+            "",
+            "the failure does not re-dispatch the draft"
+        );
+        assert!(!model.can_send(), "no affordance auto-sent a new message");
+        assert_eq!(model.access_mode_label(), "Read-write");
+        assert_eq!(model.model_label(), "claude-sonnet-4");
+        assert_eq!(model.mention(), Some("@file"));
+        assert_eq!(
+            model.retry(),
+            Some(original),
+            "retry returns the original draft, not the affordance state"
+        );
+    }
+
     crate::orion_test!(
         fn the_composer_input_is_a_keyboard_tab_stop(cx: &mut gpui_kit::TestAppContext) {
             let composer = cx.update(|app| app.new(Composer::new));
@@ -936,6 +1204,99 @@ mod tests {
                     "the composer input must be reachable by Tab"
                 );
             });
+        }
+    );
+
+    crate::orion_test!(
+        fn affordance_controls_render_at_touch_target_height(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| Composer::new(cx));
+            cx.update(|_, app| {
+                root.update(app, |view, _| {
+                    view.model.set_access_mode_label("Read-write".to_string());
+                    view.model.set_model_label("claude-sonnet-4".to_string());
+                });
+            });
+            cx.update(|window, cx| window.render_frame(cx));
+
+            for id in [
+                "composer-affordance-mention",
+                "composer-affordance-command",
+                "composer-affordance-access",
+                "composer-affordance-model",
+            ] {
+                let height = cx.update(|window, _| {
+                    f32::from(
+                        window
+                            .try_find(id)
+                            .unwrap_or_else(|| panic!("{id} is rendered"))
+                            .bounds()
+                            .size
+                            .height,
+                    )
+                });
+                assert_eq!(height, TOUCH_TARGET_PX, "{id} keeps the 44px touch target");
+            }
+
+            assert!(
+                cx.update(|window, _| window.try_find("composer-send-button").is_none()),
+                "a whitespace draft has no enabled send control"
+            );
+            cx.update(|_, app| root.update(app, |view, _| view.model.type_text("hello")));
+            cx.update(|window, cx| window.render_frame(cx));
+            assert!(
+                cx.update(|window, _| window.try_find("composer-send-button").is_some()),
+                "words enable the send control"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn affordance_clicks_insert_local_tokens(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| Composer::new(cx));
+            cx.update(|window, cx| window.render_frame(cx));
+
+            cx.update(|window, cx| window.click("composer-affordance-mention-button", cx));
+            cx.update(|window, cx| window.click("composer-affordance-command-button", cx));
+
+            assert_eq!(
+                cx.update(|_, app| root.read(app).model().draft().to_string()),
+                "@file/review",
+                "both affordances edit only the draft"
+            );
+            assert!(
+                cx.update(|_, app| !root.read(app).model().state().is_pending()),
+                "inserting a token never sends"
+            );
+        }
+    );
+
+    crate::orion_test!(
+        fn a_blocked_prompt_keeps_affordances_inert(cx: &mut gpui_kit::TestAppContext) {
+            let (root, cx) = cx.add_window_view(|_, cx| Composer::new(cx));
+            cx.update(|_, app| root.update(app, |view, _| view.set_blocked(true)));
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert!(
+                cx.update(|window, _| window.try_find("composer-note-blocked").is_some()),
+                "the blocked state stays explicit"
+            );
+            for id in [
+                "composer-affordance-mention-button",
+                "composer-affordance-command-button",
+            ] {
+                cx.update(|window, cx| window.click(id, cx));
+            }
+            cx.update(|window, cx| window.render_frame(cx));
+
+            assert_eq!(
+                cx.update(|_, app| root.read(app).model().draft().to_string()),
+                "",
+                "a blocked composer does not dispatch an inserted token"
+            );
+            assert!(
+                cx.update(|window, _| window.try_find("composer-note-blocked").is_some()),
+                "the blocked note survives the clicks"
+            );
         }
     );
 }
