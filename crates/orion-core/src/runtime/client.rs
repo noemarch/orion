@@ -726,4 +726,121 @@ mod tests {
         assert_eq!(status, 201);
         assert_eq!(body, json!({ "created": true }));
     }
+
+    #[::core::prelude::v1::test]
+    fn in_process_and_remote_snapshots_agree_with_an_unknown_field() {
+        use crate::engine::{Engine, LaunchSpec, PaneConfig};
+        use crate::protocol::{AgentKind, TerminalSize};
+        use serde::Deserialize;
+
+        #[derive(Debug, Deserialize, PartialEq, Eq)]
+        struct VisiblePane {
+            pane_id: String,
+            label: String,
+            agent_status: String,
+            started_at: String,
+            model: Option<String>,
+        }
+
+        #[derive(Debug, Deserialize, PartialEq, Eq)]
+        struct LegacyVisiblePane {
+            pane_id: String,
+            label: String,
+            agent_status: String,
+            started_at: String,
+        }
+
+        fn first_pane<T: serde::de::DeserializeOwned>(snapshot: &Value) -> T {
+            serde_json::from_value(
+                snapshot
+                    .get("panes")
+                    .and_then(Value::as_array)
+                    .and_then(|panes| panes.first())
+                    .cloned()
+                    .expect("a snapshot with a pane"),
+            )
+            .expect("a pane with additive fields still parses")
+        }
+
+        let engine = Engine::new();
+        let pane = engine
+            .spawn_pane(PaneConfig {
+                id: "p1".to_string(),
+                workspace_id: "ws-1".to_string(),
+                tab_id: "t1".to_string(),
+                agent: AgentKind::Claude,
+                label: "Build".to_string(),
+                cwd: std::env::current_dir().expect("a working directory"),
+                spec: LaunchSpec {
+                    program: std::env::current_exe().expect("the test binary's path"),
+                    args: vec!["--list".to_string()],
+                },
+                args: Vec::new(),
+                shell_path: None,
+                launch_command: None,
+                size: TerminalSize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+            })
+            .expect("a stand-in pane spawns");
+        pane.set_reported_model(Some("claude-sonnet-4-5".to_string()));
+
+        let (health_status, health_body) = engine.http("GET", "/api/health", &Value::Null);
+        assert_eq!(health_status, 200);
+        assert_eq!(
+            health_body["orion"]["protocol"].as_u64(),
+            Some(framing::PROTOCOL_VERSION as u64),
+            "the engine advertises the wire version the client speaks"
+        );
+
+        let (status, body) = engine.http("GET", "/api/session", &Value::Null);
+        assert_eq!(status, 200);
+        let local_snapshot = body.get("snapshot").cloned().expect("a snapshot");
+
+        let mut remote_snapshot = local_snapshot.clone();
+        remote_snapshot["panes"][0]["future_capability"] = json!("ignored-by-this-build");
+
+        let (client_conn, daemon_conn) = make_pair();
+        std::thread::spawn(move || {
+            let mut d = daemon_conn;
+            let _ = d.read_frame();
+            let _ = d.write_frame(&json!({
+                "ok": true,
+                "version": "0",
+                "protocol": crate::engine::PROTOCOL_VERSION,
+            }));
+            if let Ok(Some(frame)) = d.read_frame() {
+                let id = frame.get("id").cloned().unwrap_or(Value::Null);
+                let _ = d.write_frame(&json!({
+                    "id": id,
+                    "type": "http-result",
+                    "status": 200u16,
+                    "body": { "snapshot": remote_snapshot },
+                }));
+            }
+        });
+
+        let client = RuntimeClient::new(Box::new(client_conn)).expect("client");
+        let (remote_status, remote_body) = client.http("GET", "/api/session", &Value::Null);
+        assert_eq!(remote_status, 200);
+        let remote_snapshot = remote_body.get("snapshot").cloned().expect("a snapshot");
+
+        let local: VisiblePane = first_pane(&local_snapshot);
+        let remote: VisiblePane = first_pane(&remote_snapshot);
+        assert_eq!(
+            local, remote,
+            "both surfaces project the same visible labels"
+        );
+        assert_eq!(local.model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(remote.model.as_deref(), Some("claude-sonnet-4-5"));
+
+        let legacy: LegacyVisiblePane = first_pane(&remote_snapshot);
+        assert_eq!(legacy.pane_id, "p1");
+        assert_eq!(legacy.label, "Build");
+        assert_eq!(legacy.agent_status, local.agent_status);
+        assert_eq!(legacy.started_at, local.started_at);
+    }
 }
