@@ -222,78 +222,81 @@ fn agent_spec() -> Option<(LaunchSpec, &'static str, AgentKind)> {
     }
 }
 
-orion_ui::orion_test!(
-    fn the_terminal_startup_timeline_separates_the_agent_from_the_app(
-        cx: &mut gpui_kit::TestAppContext,
-    ) {
-        if find_in_path("claude").is_none() {
-            eprintln!("skipped: claude is not on PATH");
-            return;
-        }
-        // The timeline is on whether or not the reader set the variable.
-        trace::force_enabled();
-        // The pump waits on the channel, so the executor always has a task
-        // outstanding: parking is allowed rather than a panic.
-        cx.background_executor.allow_parking();
+#[::core::prelude::v1::test]
+#[ignore = "asserts a 200 ms wall-clock budget for the control tab switch; a loaded runner changes the number without changing the path, so it runs in the dedicated real-agent CI job"]
+fn the_terminal_startup_timeline_separates_the_agent_from_the_app() {
+    orion_ui::test_support::run_ui_test(
+        "the_terminal_startup_timeline_separates_the_agent_from_the_app",
+        |cx: &mut gpui_kit::TestAppContext| {
+            if find_in_path("claude").is_none() {
+                eprintln!("skipped: claude is not on PATH");
+                return;
+            }
+            // The timeline is on whether or not the reader set the variable.
+            trace::force_enabled();
+            // The pump waits on the channel, so the executor always has a task
+            // outstanding: parking is allowed rather than a panic.
+            cx.background_executor.allow_parking();
 
-        let mut measurements = Vec::new();
+            let mut measurements = Vec::new();
 
-        // A throwaway store: the measurement must not disturb the reader's own
-        // saved session.
-        let data_dir =
-            std::env::temp_dir().join(format!("orion-startup-timeline-{}", std::process::id()));
-        std::fs::create_dir_all(&data_dir).expect("a temp data dir");
-        let engine = Engine::with_store(orion_core::engine::store::Store::at(data_dir.clone()));
+            // A throwaway store: the measurement must not disturb the reader's own
+            // saved session.
+            let data_dir =
+                std::env::temp_dir().join(format!("orion-startup-timeline-{}", std::process::id()));
+            std::fs::create_dir_all(&data_dir).expect("a temp data dir");
+            let engine = Engine::with_store(orion_core::engine::store::Store::at(data_dir.clone()));
 
-        if let Some((spec, label)) = control_spec() {
-            measurements.push(measure(
-                cx,
-                &engine,
-                label,
-                spec,
-                AgentKind::Claude,
-                Duration::from_secs(20),
-            ));
-        }
-        if let Some((spec, label, kind)) = agent_spec() {
-            measurements.push(measure(
-                cx,
-                &engine,
-                label,
-                spec,
-                kind,
-                // An agent CLI is slow to say anything, and slower still on a
-                // loaded machine. The bound is generous because the measurement
-                // is about the agent's own startup, not about a deadline.
-                Duration::from_secs(120),
-            ));
-        } else {
-            println!("\n=== agent: claude ===\nnot on this machine's PATH; skipped");
-        }
+            if let Some((spec, label)) = control_spec() {
+                measurements.push(measure(
+                    cx,
+                    &engine,
+                    label,
+                    spec,
+                    AgentKind::Claude,
+                    Duration::from_secs(20),
+                ));
+            }
+            if let Some((spec, label, kind)) = agent_spec() {
+                measurements.push(measure(
+                    cx,
+                    &engine,
+                    label,
+                    spec,
+                    kind,
+                    // An agent CLI is slow to say anything, and slower still on a
+                    // loaded machine. The bound is generous because the measurement
+                    // is about the agent's own startup, not about a deadline.
+                    Duration::from_secs(120),
+                ));
+            } else {
+                println!("\n=== agent: claude ===\nnot on this machine's PATH; skipped");
+            }
 
-        let _ = std::fs::remove_dir_all(&data_dir);
+            let _ = std::fs::remove_dir_all(&data_dir);
 
-        assert!(
-            !measurements.is_empty(),
-            "at least the control shell must run"
-        );
-        for measurement in &measurements {
-            report(measurement);
-        }
+            assert!(
+                !measurements.is_empty(),
+                "at least the control shell must run"
+            );
+            for measurement in &measurements {
+                report(measurement);
+            }
 
-        // The control run is the app's own cost: the PTY opens, the child starts
-        // and the grid fills. It must be fast enough for the shell to feel alive.
-        let control = measurements
-            .iter()
-            .find(|measurement| measurement.label.starts_with("control"))
-            .expect("the control run happened");
-        assert!(
-            control.switch_ms < 200.0,
-            "the terminal tab must show content within 200 ms, took {:.1} ms",
-            control.switch_ms
-        );
-    }
-);
+            // The control run is the app's own cost: the PTY opens, the child starts
+            // and the grid fills. It must be fast enough for the shell to feel alive.
+            let control = measurements
+                .iter()
+                .find(|measurement| measurement.label.starts_with("control"))
+                .expect("the control run happened");
+            assert!(
+                control.switch_ms < 200.0,
+                "the terminal tab must show content within 200 ms, took {:.1} ms",
+                control.switch_ms
+            );
+        },
+    );
+}
 
 /// One blocking call the shell makes, and how long it took.
 struct Step {
