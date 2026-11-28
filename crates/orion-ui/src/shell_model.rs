@@ -246,6 +246,16 @@ pub const REVIEW_MIN_WIDTH_PX: f32 = 320.0;
 /// Window width below which the review pane collapses away (px).
 pub const REVIEW_COLLAPSE_BREAKPOINT_PX: f32 = 1200.0;
 
+/// What the right-hand column shows. Review keeps the diff review; Transcript
+/// shows the same agent's live transcript. Pure state, so the shell can switch
+/// modes without a window and the two bodies share one column slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RightColumnMode {
+    #[default]
+    Review,
+    Transcript,
+}
+
 /// The three columns of the reference layout: session list, conversation, and
 /// diff review. When the window is too narrow for all three, the review pane
 /// collapses and its room goes to the conversation.
@@ -267,10 +277,15 @@ pub fn reference_layout(width: f32) -> ReferenceLayout {
             collapse_review: true,
         }
     } else {
+        // The three columns must fit the window. The review keeps its readable
+        // minimum, and the conversation gives up room only in the band where
+        // 300 + 670 + 320 would overflow (1200..1290px).
+        let conversation_w =
+            CONVERSATION_WIDTH_PX.min(width - SIDEBAR_WIDTH_REFERENCE_PX - REVIEW_MIN_WIDTH_PX);
         ReferenceLayout {
             sidebar_w: SIDEBAR_WIDTH_REFERENCE_PX,
-            conversation_w: CONVERSATION_WIDTH_PX,
-            review_w: (width - SIDEBAR_WIDTH_REFERENCE_PX - CONVERSATION_WIDTH_PX)
+            conversation_w,
+            review_w: (width - SIDEBAR_WIDTH_REFERENCE_PX - conversation_w)
                 .max(REVIEW_MIN_WIDTH_PX),
             collapse_review: false,
         }
@@ -547,14 +562,56 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn reference_layout_at_1280_clamps_review_to_its_minimum() {
-        // 1280 - 300 - 670 = 310, under REVIEW_MIN_WIDTH_PX, so it clamps.
+    fn right_column_mode_defaults_to_review() {
+        assert_eq!(RightColumnMode::default(), RightColumnMode::Review);
+        assert_ne!(RightColumnMode::Review, RightColumnMode::Transcript);
+    }
+
+    #[::core::prelude::v1::test]
+    fn reference_layout_at_1280_fits_within_the_window() {
         let layout = reference_layout(1280.0);
         assert_eq!(layout.sidebar_w, 300.0);
-        assert_eq!(layout.conversation_w, 670.0);
+        assert_eq!(layout.conversation_w, 660.0);
         assert_eq!(layout.review_w, REVIEW_MIN_WIDTH_PX);
-        assert_eq!(layout.review_w, 320.0);
         assert!(!layout.collapse_review);
+        assert!(layout.sidebar_w + layout.conversation_w + layout.review_w <= 1280.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn reference_layout_at_1199_collapses_review() {
+        let layout = reference_layout(1199.0);
+        assert_eq!(layout.sidebar_w, 300.0);
+        assert_eq!(layout.review_w, 0.0);
+        assert!(layout.collapse_review);
+        assert_eq!(
+            layout.sidebar_w + layout.conversation_w + layout.review_w,
+            1199.0
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn reference_layout_shrinks_conversation_only_in_the_clamp_band() {
+        // Below the collapse breakpoint the review is gone and the conversation
+        // owns the rest of the window.
+        assert!(reference_layout(1199.0).collapse_review);
+        assert_eq!(reference_layout(1199.0).conversation_w, 899.0);
+        // Inside 1200..1290 the conversation gives up exactly what the review
+        // needs to keep its 320px floor.
+        assert_eq!(reference_layout(1200.0).conversation_w, 580.0);
+        assert_eq!(reference_layout(1280.0).conversation_w, 660.0);
+        assert_eq!(reference_layout(1289.0).conversation_w, 669.0);
+        // At and above 1290 the conversation keeps its full reference width and
+        // the review takes the surplus.
+        assert_eq!(reference_layout(1290.0).conversation_w, 670.0);
+        assert_eq!(reference_layout(1290.0).review_w, 320.0);
+        assert_eq!(reference_layout(1600.0).conversation_w, 670.0);
+        assert_eq!(reference_layout(1600.0).review_w, 630.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn collapsed_review_column_is_never_mounted() {
+        assert!(!review_column_visible(true, true, true, false));
+        assert!(review_column_visible(true, false, true, false));
     }
 
     #[::core::prelude::v1::test]
